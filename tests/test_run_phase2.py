@@ -2,6 +2,7 @@ from router import RouteResult
 from run_phase2 import (
     brier_score,
     evaluate_cases,
+    format_report,
     run_curve,
     summarize_confidence_bins,
     summarize_full,
@@ -82,6 +83,28 @@ def test_errors_are_misses_in_curve_accuracy():
     assert summary["errors"] == 1
     assert summary["top1_accuracy"] == 0.5
     assert summary["top3_accuracy"] == 0.5
+
+
+def test_curve_report_shows_wrong_errors_and_total_misses():
+    def fake_route(task, step, history=None, catalog=None):
+        if task == "error":
+            raise RuntimeError("api down")
+        return routed("files_read_document", 0.9)
+
+    error_case = case("error", "files_read_document")
+    error_case["task"] = "error"
+    data = run_curve([case("ok", "files_read_document"), error_case], fake_route)
+
+    summary = data[15]["summary"]
+    assert summary["wrong"] == 0
+    assert summary["errors"] == 1
+    assert summary["total_misses"] == 1
+
+    report = format_report({15: data[15]}, None)
+    assert "wrong  errors  total_misses" in report
+    curve_line = next(line for line in report.splitlines() if line.lstrip().startswith("15"))
+    fields = curve_line.split()
+    assert fields[6:9] == ["0", "1", "1"]
 
 
 def test_errors_are_misses_in_full_accuracy():

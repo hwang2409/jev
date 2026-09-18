@@ -1,55 +1,9 @@
 """Run the routing evalset through Jev and report accuracy + calibration."""
 
-import json
-import statistics
 import time
 from pathlib import Path
 
-from router import route
-
-
-def load_cases(path: str = "evalset.jsonl") -> list[dict]:
-    lines = Path(path).read_text().strip().splitlines()
-    return [json.loads(line) for line in lines]
-
-
-def top_k(probabilities: dict[str, float], k: int) -> list[str]:
-    return sorted(probabilities, key=probabilities.get, reverse=True)[:k]
-
-
-def evaluate(cases: list[dict], route_fn=route) -> list[dict]:
-    results = []
-    for c in cases:
-        row = dict(c)
-        try:
-            r = route_fn(c["task"], c["step"], history=c["history"])
-            row.update(
-                tool=r.tool,
-                probabilities=r.probabilities,
-                confidence=r.confidence,
-                needs_tool=r.needs_tool,
-                step_clarity=r.step_clarity,
-                usage=r.usage,
-            )
-        except Exception as exc:  # noqa: BLE001 - eval must survive bad calls
-            row["error"] = str(exc)
-        results.append(row)
-    return results
-
-
-def _mean(values: list[float]) -> float | None:
-    return round(statistics.mean(values), 4) if values else None
-
-
-def auc(higher: list[float], lower: list[float]) -> float | None:
-    if not higher or not lower:
-        return None
-    wins = sum(
-        1 if high > low else 0.5 if high == low else 0
-        for high in higher
-        for low in lower
-    )
-    return round(wins / (len(higher) * len(lower)), 4)
+from evalcore import _mean, auc, evaluate, load_cases, top_k
 
 
 def summarize(results: list[dict]) -> dict:

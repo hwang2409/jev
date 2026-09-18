@@ -7,8 +7,7 @@ import time
 from pathlib import Path
 
 from catalogs import CATALOG_120, SUBSETS
-from router import route
-from run_eval import _mean, top_k
+from evalcore import _mean, evaluate as evaluate_cases, load_cases, top_k
 
 
 CURVE_SIZES = [15, 30, 60, 120]
@@ -18,39 +17,6 @@ BIN_RANGES = [
     (0.8, 0.95, "[0.8-0.95)"),
     (0.95, 1.0, "[0.95-1.0]"),
 ]
-
-
-def load_cases(path: str) -> list[dict]:
-    lines = Path(path).read_text().strip().splitlines()
-    return [json.loads(line) for line in lines]
-
-
-def evaluate_cases(cases: list[dict], catalog: dict[str, str], route_fn=None) -> list[dict]:
-    """Route cases with one catalog and keep errors as result rows."""
-    route_fn = route_fn or route
-    results = []
-    for case in cases:
-        row = dict(case)
-        try:
-            routed = route_fn(
-                case["task"],
-                case["step"],
-                history=case["history"],
-                catalog=catalog,
-            )
-            row.update(
-                tool=routed.tool,
-                probabilities=routed.probabilities,
-                confidence=routed.confidence,
-                chosen_probability=routed.probabilities[routed.tool],
-                needs_tool=routed.needs_tool,
-                step_clarity=routed.step_clarity,
-                usage=routed.usage,
-            )
-        except Exception as exc:  # noqa: BLE001 - eval must survive bad calls
-            row["error"] = str(exc)
-        results.append(row)
-    return results
 
 
 def _successful(results: list[dict]) -> list[dict]:
@@ -72,6 +38,8 @@ def summarize_routing(results: list[dict]) -> dict:
     return {
         "cases": len(results),
         "errors": len(results) - len(successful),
+        "wrong": len(incorrect),
+        "total_misses": len(incorrect) + len(results) - len(successful),
         "top1_accuracy": _accuracy(len(correct), len(results)),
         "top3_accuracy": _accuracy(len(top3_hits), len(results)),
         "confusions": [
@@ -158,7 +126,7 @@ def format_report(curve: dict[int, dict] | None, full: dict | None) -> str:
         lines.extend(
             [
                 "curve",
-                "size  cases  top1    top3    conf-ok  conf-wrong  wrong  input  output",
+                "size  cases  top1    top3    conf-ok  conf-wrong  wrong  errors  total_misses  input  output",
             ]
         )
         for size, data in curve.items():
@@ -168,7 +136,8 @@ def format_report(curve: dict[int, dict] | None, full: dict | None) -> str:
                 f"{summary['top1_accuracy']!s:<7} {summary['top3_accuracy']!s:<7} "
                 f"{summary['mean_confidence_correct']!s:<8} "
                 f"{summary['mean_confidence_incorrect']!s:<11} "
-                f"{len(summary['confusions']):>5} "
+                f"{summary['wrong']:>5} {summary['errors']:>6} "
+                f"{summary['total_misses']:>12} "
                 f"{summary['total_input_tokens']:>5} {summary['total_output_tokens']:>6}"
             )
     if full is not None:
