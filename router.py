@@ -72,3 +72,27 @@ def parse_response(data: dict) -> RouteResult:
         step_clarity=answers["step_clarity"]["noul"],
         usage=data["usage"],
     )
+
+
+def route(
+    task: str,
+    step: str,
+    history: list[str] | None = None,
+    catalog: dict[str, str] | None = None,
+    session=None,
+    api_key: str | None = None,
+) -> RouteResult:
+    body = build_request(task, step, history or [], catalog or CATALOG)
+    key = api_key or os.environ["JEV_API_KEY"]
+    sess = session or requests.Session()
+    headers = {"Authorization": f"Bearer {key}"}
+    delay = 1.0
+    for attempt in range(3):
+        resp = sess.post(API_URL, json=body, headers=headers, timeout=60)
+        if resp.status_code in (429, 529) and attempt < 2:
+            time.sleep(delay)
+            delay *= 2
+            continue
+        resp.raise_for_status()
+        return parse_response(resp.json())
+    raise AssertionError("unreachable")
