@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import re
 import subprocess
 import sys
 import time
@@ -65,6 +64,11 @@ def verify_checks(scratch_dir: Path, checks: Sequence[Mapping[str, str]]) -> lis
             continue
         if "equals" in check:
             results.append(content == check["equals"])
+        elif "normalized_equals" in check:
+            results.append(
+                " ".join(content.split())
+                == " ".join(check["normalized_equals"].split())
+            )
         elif "contains" in check:
             results.append(check["contains"] in content)
         else:
@@ -85,51 +89,102 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         if event.get("type") == "tool_call" and isinstance(event.get("name"), str)
     ]
     api_calls = 0
-    input_tokens = 0
-    output_tokens = 0
-    cache_read_tokens = 0
+    usage_totals = {
+        "claude": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+        "jev": {"input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0},
+    }
     route_calls = 0
     route_expansions = 0
     unrouted_attempts = 0
+    router_errors = 0
     final_message_present = False
+
+    def add_usage(service: str, usage: Mapping[str, Any]) -> None:
+        totals = usage_totals.get(service)
+        if totals is None:
+            return
+        totals["input_tokens"] += _number(usage.get("input_tokens"))
+        totals["output_tokens"] += _number(usage.get("output_tokens"))
+        totals["cache_read_tokens"] += _number(
+            usage.get("cache_read_input_tokens")
+        )
 
     for event in events:
         event_type = event.get("type")
-        if event_type == "usage":
+        if event_type == "tool_call":
+            if event.get("name") == "route":
+                route_calls += 1
+        elif event_type == "usage":
             api_calls += 1
             usage = event.get("usage")
             if isinstance(usage, Mapping):
-                input_tokens += _number(usage.get("input_tokens"))
-                output_tokens += _number(usage.get("output_tokens"))
-                cache_read_tokens += _number(usage.get("cache_read_input_tokens"))
+                service = event.get("service", "claude")
+                add_usage(service if service == "jev" else "claude", usage)
         elif event_type == "tool_result":
             name = event.get("name")
             content = event.get("content")
             if name == "route":
-                route_calls += 1
                 if isinstance(content, str) and content.startswith("routed tools:"):
                     choices = content.removeprefix("routed tools:").strip().split(", ")
                     if len(choices) == 3:
                         route_expansions += 1
-            if (
-                event.get("is_error") is True
-                and isinstance(content, str)
-                and re.search(r"\b(?:route\w*|routing)\b", content.lower())
-            ):
-                unrouted_attempts += 1
-        elif event_type == "message":
-            if event.get("role") == "assistant" and isinstance(event.get("text"), str):
-                final_message_present = True
+                if (
+                    event.get("is_error") is True
+                    and isinstance(content, str)
+                    and content.startswith("router failed: ")
+                ):
+                    router_errors += 1
+            structured = event.get("structured_content")
+            if isinstance(structured, Mapping):
+                service = structured.get("service")
+                usage = structured.get("usage")
+                if service == "jev" and isinstance(usage, Mapping):
+                    add_usage("jev", usage)
+                error = structured.get("error")
+                if (
+                    event.get("is_error") is True
+                    and isinstance(error, Mapping)
+                    and error.get("tool") == name
+                    and error.get("kind") == "error"
+                    and error.get("hint") == ""
+                    and error.get("message") == content
+                ):
+                    unrouted_attempts += 1
+        elif (
+            event_type == "message"
+            and event.get("role") == "assistant"
+            and isinstance(event.get("text"), str)
+        ):
+            final_message_present = True
 
+    claude = usage_totals["claude"]
+    jev = usage_totals["jev"]
+    combined = {
+        key: claude[key] + jev[key]
+        for key in ("input_tokens", "output_tokens", "cache_read_tokens")
+    }
+    claude_tokens = sum(claude.values())
+    jev_tokens = sum(jev.values())
+    combined_tokens = sum(combined.values())
     return {
         "tool_calls": tool_calls,
         "api_calls": api_calls,
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "cache_read_tokens": cache_read_tokens,
+        "claude_input_tokens": claude["input_tokens"],
+        "claude_output_tokens": claude["output_tokens"],
+        "claude_cache_read_tokens": claude["cache_read_tokens"],
+        "jev_input_tokens": jev["input_tokens"],
+        "jev_output_tokens": jev["output_tokens"],
+        "jev_cache_read_tokens": jev["cache_read_tokens"],
+        "input_tokens": combined["input_tokens"],
+        "output_tokens": combined["output_tokens"],
+        "cache_read_tokens": combined["cache_read_tokens"],
+        "claude_tokens": claude_tokens,
+        "jev_tokens": jev_tokens,
+        "combined_tokens": combined_tokens,
         "route_calls": route_calls,
         "route_expansions": route_expansions,
         "unrouted_attempts": unrouted_attempts,
+        "router_errors": router_errors,
         "final_message_present": final_message_present,
     }
 
@@ -249,12 +304,22 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
         "checks_passed": checks_passed,
         "tool_calls": summary["tool_calls"],
         "api_calls": summary["api_calls"],
+        "claude_input_tokens": summary["claude_input_tokens"],
+        "claude_output_tokens": summary["claude_output_tokens"],
+        "claude_cache_read_tokens": summary["claude_cache_read_tokens"],
+        "jev_input_tokens": summary["jev_input_tokens"],
+        "jev_output_tokens": summary["jev_output_tokens"],
+        "jev_cache_read_tokens": summary["jev_cache_read_tokens"],
         "input_tokens": summary["input_tokens"],
         "output_tokens": summary["output_tokens"],
         "cache_read_tokens": summary["cache_read_tokens"],
+        "claude_tokens": summary["claude_tokens"],
+        "jev_tokens": summary["jev_tokens"],
+        "combined_tokens": summary["combined_tokens"],
         "route_calls": summary["route_calls"],
         "route_expansions": summary["route_expansions"],
         "unrouted_attempts": summary["unrouted_attempts"],
+        "router_errors": summary["router_errors"],
         "wall_seconds": round(wall_seconds, 3),
         "timed_out": process["timed_out"],
         "returncode": process["returncode"],
@@ -279,7 +344,11 @@ def _print_report(records: Sequence[Mapping[str, Any]]) -> None:
             cells.append(
                 f"{'ok' if record['completed'] and checks else 'fail'} "
                 f"tools={len(record['tool_calls'])} "
-                f"in={record['input_tokens']} out={record['output_tokens']}"
+                f"claude={record['claude_tokens']} "
+                f"jev={record['jev_tokens']} "
+                f"cache_read={record['cache_read_tokens']} "
+                f"router_errors={record['router_errors']} "
+                f"combined={record['combined_tokens']}"
             )
         print(f"{task_id:<20} {cells[0]:<25} {cells[1]}")
     print("\nmode totals")
@@ -287,11 +356,18 @@ def _print_report(records: Sequence[Mapping[str, Any]]) -> None:
         mode_records = [record for record in records if record["mode"] == mode]
         completed = sum(record["completed"] for record in mode_records)
         checks = sum(all(record["checks_passed"]) for record in mode_records)
-        tokens = sum(
-            record["input_tokens"] + record["output_tokens"] for record in mode_records
+        claude_tokens = sum(record["claude_tokens"] for record in mode_records)
+        jev_tokens = sum(record["jev_tokens"] for record in mode_records)
+        cache_read_tokens = sum(
+            record["cache_read_tokens"] for record in mode_records
         )
+        router_errors = sum(record["router_errors"] for record in mode_records)
+        combined_tokens = sum(record["combined_tokens"] for record in mode_records)
         print(
-            f"{mode}: runs={len(mode_records)} completed={completed} checks={checks} tokens={tokens}"
+            f"{mode}: runs={len(mode_records)} completed={completed} checks={checks} "
+            f"claude_tokens={claude_tokens} jev_tokens={jev_tokens} "
+            f"cache_read={cache_read_tokens} router_errors={router_errors} "
+            f"combined_tokens={combined_tokens}"
         )
 
 

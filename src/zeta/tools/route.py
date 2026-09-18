@@ -82,7 +82,13 @@ async def _route(
         message = _route_text(result.tool, result.probabilities, result.confidence)
         if result.step_clarity < 0.3:
             message += "; restate the step more concretely"
-        return _success_result(text_block(message))
+        return _success_result(
+            text_block(message),
+            structured_content={
+                "service": "jev",
+                "usage": dict(result.usage),
+            },
+        )
     except Exception as exc:  # noqa: BLE001 - routing must fail open
         if execution_context is not None:
             sink = execution_context.router_tools_sink

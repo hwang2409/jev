@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
 from zeta.loop import AgentLoop
 from zeta.providers.jev import JevRouterError, RouteResult
+from zeta.runtime.driver import drive_turn
 from zeta.settings import load_settings, resolve
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
@@ -21,14 +24,16 @@ async def collect(events):
     return [event async for event in events]
 
 
-def routed(tool: str, confidence: float = 0.9, probabilities=None) -> RouteResult:
+def routed(
+    tool: str, confidence: float = 0.9, probabilities=None, usage=None
+) -> RouteResult:
     return RouteResult(
         tool=tool,
         probabilities=probabilities or {tool: confidence},
         confidence=confidence,
         needs_tool=1.0,
         step_clarity=0.8,
-        usage={},
+        usage=usage or {},
     )
 
 
@@ -83,6 +88,47 @@ async def test_router_advertises_route_then_the_selected_tool(
 
     assert {schema["name"] for schema in loop.backend.calls[0][1]} == {"route"}
     assert {schema["name"] for schema in loop.backend.calls[1][1]} == {"route", "read"}
+
+
+@pytest.mark.asyncio
+async def test_headless_route_event_preserves_jev_usage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def route_with_usage(*_args) -> RouteResult:
+        return routed("read", usage={"input_tokens": 12, "output_tokens": 3})
+
+    monkeypatch.setattr(route_module, "route_step", route_with_usage)
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "read it"})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    assert (
+        await drive_turn(
+            loop,
+            "start",
+            format="json",
+            stdout=stdout,
+            stderr=stderr,
+        )
+        == 0
+    )
+    events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    route_result = next(
+        event
+        for event in events
+        if event.get("type") == "tool_result" and event.get("name") == "route"
+    )
+
+    assert route_result["structured_content"] == {
+        "service": "jev",
+        "usage": {"input_tokens": 12, "output_tokens": 3},
+    }
 
 
 @pytest.mark.asyncio

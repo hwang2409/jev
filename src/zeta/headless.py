@@ -12,8 +12,9 @@ JSONL event schema (``--format json``), one JSON object per line:
   serializes within ``TOOL_RESULT_MAX_BYTES``; otherwise a truncated JSON string
   with a ``... [truncated: N bytes]`` suffix.
 - ``{"type": "tool_result", "id": <str>, "name": <str>, "is_error": <bool>,
-     "content": <str>}`` — ``content`` is trimmed the same way once it exceeds
-  ``TOOL_RESULT_MAX_BYTES``.
+     "content": <str>, "structured_content": <object>}`` — ``content`` is trimmed
+  the same way once it exceeds ``TOOL_RESULT_MAX_BYTES``; ``structured_content``
+  is present when the tool returns structured data.
 - ``{"type": "usage", "usage": <object>}``
 - ``{"type": "retry", "text": <str>, "retry": <int>, "delay": <float>,
      "is_stall": <bool>}`` — emitted for provider retries (pre-stream and

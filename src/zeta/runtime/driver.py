@@ -82,16 +82,16 @@ async def drive_turn(
                 continue
             name = event.tool_call.name if event.tool_call is not None else ""
             if format == "json":
-                _emit_jsonl(
-                    stdout,
-                    {
-                        "type": "tool_result",
-                        "id": result.tool_call_id,
-                        "name": name,
-                        "is_error": bool(result.is_error),
-                        "content": _bounded(result.content),
-                    },
-                )
+                payload: dict[str, Any] = {
+                    "type": "tool_result",
+                    "id": result.tool_call_id,
+                    "name": name,
+                    "is_error": bool(result.is_error),
+                    "content": _bounded(result.content),
+                }
+                if result.structured_content is not None:
+                    payload["structured_content"] = result.structured_content
+                _emit_jsonl(stdout, payload)
             if result.is_error and result.content == DENIAL_MARKER:
                 stderr.write(
                     f"zeta: denied tool call {name!r} "
@@ -155,4 +155,3 @@ async def drive_turn(
             {"type": "message", "role": "assistant", "text": final_text},
         )
     return 0
-
