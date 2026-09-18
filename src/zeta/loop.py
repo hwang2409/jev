@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import shlex
@@ -58,6 +59,7 @@ from .mcp.commands import (
 )
 from .mcp.prompt_commands import SlashModelInput
 from .prompts import load_identity
+from .providers.jev import auto_route
 from .skills import SkillCatalog
 from .skills.agent_catalog import AgentCatalog
 from .tools import ToolHandler, ToolRegistry, ToolStreamPublisher
@@ -213,6 +215,7 @@ class AgentLoop:
         agent_tree: AgentTree | None = None,
         background_owner: BackgroundAgentOwner | None = None,
         router_mode: bool = True,
+        router_style: str = "auto",
         jev_compaction: bool = True,
     ) -> None:
         if type(agent_depth) is not int or not 0 <= agent_depth <= MAX_AGENT_DEPTH:
@@ -238,11 +241,30 @@ class AgentLoop:
         self._background_child_watchers: dict[str, asyncio.Task[Any]] = {}
         self._background_event_sink: Callable[[StreamEvent], None] | None = None
         self.router_mode = router_mode
+        if router_style not in {"tool", "auto"}:
+            raise ValueError("router style must be 'tool' or 'auto'")
+        self.router_style = router_style
         self._routed_tools: list[str] = []
         self._router_fail_open = False
         self._router_recent_steps: list[str] = []
         self._router_batch_has_route = False
         self._router_batch_allowed_tools: set[str] | None = None
+        self._router_auto_allowed_tools: set[str] = set()
+        self._router_auto_fail_open = False
+        self._auto_invoke_schema: ToolSchema = {
+            "name": "invoke",
+            "description": "Invoke the routed tool with the supplied arguments.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tool": {"type": "string"},
+                    "args": {"type": "object"},
+                },
+                "required": ["tool", "args"],
+                "additionalProperties": False,
+            },
+        }
+        self._auto_tool_surface = [self._auto_invoke_schema]
         self.unrouted_attempts = 0
         self._mcp_notice_sink: Callable[[str], None] | None = None
         self._mcp_prompt_refresh: Callable[[MCPMount], None] | None = None
@@ -359,6 +381,15 @@ class AgentLoop:
             active = [
                 schema for schema in self.tool_schemas if schema.get("name") != "route"
             ]
+        elif self.router_style == "auto":
+            if self._router_auto_fail_open:
+                active = [
+                    schema
+                    for schema in self.tool_schemas
+                    if schema.get("name") not in {"route", "invoke"}
+                ]
+            else:
+                active = self._auto_tool_surface
         elif self._router_fail_open:
             active = list(self.tool_schemas)
         else:
@@ -368,6 +399,8 @@ class AgentLoop:
                 for schema in self.tool_schemas
                 if schema.get("name") in allowed_names
             ]
+        if self.router_style == "auto" and self.router_mode:
+            return active
         if not self._plan_mode:
             return active
         allowed = PLAN_MODE_TOOLS | {"agent"}
@@ -387,6 +420,10 @@ class AgentLoop:
 
     def _router_start_batch(self, calls: Sequence[ToolCall]) -> None:
         if not self.router_mode:
+            return
+        if self.router_style == "auto":
+            self._router_batch_has_route = False
+            self._router_batch_allowed_tools = set(self._router_auto_allowed_tools)
             return
         self._router_batch_has_route = any(call.name == "route" for call in calls)
         self._router_batch_allowed_tools = {
@@ -413,6 +450,8 @@ class AgentLoop:
     def _router_allows_tool(self, tool_name: str) -> bool:
         if not self.router_mode:
             return True
+        if self.router_style == "auto" and self._router_auto_fail_open:
+            return True
         if tool_name == "route" or self._router_fail_open:
             return True
         allowed = self._router_batch_allowed_tools
@@ -425,6 +464,14 @@ class AgentLoop:
         return tool_name in allowed
 
     def _router_rejection(self, tool_call: ToolCall) -> ToolResult | None:
+        if self.router_mode and self.router_style == "auto" and tool_call.name == "invoke":
+            result = ToolResult(
+                tool_call.id,
+                "invoke requires a routed tool name and args object",
+                is_error=True,
+                structured_content={"error_kind": "invalid_invoke"},
+            )
+            return self.tool_registry.govern_tool_result(tool_call, result)
         if (
             not self.router_mode
             or self._router_allows_tool(tool_call.name)
@@ -434,9 +481,13 @@ class AgentLoop:
         self.unrouted_attempts += 1
         _logger.warning("unrouted tool attempt: %s", tool_call.name)
         message = (
-            "not available this turn — describe your step to route first: "
-            f"{tool_call.name}"
-        )
+            (
+                "not available this turn — state what you need in text for the "
+                "next turn: "
+            )
+            if self.router_style == "auto"
+            else "not available this turn — describe your step to route first: "
+        ) + tool_call.name
         result = ToolResult(
             tool_call.id,
             message,
@@ -446,8 +497,170 @@ class AgentLoop:
         return self.tool_registry.govern_tool_result(tool_call, result)
 
     def _router_result(self, tool_name: str, result: ToolResult) -> None:
-        if self.router_mode and tool_name == "route" and result.is_error:
+        if (
+            self.router_mode
+            and self.router_style == "tool"
+            and tool_name == "route"
+            and result.is_error
+        ):
             self._record_routed_tools(None)
+
+    def _auto_route_inputs(
+        self, user_text: str
+    ) -> tuple[str, str, list[dict[str, str]]]:
+        messages = self.store.messages()
+        tool_names = {
+            block.tool_call.id: block.tool_call.name
+            for message in messages
+            for block in message.content
+            if isinstance(block, ToolUseContent)
+        }
+        assistant = ""
+        results: list[dict[str, str]] = []
+        for message in reversed(messages):
+            if not assistant and message.role is MessageRole.ASSISTANT:
+                assistant = "".join(
+                    block.text
+                    for block in message.content
+                    if isinstance(block, TextContent)
+                )[:300]
+            if message.tool_result is not None and len(results) < 2:
+                results.append(
+                    {
+                        "tool": tool_names.get(message.tool_result.tool_call_id, ""),
+                        "excerpt": message.tool_result.content[:200],
+                    }
+                )
+            if assistant and len(results) >= 2:
+                break
+        results.reverse()
+        return user_text[:500], assistant, results
+
+    def _auto_catalog(self) -> dict[str, str]:
+        catalog: dict[str, str] = {}
+        for schema in self.tool_registry.schemas:
+            name = schema.get("name")
+            if not isinstance(name, str) or name in {"route", "invoke"}:
+                continue
+            description = schema.get("description", "")
+            if not isinstance(description, str):
+                description = ""
+            catalog[name] = description.splitlines()[0][:150] if description else ""
+        return catalog
+
+    async def _prepare_auto_route(
+        self, user_text: str
+    ) -> tuple[list[ToolSchema], dict[str, object]]:
+        task, last_assistant, last_results = self._auto_route_inputs(user_text)
+        try:
+            result = await auto_route(
+                task,
+                last_assistant,
+                last_results,
+                self._auto_catalog(),
+            )
+        except Exception as exc:  # noqa: BLE001 - auto routing fails open
+            self._router_auto_allowed_tools = set()
+            self._router_auto_fail_open = True
+            return [], {"error": str(exc), "advertised": []}
+        if result.needs_tool < 0.35:
+            names: list[str] = []
+        elif result.confidence >= 0.8:
+            names = [result.tool]
+        else:
+            names = [
+                name
+                for name, _probability in sorted(
+                    result.probabilities.items(),
+                    key=lambda item: item[1],
+                    reverse=True,
+                )[:3]
+            ]
+        available = {
+            name
+            for name in self.tool_registry.registered_names
+            if name not in {"route", "invoke"}
+        }
+        names = [name for name in names if name in available]
+        self._router_auto_allowed_tools = set(names)
+        self._router_auto_fail_open = False
+        schemas = [
+            schema
+            for schema in self.tool_registry.schemas
+            if schema.get("name") in names
+        ]
+        return schemas, {
+            "tool": result.tool,
+            "confidence": result.confidence,
+            "needs_tool": result.needs_tool,
+            "advertised": names,
+            "usage": dict(result.usage),
+        }
+
+    @staticmethod
+    def _schema_text(schemas: Sequence[ToolSchema]) -> str:
+        lines = ["routed tool schemas:"]
+        for schema in schemas:
+            name = schema.get("name", "")
+            description = schema.get("description", "")
+            parameters = schema.get("parameters", schema.get("input_schema", {}))
+            lines.append(
+                json.dumps(
+                    {
+                        "name": name,
+                        "description": description,
+                        "parameters": parameters,
+                    },
+                    ensure_ascii=False,
+                    sort_keys=True,
+                )
+            )
+        return "\n".join(lines)
+
+    def _add_auto_schema_text(
+        self, messages: Sequence[Message], schemas: Sequence[ToolSchema]
+    ) -> list[Message]:
+        if not schemas:
+            return list(messages)
+        target_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if messages[index].role is MessageRole.TOOL_RESULT
+            ),
+            next(
+                (
+                    index
+                    for index in range(len(messages) - 1, -1, -1)
+                    if messages[index].role is MessageRole.USER
+                ),
+                None,
+            ),
+        )
+        if target_index is None:
+            return list(messages)
+        target = messages[target_index]
+        updated = replace(
+            target,
+            content=[*target.content, TextContent(self._schema_text(schemas))],
+        )
+        return [
+            updated if index == target_index else message
+            for index, message in enumerate(messages)
+        ]
+
+    def _expand_auto_invoke(self, call: ToolCall) -> ToolCall:
+        if (
+            not self.router_mode
+            or self.router_style != "auto"
+            or call.name != "invoke"
+        ):
+            return call
+        tool = call.arguments.get("tool")
+        args = call.arguments.get("args")
+        if isinstance(tool, str) and isinstance(args, dict):
+            return ToolCall(call.id, tool, args)
+        return call
 
     def set_model(self, model: str) -> None:
         """Set the model used by subsequent provider completions."""
@@ -989,6 +1202,8 @@ class AgentLoop:
         self._routed_tools = []
         self._router_fail_open = False
         self._router_recent_steps.clear()
+        self._router_auto_allowed_tools = set()
+        self._router_auto_fail_open = False
         if self.hooks is not None:
             self.hooks.user_prompt_submit(user_text)
         if user_message is None:
@@ -1065,6 +1280,23 @@ class AgentLoop:
                 context_messages = await self.context_assembler.assemble(
                     backend=self.backend
                 )
+                routing_decision: dict[str, object] = {}
+                if self.router_mode and self.router_style == "auto":
+                    routed_schemas, routing_decision = await self._prepare_auto_route(
+                        user_text
+                    )
+                    usage = routing_decision.get("usage")
+                    yield StreamEvent(
+                        StreamEventType.USAGE,
+                        data={
+                            "service": "jev",
+                            "usage": dict(usage) if isinstance(usage, Mapping) else {},
+                            "routing_decision": routing_decision,
+                        },
+                    )
+                    context_messages = self._add_auto_schema_text(
+                        context_messages, routed_schemas
+                    )
                 context = self.context_assembler.last_context
                 if context is not None and context.compacted:
                     compaction_data = dict(
@@ -1203,6 +1435,24 @@ class AgentLoop:
                 for block in assistant_message.content
                 if isinstance(block, ToolUseContent)
             ]
+            expanded_calls = [self._expand_auto_invoke(call) for call in calls]
+            if expanded_calls != calls:
+                expanded_by_id = {
+                    call.id: call for call in expanded_calls
+                }
+                assistant_message = replace(
+                    assistant_message,
+                    content=[
+                        replace(
+                            block,
+                            tool_call=expanded_by_id[block.tool_call.id],
+                        )
+                        if isinstance(block, ToolUseContent)
+                        else block
+                        for block in assistant_message.content
+                    ],
+                )
+                calls = expanded_calls
             _validate_unique_tool_call_ids(calls)
             approval_requests: list[tuple[str, ToolCall]] = []
             for tool_call in calls:

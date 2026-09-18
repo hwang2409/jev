@@ -149,6 +149,20 @@ def build_responses_payload(
                     "output": receipt,
                 }
             )
+            if len(message.content) > 1:
+                input_items.append(
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": block.text,
+                            }
+                            for block in message.content[1:]
+                            if isinstance(block, TextContent)
+                        ],
+                    }
+                )
             if images:
                 input_items.append({"role": "user", "content": images})
         else:

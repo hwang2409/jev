@@ -193,6 +193,8 @@ def build_messages_payload(
                     "is_error": message.tool_result.is_error,
                 }
             ]
+            if len(message.content) > 1:
+                content.extend(_wire_content(message.content[1:]))
             wire_messages.append({"role": "user", "content": content})
             continue
         role = "assistant" if message.role is MessageRole.ASSISTANT else "user"

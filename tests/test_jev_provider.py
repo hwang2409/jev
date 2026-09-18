@@ -57,6 +57,56 @@ def response() -> Response:
     )
 
 
+def auto_response() -> Response:
+    return Response(
+        200,
+        {
+            "answers": {
+                "tool": {
+                    "choice": "read",
+                    "probabilities": {"read": 0.9, "bash": 0.1},
+                    "confidence": 0.9,
+                },
+                "needs_tool": {"noul": 0.99},
+            },
+            "usage": {"input_tokens": 12, "output_tokens": 5},
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_route_truncates_state_and_uses_two_questions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Client.responses = [auto_response()]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    result = await jev.auto_route(
+        "t" * 600,
+        "a" * 400,
+        [
+            {"tool": "first", "excerpt": "1" * 250},
+            {"tool": "second", "excerpt": "2" * 250},
+            {"tool": "third", "excerpt": "3" * 250},
+        ],
+        {"read": "Read a file", "bash": "Run a command"},
+    )
+
+    state = Client.requests[0]["json"]["state"]
+    assert state == {
+        "task": "t" * 500,
+        "last_assistant": "a" * 300,
+        "last_results": [
+            {"tool": "second", "excerpt": "2" * 200},
+            {"tool": "third", "excerpt": "3" * 200},
+        ],
+    }
+    assert set(Client.requests[0]["json"]["questions"]) == {"tool", "needs_tool"}
+    assert result.needs_tool == 0.99
+
+
 @pytest.mark.asyncio
 async def test_route_step_builds_the_jev_request(monkeypatch: pytest.MonkeyPatch) -> None:
     Client.responses = [response()]

@@ -33,6 +33,15 @@ class RouteResult:
 
 
 @dataclass(frozen=True, slots=True)
+class AutoRouteResult:
+    tool: str
+    probabilities: dict[str, float]
+    confidence: float
+    needs_tool: float
+    usage: dict[str, int]
+
+
+@dataclass(frozen=True, slots=True)
 class TriageResult:
     keep_probabilities: dict[str, float]
     usage: dict[str, int]
@@ -72,6 +81,47 @@ def build_request(
                 "instructions": (
                     "Is the current step description specific enough to route "
                     "to a single tool with confidence?"
+                ),
+            },
+        },
+    }
+
+
+def build_auto_route_request(
+    task: str,
+    last_assistant: str,
+    last_results: list[dict[str, str]],
+    catalog: dict[str, str],
+) -> dict[str, Any]:
+    """Build the request for harness-side routing between provider turns."""
+
+    return {
+        "state": {
+            "task": task[:500],
+            "last_assistant": last_assistant[:300],
+            "last_results": [
+                {
+                    "tool": result["tool"],
+                    "excerpt": result["excerpt"][:200],
+                }
+                for result in last_results[-2:]
+            ],
+        },
+        "model": MODEL,
+        "questions": {
+            "tool": {
+                "type": "choice",
+                "instructions": (
+                    "Which single catalog tool should the agent use for its "
+                    "next action, if it needs a tool?"
+                ),
+                "criteria": catalog,
+            },
+            "needs_tool": {
+                "type": "noul",
+                "instructions": (
+                    "Does the agent need to call a tool on the next turn, "
+                    "rather than answer directly?"
                 ),
             },
         },
@@ -150,10 +200,42 @@ async def route_step(
 ) -> RouteResult:
     """Ask Jev which catalog tool best matches the current agent step."""
 
+    body = build_request(step, history or [], catalog)
+    return parse_response(await _post_json(body))
+
+
+async def auto_route(
+    task: str,
+    last_assistant: str,
+    last_results: list[dict[str, str]],
+    catalog: dict[str, str],
+) -> AutoRouteResult:
+    """Ask Jev which tool, if any, the next provider turn needs."""
+
+    data = await _post_json(
+        build_auto_route_request(task, last_assistant, last_results, catalog)
+    )
+    try:
+        answers = data["answers"]
+        tool = answers["tool"]
+        usage = data.get("usage", {})
+        if not isinstance(usage, dict):
+            raise TypeError("usage must be an object")
+        return AutoRouteResult(
+            tool=tool["choice"],
+            probabilities=tool["probabilities"],
+            confidence=tool["confidence"],
+            needs_tool=answers["needs_tool"]["noul"],
+            usage=dict(usage),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise JevRouterError(f"invalid Jev auto-route response: {exc}") from exc
+
+
+async def _post_json(body: dict[str, Any]) -> dict[str, Any]:
     key = os.environ.get("JEV_API_KEY")
     if not key:
         raise JevRouterError("JEV_API_KEY is not set")
-    body = build_request(step, history or [], catalog)
     headers = {"Authorization": f"Bearer {key}"}
     delay = 1.0
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -179,7 +261,9 @@ async def route_step(
                 data = response.json()
             except ValueError as exc:
                 raise JevRouterError("Jev response was not valid JSON") from exc
-            return parse_response(data)
+            if not isinstance(data, dict):
+                raise JevRouterError("Jev response must be an object")
+            return data
     raise JevRouterError("Jev request failed after retries")
 
 
@@ -233,9 +317,12 @@ async def triage(
 __all__ = [
     "API_URL",
     "MODEL",
+    "AutoRouteResult",
     "JevRouterError",
     "RouteResult",
     "TriageResult",
+    "auto_route",
+    "build_auto_route_request",
     "build_request",
     "build_triage_request",
     "parse_response",
