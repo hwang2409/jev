@@ -673,6 +673,7 @@ class StreamEventType(StrEnum):
     TURN_START = "turn_start"
     COMPACTION_START = "compaction_start"
     COMPACTION_END = "compaction_end"
+    USAGE = "usage"
     MESSAGE_START = "message_start"
     MESSAGE_UPDATE = "message_update"
     MESSAGE_END = "message_end"

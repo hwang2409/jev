@@ -510,5 +510,50 @@ async def test_child_loop_inherits_router_mode(
     assert "read" in child_schemas
 
 
+@pytest.mark.parametrize("jev_compaction", [False, True])
+@pytest.mark.asyncio
+async def test_child_loop_inherits_jev_compaction_mode(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    jev_compaction: bool,
+) -> None:
+    call = ToolCall(
+        "agent-1",
+        "agent",
+        {"prompt": "inspect", "description": "child", "background": False},
+    )
+    backend = FakeBackend(
+        [
+            ScriptedTurn(tool_calls=[call]),
+            ScriptedTurn(content=[TextContent("child done")]),
+        ]
+    )
+    store = ConversationStore(tmp_path)
+    loop = AgentLoop(
+        backend,
+        store,
+        approval_policy=ApprovalPolicy(store=store, default=ApprovalDecision.ALLOW),
+        max_turns=1,
+        router_mode=False,
+        jev_compaction=jev_compaction,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    import zeta.loop as loop_module
+
+    captured: list[bool] = []
+    real_agent_loop = loop_module.AgentLoop
+
+    class SpyAgentLoop(real_agent_loop):
+        def __init__(self, *args, **kwargs):
+            captured.append(kwargs["jev_compaction"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(loop_module, "AgentLoop", SpyAgentLoop)
+
+    await collect(loop.run_turn("start"))
+
+    assert captured == [jev_compaction]
+
+
 async def _route(tool: str) -> RouteResult:
     return routed(tool)

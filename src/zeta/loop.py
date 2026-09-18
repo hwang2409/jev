@@ -1070,6 +1070,16 @@ class AgentLoop:
                     compaction_data = dict(
                         self.context_assembler.last_compaction_data
                     )
+                    triage_data = compaction_data.get("jev_triage")
+                    if isinstance(triage_data, Mapping):
+                        triage_data = dict(triage_data)
+                        usage = triage_data.pop("usage", None)
+                        compaction_data["jev_triage"] = triage_data
+                        if isinstance(usage, Mapping) and usage:
+                            yield StreamEvent(
+                                StreamEventType.USAGE,
+                                data={"service": "jev", "usage": dict(usage)},
+                            )
                     yield StreamEvent(
                         StreamEventType.COMPACTION_END,
                         data={

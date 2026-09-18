@@ -196,14 +196,17 @@ def test_parse_events_sums_usage_and_route_stats() -> None:
     assert result["final_message_present"] is True
 
 
-def test_parse_events_sums_jev_compaction_usage() -> None:
+def test_parse_events_sums_service_tagged_jev_usage() -> None:
     result = parse_events(
         [
             {
+                "type": "usage",
+                "service": "jev",
+                "usage": {"input_tokens": 5, "output_tokens": 1},
+            },
+            {
                 "type": "compaction_end",
-                "jev_triage": {
-                    "usage": {"input_tokens": 5, "output_tokens": 1}
-                },
+                "jev_triage": {"candidates": 1, "dropped": 0},
             }
         ]
     )

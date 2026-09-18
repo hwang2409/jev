@@ -67,6 +67,9 @@ async def drive_turn(
         elif event.type is StreamEventType.COMPACTION_END:
             if format == "json":
                 _emit_jsonl(stdout, {"type": "compaction_end", **event.data})
+        elif event.type is StreamEventType.USAGE:
+            if format == "json":
+                _emit_jsonl(stdout, {"type": "usage", **event.data})
         elif event.type is StreamEventType.MESSAGE_END:
             usage = event.data.get("usage") if isinstance(event.data, dict) else None
             if format == "json" and isinstance(usage, dict) and usage:

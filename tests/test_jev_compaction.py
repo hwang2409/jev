@@ -9,8 +9,10 @@ from zeta.cli import build_parser
 from zeta.core.context import ContextAssembler
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
+from zeta.loop import AgentLoop
 from zeta.providers import jev
 from zeta.settings import Settings, resolve
+from zeta.skills import SkillCatalog
 from zeta.types import (
     Message,
     MessageRole,
@@ -340,6 +342,77 @@ async def test_reloaded_triage_items_keep_distinct_ids(
         and message.tool_result.content.startswith("[dropped by jev-compaction:")
     ]
     assert dropped == ["call-1"]
+
+
+@pytest.mark.asyncio
+async def test_triage_usage_is_a_service_tagged_event(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    call, result = tool_messages("call-1", "read", "x" * 400)
+    store.append_message(call)
+    store.append_message(result)
+    backend = FakeBackend([ScriptedTurn([TextContent("done")])])
+
+    async def drop_result(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        return jev.TriageResult(
+            {items[0]["id"]: 0.1},
+            {"input_tokens": 7, "output_tokens": 2},
+        )
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", drop_result)
+    assembler = ContextAssembler(
+        store,
+        token_budget=3,
+        retained_tail=1,
+        token_counter=lambda message: (
+            0
+            if message.role is MessageRole.TOOL_RESULT
+            and message.tool_result is not None
+            and message.tool_result.content.startswith("[dropped by jev-compaction:")
+            else 1
+        ),
+        backend=backend,
+    )
+    loop = AgentLoop(
+        backend,
+        store,
+        context_assembler=assembler,
+        router_mode=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+    events = [event async for event in loop.run_turn("current objective")]
+
+    usage = next(event for event in events if event.type.value == "usage")
+    compaction = next(
+        event for event in events if event.type.value == "compaction_end"
+    )
+    assert usage.data == {
+        "service": "jev",
+        "usage": {"input_tokens": 7, "output_tokens": 2},
+    }
+    assert compaction.data["jev_triage"] == {
+        "candidates": 1,
+        "dropped": 1,
+        "tokens_recovered": 1,
+        "skipped_summarize": True,
+        "dropped_items": [
+            {
+                "id": next(
+                    entry.id
+                    for entry in store.replay()
+                    if entry.type == "message"
+                    and Message.from_dict(entry.data["message"]).role
+                    is MessageRole.TOOL_RESULT
+                ),
+                "tokens": 1,
+            }
+        ],
+    }
 
 
 @pytest.mark.asyncio
