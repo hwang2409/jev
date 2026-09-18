@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import copy
 import json
 from itertools import pairwise
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -33,20 +31,20 @@ async def collect(events):
     return [event async for event in events]
 
 
-def without_cache_control(value: Any) -> Any:
-    result = copy.deepcopy(value)
-
-    def remove_markers(node: Any) -> None:
-        if isinstance(node, dict):
-            node.pop("cache_control", None)
-            for child in node.values():
-                remove_markers(child)
-        elif isinstance(node, list):
-            for child in node:
-                remove_markers(child)
-
-    remove_markers(result)
-    return result
+def _serialized_message_prefix(
+    payload: dict[str, object], marker: tuple[int, int]
+) -> bytes:
+    message_index, block_index = marker
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    prefix = [dict(message) for message in messages[: message_index + 1]]
+    content = prefix[-1]["content"]
+    assert isinstance(content, list)
+    prefix[-1]["content"] = [
+        dict(block) for block in content[: block_index + 1]
+    ]
+    prefix[-1]["content"][-1].pop("cache_control", None)
+    return json.dumps(prefix, sort_keys=True).encode()
 
 
 def result(
@@ -189,14 +187,33 @@ async def test_auto_requests_extend_history_for_both_provider_shapes(
     ]
     assert route_calls == 5
     assert len(anthropic) == len(codex) == 5
-    for payloads, message_key in ((anthropic, "messages"), (codex, "input")):
-        # cache_control markers direct cache writes; prefix matching is content-based.
-        # upstream ZETA-39 moves them by design, so compare annotation-stripped messages.
-        messages = [without_cache_control(payload[message_key]) for payload in payloads]
-        for previous, current in pairwise(messages):
-            assert len(previous) < len(current)
-            assert previous == current[: len(previous)]
+    markers = [
+        [
+            (message_index, block_index)
+            for message_index, message in enumerate(payload["messages"])
+            for block_index, block in enumerate(message["content"])
+            if "cache_control" in block
+        ]
+        for payload in anthropic
+    ]
+    marked_spans: list[tuple[int, tuple[int, int], bytes]] = []
+    for call_index, (payload, locations) in enumerate(zip(anthropic, markers, strict=True)):
+        if locations:
+            marker = locations[0]
+            marked_spans.append(
+                (call_index, marker, _serialized_message_prefix(payload, marker))
+            )
+    for call_index, marker, expected_bytes in marked_spans:
+        for payload in anthropic[call_index + 1 :]:
+            assert _serialized_message_prefix(payload, marker) == expected_bytes
 
+    for previous, current in pairwise(payload["input"] for payload in codex):
+        assert len(previous) < len(current)
+        assert json.dumps(previous, sort_keys=True).encode() == json.dumps(
+            current[: len(previous)], sort_keys=True
+        ).encode()
+
+    for payloads in (anthropic, codex):
         tool_bytes = [
             json.dumps(
                 payload.get("tools", []),

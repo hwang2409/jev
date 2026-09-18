@@ -2,6 +2,7 @@ from zeta.skills import SkillCatalog
 
 import asyncio
 import base64
+import copy
 import json
 import subprocess
 from pathlib import Path
@@ -1148,6 +1149,22 @@ def _conversation_cache_locations(payload: dict[str, object]) -> list[tuple[int,
     ]
 
 
+def _serialized_message_prefix(
+    payload: dict[str, object], marker: tuple[int, int]
+) -> bytes:
+    message_index, block_index = marker
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    prefix = copy.deepcopy(messages[: message_index + 1])
+    assert isinstance(prefix[-1], dict)
+    content = prefix[-1]["content"]
+    assert isinstance(content, list)
+    prefix[-1]["content"] = content[: block_index + 1]
+    assert isinstance(prefix[-1]["content"][-1], dict)
+    prefix[-1]["content"][-1].pop("cache_control", None)
+    return json.dumps(prefix, sort_keys=True).encode()
+
+
 def test_conversation_breakpoint_advances_through_active_turn() -> None:
     tools = [{"name": "read", "parameters": {"type": "object"}}]
     request = Message(MessageRole.USER, [TextContent("inspect this")])
@@ -1160,18 +1177,33 @@ def test_conversation_breakpoint_advances_through_active_turn() -> None:
         [TextContent("file contents")],
         tool_result=ToolResult("call-1", "file contents"),
     )
+    revised_tool_result = Message(
+        MessageRole.TOOL_RESULT,
+        [
+            TextContent("file contents"),
+            TextContent('routed tool schemas:\n{"name": "read"}'),
+        ],
+        tool_result=ToolResult("call-1", "file contents"),
+    )
     calls = [
         [request],
         [request, tool_use],
         [request, tool_use, tool_result],
+        [request, tool_use, revised_tool_result],
         [
             request,
             tool_use,
-            tool_result,
+            revised_tool_result,
             Message(MessageRole.ASSISTANT, [TextContent("done")]),
         ],
     ]
-    expected_locations = [[], [(0, 0)], [(1, 0)], [(2, 0)]]
+    expected_locations = [
+        [],
+        [(0, 0)],
+        [(1, 0)],
+        [(1, 0)],
+        [(2, 1)],
+    ]
     payloads = [
         build_messages_payload(
             messages,
@@ -1183,8 +1215,10 @@ def test_conversation_breakpoint_advances_through_active_turn() -> None:
         for messages in calls
     ]
 
-    marked_spans: list[tuple[int, int, bytes]] = []
-    for payload, expected in zip(payloads, expected_locations, strict=True):
+    marked_spans: list[tuple[int, tuple[int, int], bytes]] = []
+    for call_index, (payload, expected) in enumerate(
+        zip(payloads, expected_locations, strict=True)
+    ):
         assert _conversation_cache_locations(payload) == expected
         marker_count = sum(
             "cache_control" in block
@@ -1203,26 +1237,15 @@ def test_conversation_breakpoint_advances_through_active_turn() -> None:
             for block in payload["messages"][-1]["content"]
         )
         if expected:
-            message_index, block_index = expected[0]
-            block = dict(payload["messages"][message_index]["content"][block_index])
-            block.pop("cache_control", None)
+            marker = expected[0]
             marked_spans.append(
-                (
-                    message_index,
-                    block_index,
-                    json.dumps(block, ensure_ascii=False, separators=(",", ":")).encode(),
-                )
+                (call_index, marker, _serialized_message_prefix(payload, marker))
             )
 
-    for span_index, (message_index, block_index, expected_bytes) in enumerate(
-        marked_spans
-    ):
-        for payload in payloads[span_index + 2 :]:
-            block = dict(payload["messages"][message_index]["content"][block_index])
-            block.pop("cache_control", None)
-            assert json.dumps(
-                block, ensure_ascii=False, separators=(",", ":")
-            ).encode() == expected_bytes
+    assert payloads[2]["messages"][-1] != payloads[3]["messages"][-1]
+    for call_index, marker, expected_bytes in marked_spans:
+        for payload in payloads[call_index + 1 :]:
+            assert _serialized_message_prefix(payload, marker) == expected_bytes
 
 
 def _content_prefix_without_cache_metadata(payload: dict[str, object]) -> bytes:
