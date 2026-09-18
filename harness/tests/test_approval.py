@@ -938,6 +938,7 @@ BUILTIN_SUBJECTS = {
     "exec": "command",
     "memory_read": "path",
     "memory_search": "query",
+    "memory_store": "topic",
     "run_background": "command",
     "read": "path",
     "write": "path",

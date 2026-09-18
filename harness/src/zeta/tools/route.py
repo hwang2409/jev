@@ -9,6 +9,7 @@ from ..execution import ToolExecutionContext
 from ..providers.jev import route_step
 from ..types import StructuredToolResult
 from .calendar import catalog_criteria
+from .memory import catalog_criteria as memory_catalog_criteria
 from .registry import ToolRegistry, _error_result, _success_result, text_block
 
 
@@ -137,6 +138,15 @@ _BOUNDARIES.update(
             [str(example) for example in criteria["examples"]],
         )
         for name, criteria in catalog_criteria().items()
+    }
+)
+_BOUNDARIES.update(
+    {
+        name: (
+            str(criteria["not_for"]),
+            [str(example) for example in criteria["examples"]],
+        )
+        for name, criteria in memory_catalog_criteria().items()
     }
 )
 
