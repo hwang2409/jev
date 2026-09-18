@@ -1,3 +1,6 @@
+import json
+
+import run_eval
 from run_eval import auc, evaluate, summarize, top_k
 from router import RouteResult
 
@@ -93,3 +96,18 @@ def test_summarize_counts_errored_clear_case_as_accuracy_miss():
     assert summary["top1_accuracy"] == 0.5
     assert summary["top3_accuracy"] == 0.5
     assert summary["errors"] == 1
+
+
+def test_main_writes_json_results(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(run_eval, "load_cases", lambda: [])
+    monkeypatch.setattr(run_eval, "evaluate", lambda cases: [])
+
+    run_eval.main()
+
+    result_files = list((tmp_path / "results").glob("*.json"))
+    assert len(result_files) == 1
+    assert json.loads(result_files[0].read_text()) == {
+        "summary": summarize([]),
+        "results": [],
+    }

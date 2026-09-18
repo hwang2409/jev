@@ -83,6 +83,16 @@ def test_curve_evalset_has_schema_count_and_subset_coverage():
         assert isinstance(case["history"], list)
 
 
+def test_curve_6_describes_a_foreground_command():
+    case = next(case for case in load_evalset("evalset_curve.jsonl")
+                if case["id"] == "curve-6")
+    assert case["expected_tool"] == "shell_run_command"
+    assert case["step"] == (
+        "Launch the one-shot command `python scripts/check_migration.py --dry-run` "
+        "in the foreground and report its exit status"
+    )
+
+
 def test_full_evalset_has_exact_coverage_and_hard_cases():
     cases = load_evalset("evalset_full.jsonl")
     assert len(cases) == 140
@@ -114,12 +124,14 @@ def test_hard_steps_do_not_copy_expected_description_phrases():
         description_words = re.findall(
             r"[a-z0-9]+", CATALOG_120[case["expected_tool"]].lower()
         )
-        step_words = re.findall(r"[a-z0-9]+", case["step"].lower())
+        prompt_words = re.findall(
+            r"[a-z0-9]+", f"{case['task']} {case['step']}".lower()
+        )
         phrases = {
             " ".join(description_words[index:index + 4])
             for index in range(len(description_words) - 3)
         }
         assert not any(
-            " ".join(step_words[index:index + 4]) in phrases
-            for index in range(len(step_words) - 3)
+            " ".join(prompt_words[index:index + 4]) in phrases
+            for index in range(len(prompt_words) - 3)
         ), case["id"]
