@@ -264,5 +264,41 @@ async def test_plan_filter_runs_after_router_filter(
     }
 
 
+@pytest.mark.asyncio
+async def test_child_loop_inherits_router_mode(
+    tmp_path: Path,
+) -> None:
+    call = ToolCall(
+        "agent-1",
+        "agent",
+        {
+            "prompt": "inspect",
+            "description": "child",
+            "background": False,
+        },
+    )
+    backend = FakeBackend(
+        [
+            ScriptedTurn(tool_calls=[call]),
+            ScriptedTurn(content=[TextContent("child done")]),
+        ]
+    )
+    store = ConversationStore(tmp_path)
+    loop = AgentLoop(
+        backend,
+        store,
+        approval_policy=ApprovalPolicy(store=store, default=ApprovalDecision.ALLOW),
+        max_turns=1,
+        router_mode=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+    await collect(loop.run_turn("start"))
+
+    child_schemas = {schema["name"] for schema in backend.calls[1][1]}
+    assert "route" not in child_schemas
+    assert "read" in child_schemas
+
+
 async def _route(tool: str) -> RouteResult:
     return routed(tool)

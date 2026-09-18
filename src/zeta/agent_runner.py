@@ -532,6 +532,7 @@ async def run_agent_tool(
             agent_instance_id=child_instance_id,
             agent_tree=agent_tree,
             background_owner=loop._background_owner,
+            router_mode=loop.router_mode,
         )
         if loop.plan_mode:
             child_loop.set_plan_mode(True)
