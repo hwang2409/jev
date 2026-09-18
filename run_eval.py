@@ -41,6 +41,17 @@ def _mean(values: list[float]) -> float | None:
     return round(statistics.mean(values), 4) if values else None
 
 
+def auc(higher: list[float], lower: list[float]) -> float | None:
+    if not higher or not lower:
+        return None
+    wins = sum(
+        1 if high > low else 0.5 if high == low else 0
+        for high in higher
+        for low in lower
+    )
+    return round(wins / (len(higher) * len(lower)), 4)
+
+
 def summarize(results: list[dict]) -> dict:
     ok = [r for r in results if "error" not in r]
     clear = [r for r in results if not r["vague"] and r["expected_needs_tool"]
@@ -69,8 +80,16 @@ def summarize(results: list[dict]) -> dict:
         "mean_confidence_incorrect": _mean([r["confidence"] for r in incorrect]),
         "needs_tool_mean_on_tool_cases": _mean([r["needs_tool"] for r in tool_cases]),
         "needs_tool_mean_on_no_tool_cases": _mean([r["needs_tool"] for r in no_tool]),
+        "needs_tool_auc": auc(
+            [r["needs_tool"] for r in tool_cases],
+            [r["needs_tool"] for r in no_tool],
+        ),
         "clarity_mean_on_clear": _mean([r["step_clarity"] for r in non_vague]),
         "clarity_mean_on_vague": _mean([r["step_clarity"] for r in vague]),
+        "clarity_auc": auc(
+            [r["step_clarity"] for r in non_vague],
+            [r["step_clarity"] for r in vague],
+        ),
         "total_input_tokens": sum(r["usage"]["input_tokens"] for r in ok),
         "total_output_tokens": sum(r["usage"]["output_tokens"] for r in ok),
     }

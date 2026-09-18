@@ -1,4 +1,4 @@
-from run_eval import evaluate, summarize, top_k
+from run_eval import auc, evaluate, summarize, top_k
 from router import RouteResult
 
 
@@ -25,6 +25,23 @@ def case(id, expected_tool, needs=True, vague=False):
 def test_top_k():
     probs = {"A": 0.5, "B": 0.3, "C": 0.2}
     assert top_k(probs, 2) == ["A", "B"]
+
+
+def test_auc_perfect_separation():
+    assert auc([0.8, 0.9], [0.1, 0.2]) == 1.0
+
+
+def test_auc_identical_distributions():
+    assert auc([0.1, 0.5, 0.9], [0.1, 0.5, 0.9]) == 0.5
+
+
+def test_auc_mixed_case():
+    assert auc([0.9, 0.6], [0.8, 0.6, 0.4]) == 0.75
+
+
+def test_auc_empty_cohort():
+    assert auc([], [0.5]) is None
+    assert auc([0.5], []) is None
 
 
 def test_summarize_metrics():
