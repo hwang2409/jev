@@ -216,6 +216,30 @@ def test_parse_events_sums_service_tagged_jev_usage() -> None:
     assert result["jev_output_tokens"] == 1
 
 
+def test_parse_events_counts_auto_routing_decisions() -> None:
+    result = parse_events(
+        [
+            {
+                "type": "usage",
+                "service": "jev",
+                "routing_decision": {
+                    "advertised": ["read", "write", "bash"],
+                },
+            },
+            {
+                "type": "usage",
+                "service": "jev",
+                "routing_decision": {
+                    "advertised": ["read"],
+                },
+            },
+        ]
+    )
+
+    assert result["route_calls"] == 2
+    assert result["route_expansions"] == 1
+
+
 @pytest.mark.asyncio
 async def test_parse_events_counts_only_real_unrouted_rejections(
     tmp_path: Path,

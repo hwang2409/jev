@@ -213,10 +213,13 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 service = event.get("service", "claude")
                 add_usage(service if service == "jev" else "claude", usage)
             decision = event.get("routing_decision")
-            if isinstance(decision, Mapping) and isinstance(
-                decision.get("error"), str
-            ):
-                router_errors += 1
+            if isinstance(decision, Mapping):
+                route_calls += 1
+                advertised = decision.get("advertised")
+                if type(advertised) is list and len(advertised) == 3:
+                    route_expansions += 1
+                if isinstance(decision.get("error"), str):
+                    router_errors += 1
         elif event_type == "tool_result":
             name = event.get("name")
             content = event.get("content")
