@@ -8,6 +8,7 @@ from typing import Any, TypedDict
 from ..execution import ToolExecutionContext
 from ..providers.jev import route_step
 from ..types import StructuredToolResult
+from .calendar import catalog_criteria
 from .registry import ToolRegistry, _error_result, _success_result, text_block
 
 
@@ -43,6 +44,18 @@ _BOUNDARIES: dict[str, tuple[str, list[str]]] = {
     "websearch": (
         "Opening a known URL; use fetch.",
         ["Search the web for the latest TypeSafe routing documentation."],
+    ),
+    "memory_search": (
+        "Searching file contents in the working repo with grep, reading a known file, fetching a URL, or searching the web; use grep, read, fetch, or websearch.",
+        [
+            "Recall the decision behind the current memory retention policy from Henry's notes.",
+        ],
+    ),
+    "memory_read": (
+        "Searching memory by topic, searching working-repo files, fetching a URL, or searching the web; use memory_search, grep, fetch, or websearch.",
+        [
+            "Read the recalled retention decision note at a path returned by memory_search.",
+        ],
     ),
     "bash": (
         "Editing a file in place; use edit. Use exec for fixed-cwd commands with timeout or output limits, and run_background for long-running commands.",
@@ -117,6 +130,15 @@ _BOUNDARIES: dict[str, tuple[str, list[str]]] = {
         ],
     ),
 }
+_BOUNDARIES.update(
+    {
+        name: (
+            str(criteria["not_for"]),
+            [str(example) for example in criteria["examples"]],
+        )
+        for name, criteria in catalog_criteria().items()
+    }
+)
 
 
 def build_catalog(

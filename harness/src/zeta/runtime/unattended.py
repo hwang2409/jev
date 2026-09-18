@@ -50,6 +50,7 @@ def build_unattended_loop(
     agent_catalog = discover_packaged_agents()
     registry = ToolRegistry(
         metadata.cwd,
+        memory_config=loaded.settings.memory_config,
         session_store=store,
         approval_store=store,
         approval_policy=policy,

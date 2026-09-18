@@ -7,7 +7,9 @@ dependencies = [
     "httpx>=0.27",
     "markdown-it-py>=3.0",
     "mdit-py-plugins>=0.4",
+    "pausanias @ file:///Users/henry/me/fun/pausanias",
     "prompt_toolkit>=3.0.48",
+    "pyobjc-framework-eventkit>=12.2.2; sys_platform == 'darwin'",
     "pyyaml>=6.0",
     "rich>=13.9",
 ]
@@ -29,6 +31,9 @@ zeta = "zeta.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zeta"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/zeta/prompts/identity.md" = "zeta/prompts/identity.md"

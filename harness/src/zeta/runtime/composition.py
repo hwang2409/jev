@@ -132,6 +132,7 @@ def compose_runtime(
             loop_kwargs["max_turns"] = max_turns
         registry = ToolRegistry(
             opened.store.cwd,
+            memory_config=config.memory_config,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )

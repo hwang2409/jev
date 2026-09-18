@@ -16,7 +16,7 @@ one table entry (``[approval]\\nallow = [...]``) without restating unrelated
 tables, but replacing a list is one atomic swap.
 
 Trust boundary: the project layer may only contribute safe keys — provider,
-model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``yolo``, ``[approval]``,
+model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_config``, ``yolo``, ``[approval]``,
 ``theme``, and ``[keybindings]`` from the project file are IGNORED with a
 loud startup warning. Global settings retain full key access. A future
 ``/trust`` mechanism may relax this per-repo, but until then a hostile
@@ -62,6 +62,7 @@ _TOP_KEYS = frozenset(
         "stream_stall_seconds",
         "stream_stall_retries",
         "workspace_snapshot_cap",
+        "memory_config",
     }
 )
 _PROJECT_SAFE_KEYS = frozenset(
@@ -98,6 +99,7 @@ class Settings:
     stream_stall_seconds: int | None = None
     stream_stall_retries: int | None = None
     workspace_snapshot_cap: int | None = None
+    memory_config: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +121,7 @@ class ResolvedConfig:
     stream_stall_seconds: int | None = None
     stream_stall_retries: int | None = None
     workspace_snapshot_cap: int | None = None
+    memory_config: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,6 +213,7 @@ def resolve(
         stream_stall_seconds=settings.stream_stall_seconds,
         stream_stall_retries=settings.stream_stall_retries,
         workspace_snapshot_cap=settings.workspace_snapshot_cap,
+        memory_config=settings.memory_config,
     )
 
 
@@ -308,6 +312,7 @@ def _validate(
     workspace_snapshot_cap = _validated_positive_int(
         data, "workspace_snapshot_cap", notices
     )
+    memory_config = _validated_string(data, "memory_config", notices)
     allow, deny, ask = _validated_approval(data, notices, warnings)
     keybindings = _validated_keybindings(data, notices)
     return Settings(
@@ -326,6 +331,7 @@ def _validate(
         stream_stall_seconds=stream_stall_seconds,
         stream_stall_retries=stream_stall_retries,
         workspace_snapshot_cap=workspace_snapshot_cap,
+        memory_config=memory_config,
     )
 
 
