@@ -662,7 +662,6 @@ class AgentLoop:
                 return decision
             known = self._known_memory_keys()
             known_hashes = {key[2] for key in known if key[2]}
-            known_locations = {(key[0], key[1]) for key in known}
             blocks: list[TextContent] = []
             injected_items: list[dict[str, object]] = []
             total_chars = 0
@@ -684,10 +683,8 @@ class AgentLoop:
                 )
                 if key is None:
                     continue
-                location = (key[0], key[1])
                 if (
                     key in known
-                    or location in known_locations
                     or content_hash in known_hashes
                 ):
                     deduped = True
@@ -711,7 +708,6 @@ class AgentLoop:
                     }
                 )
                 known.add(key)
-                known_locations.add(location)
                 known_hashes.add(content_hash)
                 total_chars += len(text)
             if not blocks:

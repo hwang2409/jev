@@ -252,8 +252,9 @@ def build_command(
         command.append("--no-router")
     if memory_config is not None:
         command.extend(["--memory-config", str(memory_config)])
-    if memory_injection:
-        command.append("--memory-injection")
+    command.append(
+        "--memory-injection" if memory_injection else "--no-memory-injection"
+    )
     command.extend(["-p", prompt])
     return command
 

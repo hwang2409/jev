@@ -1212,27 +1212,45 @@ def test_build_command_selects_router_mode() -> None:
         "json",
         "--router-style",
         "tool",
+        "--no-memory-injection",
         "-p",
         "prompt",
     ]
-    assert auto[-4:] == ["--router-style", "auto", "-p", "prompt"]
+    assert auto[-5:] == [
+        "--router-style",
+        "auto",
+        "--no-memory-injection",
+        "-p",
+        "prompt",
+    ]
     assert "--no-router" not in router
-    assert stock[-3:] == ["--no-router", "-p", "prompt"]
+    assert stock[-4:] == [
+        "--no-router",
+        "--no-memory-injection",
+        "-p",
+        "prompt",
+    ]
 
     isolated = build_command(
         "task", "prompt", 1, "stock", memory_config=Path("/tmp/eval.toml")
     )
-    assert isolated[-5:] == [
+    assert isolated[-6:] == [
         "--no-router",
         "--memory-config",
         "/tmp/eval.toml",
+        "--no-memory-injection",
         "-p",
         "prompt",
     ]
     injected = build_command(
         "task", "prompt", 1, "stock", memory_injection=True
     )
-    assert "--memory-injection" in injected
+    assert injected[-4:] == [
+        "--no-router",
+        "--memory-injection",
+        "-p",
+        "prompt",
+    ]
 
 
 def test_memory_injection_eval_requires_jev_api_key(

@@ -716,7 +716,7 @@ async def test_memory_injection_dedupes_identical_content_at_different_paths(
 
 
 @pytest.mark.asyncio
-async def test_memory_injection_dedupes_prior_memory_search_results(
+async def test_memory_injection_reinjects_changed_prior_memory_search_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
@@ -756,7 +756,46 @@ async def test_memory_injection_dedupes_prior_memory_search_results(
     )
     monkeypatch.setattr(loop_module, "_memory_search", search)
 
-    await collect(loop.run_turn("remember this"))
+    decision = await loop._inject_memory("remember this", 0.9)
+
+    injected = [
+        block.text
+        for message in loop.store.messages()
+        for block in message.content
+        if isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+    ]
+    assert len(injected) == 1
+    assert injected[0].endswith("new")
+    assert decision["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_dedupes_same_content_at_same_location(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = build_loop(tmp_path, [])
+    loop.tool_registry.memory_config = "fixture.toml"
+    existing = memory_result("same.md", ["Same"], "stored")
+    loop.store.append_message(
+        Message(
+            MessageRole.TOOL_RESULT,
+            [TextContent("stored")],
+            tool_result=ToolResult(
+                "memory-call", "stored", structured_content={"items": [existing]}
+            ),
+        )
+    )
+
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "content": [],
+            "isError": False,
+            "structuredContent": {"items": [existing]},
+        }
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
+    decision = await loop._inject_memory("remember this", 0.9)
 
     assert not any(
         isinstance(block, TextContent)
@@ -764,6 +803,7 @@ async def test_memory_injection_dedupes_prior_memory_search_results(
         for message in loop.store.messages()
         for block in message.content
     )
+    assert decision["reason"] == "deduped"
 
 
 @pytest.mark.asyncio
