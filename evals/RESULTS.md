@@ -39,3 +39,38 @@ without prefix caching. At ~10 cached tools, stock wins on cost and turn
 efficiency. Design leads if pursued further: cache-stable injection
 (append-only tool exposure; or deliver routed schemas via user-message
 content instead of the tools param) and a turn-budget-aware route protocol.
+
+# Three-way eval: auto (v2) vs router (v1) vs stock — 2026-09-18
+
+Head `4866bcfe`. Same 6 tasks, same day. Full records: `results/threeway-*.json`.
+
+| Metric | auto (v2) | router (v1) | stock |
+|---|---|---|---|
+| Completed | 6/6 | 2/6 | 5/6 |
+| Checks passed | 5/6 | 5/6 | 5/6 |
+| Claude tokens (in+out) | 50.6k | 59.0k | 128.6k |
+| Jev tokens | 24.8k | 19.5k | 0 |
+| Cache reads | 0 | 8.7k | 102.4k |
+| Est. cost (cache-adjusted) | ~$0.21 + Jev | ~$0.27 + Jev | ~$0.15 |
+
+## Findings
+
+1. V2 delivered its behavioral goals: quality parity with stock (6/6
+   completed — the turn tax is gone; v1 completed 2/6), zero unrouted
+   attempts, zero router errors, invisible routing.
+2. V2 did NOT deliver cache parity, for a newly understood reason: auto's
+   static `[invoke]` surface shrinks the cacheable static prefix below
+   Anthropic's ~1024-token minimum ("shorter prefixes silently won't
+   cache") — cache_creation is 0 on every auto call. Stock's first call
+   caches 3,940 tokens of system+schemas and re-reads them every call.
+   The fat tool schemas v1/v2 remove are exactly what makes stock's
+   prefix cacheable at this scale.
+3. Zeta's marker policy ("cache only completed history before the active
+   user turn") means single-user-turn agentic tasks never cache history
+   in ANY mode; stock's wins are purely the static prefix. Headroom for
+   all modes: marking completed intra-turn messages.
+4. Standing conclusion sharpened: at ~10 tools, prompt caching makes the
+   static catalog nearly free (~$0.03 per task-suite of cache reads), so
+   routing cannot win on cost. Routing's value cases remain: quality
+   parity now proven, huge/churning catalogs (MCP mounts, cache-TTL
+   expiry in slow loops), cache-less providers, and policy/telemetry.
