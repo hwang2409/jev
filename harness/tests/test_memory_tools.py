@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import errno
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -281,34 +283,62 @@ async def test_memory_store_appends_dated_sections_and_searches_both(
 
 
 @pytest.mark.asyncio
-async def test_memory_store_rejects_symlink_swap_without_writing_outside_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_memory_store_rejects_symlink_at_create_target_without_writing_outside_root(
+    tmp_path: Path,
 ) -> None:
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     config = _config(tmp_path, corpus)
-    outside = tmp_path / "outside.md"
-    outside.write_text("keep this file\n", encoding="utf-8")
+    outside = tmp_path / "outside-create.md"
+    outside_bytes = b"keep this file\n"
+    outside.write_bytes(outside_bytes)
     target = corpus / "race.md"
-    original_exists = Path.exists
-
-    def swap_after_validation(path: Path) -> bool:
-        exists = original_exists(path)
-        if path == target and not exists:
-            target.symlink_to(outside)
-        return exists
-
-    monkeypatch.setattr(Path, "exists", swap_after_validation)
+    target.symlink_to(outside)
+    unexpected = tmp_path / "outside-create-unexpected.md"
     result = await _registry(tmp_path, config).execute(
-        ToolCall("symlink-swap", "memory_store", {"topic": "Race", "content": "unsafe"})
+        ToolCall(
+            "symlink-create",
+            "memory_store",
+            {"topic": "Race", "content": "unsafe"},
+        )
     )
 
-    monkeypatch.undo()
-    assert result["isError"] is False
-    assert outside.read_text(encoding="utf-8") == "keep this file\n"
-    assert target.is_file()
-    assert not target.is_symlink()
-    assert "unsafe" in target.read_text(encoding="utf-8")
+    assert result["isError"] is True
+    assert os.strerror(errno.ELOOP) in _text(result)
+    assert outside.read_bytes() == outside_bytes
+    assert not unexpected.exists()
+    assert target.is_symlink()
+
+
+@pytest.mark.asyncio
+async def test_memory_store_rejects_symlink_at_append_target_without_writing_outside_root(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    config = _config(tmp_path, corpus)
+    target = corpus / "race.md"
+    target.write_text("# Race\n\nexisting\n", encoding="utf-8")
+    outside = tmp_path / "outside-append.md"
+    outside_bytes = b"keep this file\n"
+    outside.write_bytes(outside_bytes)
+    target.unlink()
+    target.symlink_to(outside)
+    unexpected = tmp_path / "outside-append-unexpected.md"
+
+    result = await _registry(tmp_path, config).execute(
+        ToolCall(
+            "symlink-append",
+            "memory_store",
+            {"topic": "Race", "content": "unsafe"},
+        )
+    )
+
+    assert result["isError"] is True
+    assert os.strerror(errno.ELOOP) in _text(result)
+    assert outside.read_bytes() == outside_bytes
+    assert not unexpected.exists()
+    assert target.is_symlink()
 
 
 @pytest.mark.asyncio
