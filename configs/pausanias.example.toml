@@ -1,0 +1,7 @@
+# Copy this file to a user-owned location, then set memory_config in zeta.
+database = "~/.zeta/pausanias/index.sqlite3"
+
+[[roots]]
+id = "vault"
+path = "/Users/henry/me/fun/wiki/vault"
+project = "vault"

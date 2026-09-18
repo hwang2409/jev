@@ -417,6 +417,7 @@ class ToolRegistry:
         approval_store: ConversationStore | None = None,
         session_store: ConversationStore | None = None,
         max_output_chars: int = 10_000,
+        memory_config: str | None = None,
         register_builtin: bool = True,
         enforce_approvals: bool = False,
         skill_catalog: SkillCatalog,
@@ -461,6 +462,7 @@ class ToolRegistry:
         if self.approval_policy is not None and approval_store is not None:
             self.approval_policy.bind_store(approval_store)
         self.max_output_chars = max_output_chars
+        self.memory_config = memory_config
         self._session_store = session_store
         self._todo_store = session_store
         self._agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None = None
