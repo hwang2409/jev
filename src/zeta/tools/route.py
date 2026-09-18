@@ -8,6 +8,7 @@ from typing import Any, TypedDict
 from ..execution import ToolExecutionContext
 from ..providers.jev import route_step
 from ..types import StructuredToolResult
+from .calendar import catalog_criteria
 from .registry import ToolRegistry, _error_result, _success_result, text_block
 
 
@@ -129,6 +130,15 @@ _BOUNDARIES: dict[str, tuple[str, list[str]]] = {
         ],
     ),
 }
+_BOUNDARIES.update(
+    {
+        name: (
+            str(criteria["not_for"]),
+            [str(example) for example in criteria["examples"]],
+        )
+        for name, criteria in catalog_criteria().items()
+    }
+)
 
 
 def build_catalog(

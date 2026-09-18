@@ -9,6 +9,7 @@ dependencies = [
     "mdit-py-plugins>=0.4",
     "pausanias @ file:///Users/henry/me/fun/pausanias",
     "prompt_toolkit>=3.0.48",
+    "pyobjc-framework-eventkit>=12.2.2; sys_platform == 'darwin'",
     "pyyaml>=6.0",
     "rich>=13.9",
 ]
