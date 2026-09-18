@@ -1,0 +1,3137 @@
+from zeta.skills import SkillCatalog
+
+import asyncio
+import base64
+import copy
+import json
+import subprocess
+from pathlib import Path
+from unittest.mock import patch
+
+import httpx
+import pytest
+
+import zeta.providers.anthropic as anthropic_module
+import zeta.providers.stream_diagnostics as diagnostics_module
+from zeta.core.context import ContextAssembler
+from zeta.core.fake import FakeBackend, ScriptedTurn
+from zeta.core.loop import AgentLoop
+from zeta.core.store import ConversationStore
+from zeta.prompts import load_identity
+from zeta.providers.anthropic import (
+    ANTHROPIC_MAX_IMAGE_BYTES,
+    AnthropicApiKeyCredential,
+    AnthropicAuthError,
+    AnthropicBackend,
+    AnthropicCredentialStore,
+    AnthropicHTTPError,
+    AnthropicStreamError,
+    OAuthTokens,
+    build_authorization_url,
+    build_messages_payload,
+)
+from zeta.images import image_dimensions
+from zeta.types import (
+    Message,
+    MessageRole,
+    ImageContent,
+    RedactedThinkingContent,
+    StreamEvent,
+    StreamEventType,
+    TextContent,
+    ThinkingContent,
+    ToolCall,
+    ToolResult,
+    ToolUseContent,
+)
+
+SSE = """event: message_start
+data: {"type":"message_start","message":{"id":"msg-1","model":"claude-test","role":"assistant","usage":{"input_tokens":12}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig-1"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: content_block_start
+data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"hello"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":1}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}
+
+event: message_stop
+data: {"type":"message_stop"}
+"""
+
+
+def request_payload(
+    messages: list[Message], tool_schemas: list[dict[str, object]]
+) -> dict[str, object]:
+    payload = build_messages_payload(
+        messages,
+        tool_schemas,
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+    payload["system"] = [
+        {
+            "type": "text",
+            "text": "You are Claude Code, Anthropic's official CLI for Claude.",
+            "cache_control": {"type": "ephemeral"},
+        },
+        *payload.get("system", []),
+    ]
+    return payload
+
+
+def request_bytes(payload: dict[str, object]) -> bytes:
+    return json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode()
+
+
+def client_for(handler):
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def png_block(*, caption: str | None = None, data: bytes | None = None) -> dict[str, object]:
+    png = data or bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6360f8cf00000004000101a2e0c4b00000000049454e44ae426082"
+    )
+    block: dict[str, object] = {
+        "type": "image",
+        "data": base64.b64encode(png).decode(),
+        "mimeType": "image/png",
+    }
+    if caption is not None:
+        block["caption"] = caption
+    return block
+
+
+def webp_data(chunk_type: bytes, chunk_data: bytes) -> bytes:
+    chunk = (
+        chunk_type
+        + len(chunk_data).to_bytes(4, "little")
+        + chunk_data
+        + (b"\x00" if len(chunk_data) % 2 else b"")
+    )
+    body = b"WEBP" + chunk
+    return b"RIFF" + len(body).to_bytes(4, "little") + body
+
+
+@pytest.mark.parametrize(
+    ("chunk_type", "chunk_data", "dimensions"),
+    [
+        (b"VP8X", b"\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00", (1, 1)),
+        (b"VP8L", b"/\x00\x00\x00\x00", (1, 1)),
+        (b"VP8 ", b"\x00\x00\x00\x9d\x01\x2a\x01\x00\x01\x00", (1, 1)),
+    ],
+)
+def test_image_dimensions_supports_webp_headers(
+    chunk_type: bytes, chunk_data: bytes, dimensions: tuple[int, int]
+) -> None:
+    data = webp_data(chunk_type, chunk_data)
+    block = {
+        "type": "image",
+        "data": base64.b64encode(data).decode(),
+        "mimeType": "image/webp",
+    }
+    assert image_dimensions(block) == dimensions
+
+
+def test_anthropic_sends_valid_image_without_dimensions_natively() -> None:
+    block = {
+        "type": "image",
+        "data": base64.b64encode(b"\xff\xd8\xff").decode(),
+        "mimeType": "image/jpeg",
+    }
+    payload = build_messages_payload(
+        [Message(MessageRole.TOOL_RESULT, tool_result=ToolResult("call-1", "stale", content_blocks=[block]))],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    content = payload["messages"][0]["content"][0]["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "image"
+
+
+def test_anthropic_falls_back_for_oversized_image_dimensions() -> None:
+    data = bytearray(bytes.fromhex(
+        "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
+        "0000000d49444154789c6360f8cf00000004000101a2e0c4b00000000049454e44ae426082"
+    ))
+    data[16:20] = (8001).to_bytes(4, "big")
+    block = png_block(data=bytes(data))
+    payload = build_messages_payload(
+        [Message(MessageRole.TOOL_RESULT, tool_result=ToolResult("call-1", "stale", content_blocks=[block]))],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    content = payload["messages"][0]["content"][0]["content"]
+    assert isinstance(content, str)
+    assert "dimensions are 8001x1" in content
+    assert "limit is 8000x8000" in content
+
+
+def test_anthropic_sends_supported_tool_images_as_native_blocks() -> None:
+    payload = build_messages_payload(
+        [
+            Message(
+                MessageRole.TOOL_RESULT,
+                tool_result=ToolResult(
+                    "call-1",
+                    "stale",
+                    content_blocks=[
+                        {"type": "text", "text": "answer", "truncated": False, "full_size": 6},
+                        png_block(caption="plot"),
+                    ],
+                ),
+            )
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    content = payload["messages"][0]["content"][0]["content"]
+    assert content[0] == {"type": "text", "text": "answer"}
+    assert content[1] == {"type": "text", "text": "caption: plot"}
+    assert content[2]["type"] == "image"
+    assert content[2]["source"]["media_type"] == "image/png"
+
+
+@pytest.mark.parametrize(
+    ("block", "note"),
+    [
+        (png_block(data=b"x" * (ANTHROPIC_MAX_IMAGE_BYTES + 1)), "limit is"),
+        ({**png_block(), "mimeType": "image/tiff"}, "unsupported media type"),
+    ],
+)
+def test_anthropic_falls_back_for_images_outside_native_limits(
+    block: dict[str, object], note: str
+) -> None:
+    payload = build_messages_payload(
+        [Message(MessageRole.TOOL_RESULT, tool_result=ToolResult("call-1", "stale", content_blocks=[block]))],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    content = payload["messages"][0]["content"][0]["content"]
+    assert isinstance(content, str)
+    assert note in content
+    assert block["data"] not in content
+
+
+@pytest.mark.asyncio
+async def test_stream_maps_thinking_text_usage_and_stops_at_one_completion(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    backend = AnthropicBackend(
+        client=client,
+        token_store=store,
+        base_url="https://test.invalid/v1/messages",
+    )
+
+    events = [
+        event
+        async for event in backend.complete(
+            [
+                Message(MessageRole.SYSTEM, [TextContent("keep this system prompt")]),
+                Message(MessageRole.USER, [TextContent("hi")]),
+            ],
+            [],
+        )
+    ]
+
+    assert len(requests) == 1
+    assert requests[0].headers["authorization"] == "Bearer access-test"
+    assert "x-api-key" not in requests[0].headers
+    request_payload = json.loads(requests[0].content)
+    assert request_payload["model"] == "claude-sonnet-4-6"
+    assert request_payload["max_tokens"] == 16384
+    assert request_payload["thinking"] == {
+        "type": "enabled",
+        "budget_tokens": 8192,
+    }
+    assert "interleaved-thinking-2025-05-14" in requests[0].headers["anthropic-beta"]
+    assert request_payload["system"][0]["text"].startswith("You are Claude Code")
+    assert request_payload["system"][1]["text"] == "keep this system prompt"
+    assert [event.type for event in events] == [
+        StreamEventType.MESSAGE_START,
+        StreamEventType.MESSAGE_UPDATE,
+        StreamEventType.MESSAGE_UPDATE,
+        StreamEventType.MESSAGE_UPDATE,
+        StreamEventType.MESSAGE_END,
+    ]
+    assert events[-1].data["usage"] == {
+        "input_tokens": 12,
+        "output_tokens": 4,
+    }
+    assert events[-1].message is not None
+    assert events[-1].message.content == [
+        ThinkingContent("plan", "sig-1"),
+        TextContent("hello"),
+    ]
+    assert not (tmp_path / "logs" / "stream-diagnostics.jsonl").exists()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_sends_one_zeta_identity_after_oauth_spoof(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    backend = AnthropicBackend(
+        client=client,
+        token_store=store,
+        base_url="https://test.invalid/v1/messages",
+    )
+    loop = AgentLoop(backend, ConversationStore(tmp_path / "sessions"), skill_catalog=SkillCatalog.empty())
+
+    async for _ in loop.run_turn("hi"):
+        pass
+
+    payload = json.loads(requests[0].content)
+    assert payload["system"][0]["text"].startswith("You are Claude Code")
+    assert payload["system"][1]["text"] == load_identity(catalog=SkillCatalog.empty())
+    assert sum(block["text"].startswith("You are zeta") for block in payload["system"]) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_preserves_anthropic_cache_usage_fields(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE.replace(
+                '"input_tokens":12',
+                '"input_tokens":12,"cache_read_input_tokens":8,'
+                '"cache_creation_input_tokens":2',
+            ),
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            base_url="https://test.invalid/v1/messages",
+        ).complete([], [])
+    ]
+
+    assert events[-1].data["usage"] == {
+        "input_tokens": 12,
+        "cache_read_input_tokens": 8,
+        "cache_creation_input_tokens": 2,
+        "output_tokens": 4,
+    }
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_401_refreshes_token_and_retries_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+    statuses = iter((401, 200))
+    refreshes: list[httpx.AsyncClient] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        status = next(statuses)
+        if status == 200:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text=SSE,
+                request=request,
+            )
+        return httpx.Response(401, json={"error": {"message": "expired"}}, request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("stale-access", "refresh-test", 4_000_000_000))
+
+    async def refresh_token(client: httpx.AsyncClient) -> str:
+        refreshes.append(client)
+        return "fresh-access"
+
+    monkeypatch.setattr(store, "refresh_token", refresh_token)
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client, token_store=store, base_url="https://test.invalid/v1/messages"
+        ).complete([], [])
+    ]
+
+    assert len(refreshes) == 1
+    assert len(requests) == 2
+    assert requests[0].headers["authorization"] == "Bearer stale-access"
+    assert requests[1].headers["authorization"] == "Bearer fresh-access"
+    assert events[-1].message is not None
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_second_401_fails_loudly_without_a_retry_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+    refreshes: list[httpx.AsyncClient] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(401, json={"error": {"message": "expired"}}, request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("stale-access", "refresh-test", 4_000_000_000))
+
+    async def refresh_token(client: httpx.AsyncClient) -> str:
+        refreshes.append(client)
+        return "fresh-access"
+
+    monkeypatch.setattr(store, "refresh_token", refresh_token)
+    client = client_for(handler)
+    with pytest.raises(AnthropicAuthError, match=r"Anthropic.*zeta login"):
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert len(requests) == 2
+    assert len(refreshes) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_401_refresh_failure_propagates_without_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(401, json={"error": {"message": "expired"}}, request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("stale-access", "refresh-test", 4_000_000_000))
+
+    async def refresh_token(client: httpx.AsyncClient) -> str:
+        raise RuntimeError("refresh failed")
+
+    monkeypatch.setattr(store, "refresh_token", refresh_token)
+    client = client_for(handler)
+    with pytest.raises(RuntimeError, match="refresh failed"):
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_api_key_credential_sends_x_api_key_without_oauth_beta(
+    tmp_path: Path,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=AnthropicApiKeyCredential("sk-ant-test-key"),
+            diagnostics_path=tmp_path / "stream-diagnostics.jsonl",
+            base_url="https://test.invalid/v1/messages",
+        ).complete([], [])
+    ]
+
+    assert len(requests) == 1
+    assert requests[0].headers["x-api-key"] == "sk-ant-test-key"
+    assert "authorization" not in requests[0].headers
+    beta = requests[0].headers["anthropic-beta"]
+    assert "oauth-2025-04-20" not in beta
+    assert "claude-code-20250219" in beta
+    assert "interleaved-thinking-2025-05-14" in beta
+    assert events[-1].type is StreamEventType.MESSAGE_END
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_api_key_401_fails_loudly_without_refresh_attempt(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            401, json={"error": {"message": "invalid x-api-key"}}, request=request
+        )
+
+    client = client_for(handler)
+    with pytest.raises(AnthropicAuthError, match="check ANTHROPIC_API_KEY"):
+        [
+            event
+            async for event in AnthropicBackend(
+                client=client,
+                token_store=AnthropicApiKeyCredential("sk-ant-bad-key"),
+                diagnostics_path=tmp_path / "stream-diagnostics.jsonl",
+            ).complete([], [])
+        ]
+
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_server_error_retries_without_refresh(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+    refreshes: list[httpx.AsyncClient] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500, json={"error": {"message": "server"}}, request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+
+    async def refresh_token(client: httpx.AsyncClient) -> str:
+        refreshes.append(client)
+        return "fresh-access"
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+
+    monkeypatch.setattr(store, "refresh_token", refresh_token)
+    client = client_for(handler)
+    with pytest.raises(AnthropicHTTPError, match="500"):
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert len(requests) == 4
+    assert refreshes == []
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [429, 500, 502, 503, 504, 529])
+async def test_each_retryable_status_retries_before_stream(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(status_code, json={"error": {"message": "busy"}}, request=request)
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=SSE, request=request)
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            diagnostics_path=tmp_path / "logs" / "stream-diagnostics.jsonl",
+        ).complete([], [])
+    ]
+
+    assert len(requests) == 2
+    assert len(sleeps) == 1
+    assert [event.type for event in events].count(StreamEventType.RETRY) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_disconnect_after_headers_retries_before_first_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+
+    class DisconnectStream(httpx.AsyncByteStream):
+        def __init__(self, request: httpx.Request) -> None:
+            self.request = request
+
+        async def __aiter__(self):
+            raise httpx.ReadError("peer closed", request=self.request)
+            yield b""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                stream=DisconnectStream(request),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            diagnostics_path=tmp_path / "logs" / "stream-diagnostics.jsonl",
+        ).complete([], [])
+    ]
+
+    assert len(requests) == 2
+    assert [event.type for event in events].count(StreamEventType.RETRY) == 1
+    assert not (tmp_path / "logs" / "stream-diagnostics.jsonl").exists()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retry_after_controls_wait_and_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+    sleeps: list[float] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                429,
+                headers={"retry-after": "4"},
+                json={"error": {"message": "busy"}},
+                request=request,
+            )
+        return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=SSE, request=request)
+
+    async def no_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+    ]
+
+    retry = next(event for event in events if event.type is StreamEventType.RETRY)
+    assert sleeps == [4.0]
+    assert retry.data["text"] == "retrying (1/3) in 4s — 429 rate limited"
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_stream_rate_limit_retry_notice_uses_429_label(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text=(
+                    'data: {"type":"error","error":{"type":"rate_limit_error",'
+                    '"message":"slow down"}}\n\n'
+                ),
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+    ]
+
+    retry = next(event for event in events if event.type is StreamEventType.RETRY)
+    assert len(requests) == 2
+    assert retry.data["text"].endswith("429 rate limited")
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_retry_exhaustion_records_class_only_diagnostic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"message": "secret"}}, request=request)
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    diagnostics_path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicHTTPError, match="503"):
+        [
+            event
+            async for event in AnthropicBackend(
+                client=client,
+                token_store=store,
+                diagnostics_path=diagnostics_path,
+            ).complete([], [])
+        ]
+
+    assert len(requests) == 4
+    records = [json.loads(line) for line in diagnostics_path.read_text().splitlines()]
+    assert records == [
+        {
+            "timestamp": records[0]["timestamp"],
+            "cause": "zeta.providers.anthropic_errors.AnthropicHTTPError",
+            "retries": 3,
+        }
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_401_refresh_then_retryable_failure_uses_retry_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    statuses = iter((401, 503, 200))
+    refreshes: list[httpx.AsyncClient] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        status_code = next(statuses)
+        if status_code == 200:
+            return httpx.Response(200, headers={"content-type": "text/event-stream"}, text=SSE, request=request)
+        return httpx.Response(status_code, json={"error": {"message": "busy"}}, request=request)
+
+    async def refresh_token(client: httpx.AsyncClient) -> str:
+        refreshes.append(client)
+        return "fresh-access"
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("stale-access", "refresh-test", 4_000_000_000))
+    monkeypatch.setattr(store, "refresh_token", refresh_token)
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+    ]
+
+    assert len(refreshes) == 1
+    assert len([event for event in events if event.type is StreamEventType.RETRY]) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [400, 403, 404, 422])
+async def test_non_retryable_status_fails_fast(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(status_code, json={"error": {"message": "invalid"}}, request=request)
+
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises((AnthropicHTTPError, AnthropicAuthError)):
+        [
+            event
+            async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+        ]
+
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ctrl_c_aborts_retry_wait(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(503, json={"error": {"message": "busy"}}, request=request)
+
+    async def abort_wait(delay: float) -> None:
+        del delay
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", abort_wait)
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(asyncio.CancelledError):
+        [
+            event
+            async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+        ]
+
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_tool_call_delta_and_single_completion_boundary(tmp_path: Path) -> None:
+    stream = """event: message_start
+data: {"type":"message_start","message":{"id":"msg-2","usage":{"input_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"read","input":{}}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":2}}
+
+event: message_stop
+data: {"type":"message_stop"}
+"""
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            base_url="https://test.invalid/v1/messages",
+        ).complete([], [])
+    ]
+
+    assert len([event for event in events if event.type is StreamEventType.MESSAGE_END]) == 1
+    assert events[-1].message is not None
+    assert events[-1].message.content == [
+        ToolUseContent(ToolCall("tool-1", "read", {"path": "README.md"}))
+    ]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_expired_claude_login_refreshes_into_zeta_store(tmp_path: Path) -> None:
+    claude_path = tmp_path / "claude" / ".credentials.json"
+    claude_path.parent.mkdir()
+    claude_path.write_text(
+        json.dumps(
+            {
+                "claudeAiOauth": {
+                    "accessToken": "expired-access",
+                    "refreshToken": "refresh-test",
+                    "expiresAt": 1,
+                }
+            }
+        )
+    )
+    original_claude_credentials = claude_path.read_text()
+    token_requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        token_requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "refreshed-access",
+                "refresh_token": "refreshed-refresh",
+                "expires_in": 3600,
+            },
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(
+        tmp_path / "zeta" / "anthropic.json",
+        claude_credentials=claude_path,
+        token_url="https://test.invalid/oauth/token",
+    )
+    client = client_for(handler)
+
+    assert await store.access_token(client) == "refreshed-access"
+    assert len(token_requests) == 1
+    assert store.read() is not None
+    assert oct((tmp_path / "zeta" / "anthropic.json").stat().st_mode & 0o777) == "0o600"
+    assert claude_path.read_text() == original_claude_credentials
+    await client.aclose()
+
+
+def test_payload_caches_stable_prefix_and_maps_tool_results() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.SYSTEM, [TextContent("stable")]),
+            Message(
+                MessageRole.ASSISTANT,
+                [
+                    TextContent("previous answer"),
+                    ThinkingContent("private plan", "signature"),
+                ],
+            ),
+            Message(MessageRole.USER, [TextContent("run")]),
+        ],
+        [{"name": "read", "description": "read a file", "parameters": {"type": "object"}}],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert payload["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][0]["input_schema"] == {"type": "object"}
+    assert payload["messages"][-1]["role"] == "user"
+    assert payload["messages"][-1]["content"][0]["text"] == "run"
+    assert "cache_control" not in payload["messages"][-1]["content"][0]
+    assert payload["messages"][-2]["content"][0]["cache_control"] == {
+        "type": "ephemeral"
+    }
+    assert "cache_control" not in payload["messages"][-2]["content"][1]
+
+
+@pytest.mark.asyncio
+async def test_compaction_keeps_stable_cache_prefix_bytes(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path / "sessions")
+    store.append_message(Message(MessageRole.USER, [TextContent("old")]))
+    store.append_message(Message(MessageRole.USER, [TextContent("tail")]))
+    backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
+    assembler = ContextAssembler(
+        store,
+        token_budget=100,
+        retained_tail=1,
+        token_counter=lambda _: 10,
+        system_prompt="stable system",
+        backend=backend,
+    )
+
+    before = await assembler.assemble()
+    before_payload = build_messages_payload(
+        before,
+        [{"name": "read", "parameters": {"type": "object"}}],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+    after = await assembler.assemble(force=True)
+    after_payload = build_messages_payload(
+        after,
+        [{"name": "read", "parameters": {"type": "object"}}],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    encode = lambda value: json.dumps(
+        value, ensure_ascii=False, separators=(",", ":")
+    ).encode()
+    assert encode(
+        {"system": before_payload["system"], "tools": before_payload["tools"]}
+    ) == encode(
+        {"system": after_payload["system"], "tools": after_payload["tools"]}
+    )
+    assert after_payload["messages"][1]["content"][0]["cache_control"] == {
+        "type": "ephemeral"
+    }
+
+
+def test_anthropic_flattens_non_text_tool_blocks_at_provider_boundary() -> None:
+    payload = build_messages_payload(
+        [
+            Message(
+                MessageRole.TOOL_RESULT,
+                tool_result=ToolResult(
+                    "call-1",
+                    "stale",
+                    content_blocks=[
+                        {
+                            "type": "image",
+                            "data": "aGVsbG8=",
+                            "mimeType": "image/png",
+                        },
+                        {
+                            "type": "resource",
+                            "resource": {
+                                "uri": "file:///tmp/note.txt",
+                                "text": "note",
+                            },
+                        },
+                    ],
+                ),
+            )
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert payload["messages"][0]["content"][0]["content"] == (
+        "[image block] media_type=image/png bytes=5 fallback=invalid image data\n"
+        "[resource: file:///tmp/note.txt]"
+    )
+
+
+@pytest.mark.asyncio
+async def test_backend_locks_cache_breakpoints_to_stable_boundaries(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=SSE,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    backend = AnthropicBackend(
+        client=client,
+        token_store=store,
+        base_url="https://test.invalid/v1/messages",
+    )
+    events = [
+        event
+        async for event in backend.complete(
+            [
+                Message(MessageRole.SYSTEM, [TextContent("stable")]),
+                Message(MessageRole.ASSISTANT, [TextContent("previous answer")]),
+                Message(MessageRole.USER, [TextContent("run")]),
+            ],
+            [{"name": "read", "parameters": {"type": "object"}}],
+        )
+    ]
+
+    del events
+    payload = json.loads(requests[0].content)
+    assert payload["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert payload["system"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert payload["messages"][-2]["content"][-1]["cache_control"] == {
+        "type": "ephemeral"
+    }
+    assert "cache_control" not in payload["messages"][-1]["content"][-1]
+    assert [
+        (section_name, index)
+        for section_name in ("system", "tools")
+        for index, value in enumerate(payload[section_name])
+        if "cache_control" in value
+    ] == [("system", 0), ("system", 1), ("tools", 0)]
+    assert [
+        (message_index, block_index)
+        for message_index, message in enumerate(payload["messages"])
+        for block_index, block in enumerate(message["content"])
+        if "cache_control" in block
+    ] == [(0, 0)]
+    await client.aclose()
+
+
+def _conversation_cache_locations(payload: dict[str, object]) -> list[tuple[int, int]]:
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    return [
+        (message_index, block_index)
+        for message_index, message in enumerate(messages)
+        for block_index, block in enumerate(message["content"])
+        if "cache_control" in block
+    ]
+
+
+def _serialized_message_prefix(
+    payload: dict[str, object], marker: tuple[int, int]
+) -> bytes:
+    message_index, block_index = marker
+    messages = payload["messages"]
+    assert isinstance(messages, list)
+    prefix = copy.deepcopy(messages[: message_index + 1])
+    assert isinstance(prefix[-1], dict)
+    content = prefix[-1]["content"]
+    assert isinstance(content, list)
+    prefix[-1]["content"] = content[: block_index + 1]
+    assert isinstance(prefix[-1]["content"][-1], dict)
+    prefix[-1]["content"][-1].pop("cache_control", None)
+    return json.dumps(prefix, sort_keys=True).encode()
+
+
+def test_conversation_breakpoint_advances_through_active_turn() -> None:
+    tools = [{"name": "read", "parameters": {"type": "object"}}]
+    request = Message(MessageRole.USER, [TextContent("inspect this")])
+    tool_use = Message(
+        MessageRole.ASSISTANT,
+        [ToolUseContent(ToolCall("call-1", "read", {}))],
+    )
+    tool_result = Message(
+        MessageRole.TOOL_RESULT,
+        [TextContent("file contents")],
+        tool_result=ToolResult("call-1", "file contents"),
+    )
+    revised_tool_result = Message(
+        MessageRole.TOOL_RESULT,
+        [
+            TextContent("file contents"),
+            TextContent('routed tool schemas:\n{"name": "read"}'),
+        ],
+        tool_result=ToolResult("call-1", "file contents"),
+    )
+    calls = [
+        [request],
+        [request, tool_use],
+        [request, tool_use, tool_result],
+        [request, tool_use, revised_tool_result],
+        [
+            request,
+            tool_use,
+            revised_tool_result,
+            Message(MessageRole.ASSISTANT, [TextContent("done")]),
+        ],
+    ]
+    expected_locations = [
+        [],
+        [(0, 0)],
+        [(1, 0)],
+        [(1, 0)],
+        [(2, 1)],
+    ]
+    payloads = [
+        build_messages_payload(
+            messages,
+            tools,
+            model="claude-test",
+            max_tokens=4096,
+            thinking_budget=2048,
+        )
+        for messages in calls
+    ]
+
+    marked_spans: list[tuple[int, tuple[int, int], bytes]] = []
+    for call_index, (payload, expected) in enumerate(
+        zip(payloads, expected_locations, strict=True)
+    ):
+        assert _conversation_cache_locations(payload) == expected
+        marker_count = sum(
+            "cache_control" in block
+            for message in payload["messages"]
+            for block in message["content"]
+        )
+        marker_count += sum(
+            "cache_control" in block for block in payload.get("system", [])
+        )
+        marker_count += sum(
+            "cache_control" in tool for tool in payload.get("tools", [])
+        )
+        assert marker_count <= 4
+        assert all(
+            "cache_control" not in block
+            for block in payload["messages"][-1]["content"]
+        )
+        if expected:
+            marker = expected[0]
+            marked_spans.append(
+                (call_index, marker, _serialized_message_prefix(payload, marker))
+            )
+
+    assert payloads[2]["messages"][-1] != payloads[3]["messages"][-1]
+    for call_index, marker, expected_bytes in marked_spans:
+        for payload in payloads[call_index + 1 :]:
+            assert _serialized_message_prefix(payload, marker) == expected_bytes
+
+
+def _content_prefix_without_cache_metadata(payload: dict[str, object]) -> bytes:
+    marker = b',"cache_control":{"type":"ephemeral"}'
+    return request_bytes(payload).replace(marker, b"")
+
+
+def test_compaction_changes_the_conversation_prefix_once() -> None:
+    system = Message(MessageRole.SYSTEM, [TextContent("stable")])
+    tools = [{"name": "read", "parameters": {"type": "object"}}]
+    before_compaction = [
+        system,
+        Message(MessageRole.USER, [TextContent("first")]),
+        Message(MessageRole.ASSISTANT, [TextContent("answer one")]),
+        Message(MessageRole.USER, [TextContent("second")]),
+    ]
+    next_turn = [
+        *before_compaction,
+        Message(MessageRole.ASSISTANT, [TextContent("answer two")]),
+        Message(MessageRole.USER, [TextContent("third")]),
+    ]
+    compacted = [
+        system,
+        Message(MessageRole.COMPACTION, [TextContent("[compaction]")]),
+        Message(MessageRole.ASSISTANT, [TextContent("stable summary")]),
+        Message(MessageRole.USER, [TextContent("second")]),
+    ]
+    after_compaction = [
+        *compacted,
+        Message(MessageRole.ASSISTANT, [TextContent("answer two")]),
+        Message(MessageRole.USER, [TextContent("third")]),
+    ]
+
+    payload_before = request_payload(before_compaction, tools)
+    payload_next = request_payload(next_turn, tools)
+    payload_compacted = request_payload(compacted, tools)
+    payload_after = request_payload(after_compaction, tools)
+
+    assert _conversation_cache_locations(payload_before) == [(1, 0)]
+    assert _conversation_cache_locations(payload_next) == [(3, 0)]
+    before_bytes = _content_prefix_without_cache_metadata(payload_before)
+    next_bytes = _content_prefix_without_cache_metadata(payload_next)
+    answer_end = before_bytes.find(b'"answer one"') + len('"answer one"')
+    assert next_bytes.startswith(before_bytes[:answer_end])
+    assert _conversation_cache_locations(payload_compacted) == [(1, 0)]
+    assert _content_prefix_without_cache_metadata(payload_compacted) != (
+        _content_prefix_without_cache_metadata(payload_next)
+    )
+    assert _conversation_cache_locations(payload_after) == [(3, 0)]
+    compacted_prefix = _content_prefix_without_cache_metadata(payload_compacted)
+    summary_end = compacted_prefix.find(b"stable summary") + len("stable summary")
+    assert _content_prefix_without_cache_metadata(payload_after).startswith(
+        compacted_prefix[:summary_end]
+    )
+    assert json.dumps(
+        {"system": payload_compacted["system"], "tools": payload_compacted["tools"]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ) == json.dumps(
+        {"system": payload_after["system"], "tools": payload_after["tools"]},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ([ThinkingContent("plan", "signature")], []),
+        ([RedactedThinkingContent("redacted")], []),
+        ([TextContent(""), ThinkingContent("plan", "signature")], []),
+    ],
+)
+def test_conversation_breakpoint_skips_non_cacheable_final_blocks(
+    content: list[object], expected: list[tuple[int, int]]
+) -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.ASSISTANT, content),
+            Message(MessageRole.USER, [TextContent("current")]),
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert _conversation_cache_locations(payload) == expected
+
+
+def test_conversation_breakpoint_scans_back_across_messages() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.ASSISTANT, [TextContent("stable")]),
+            Message(
+                MessageRole.ASSISTANT,
+                [ThinkingContent("plan", "signature")],
+            ),
+            Message(MessageRole.USER, [TextContent("current")]),
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert _conversation_cache_locations(payload) == [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    ("message", "expected"),
+    [
+        (
+            Message(
+                MessageRole.ASSISTANT,
+                [ToolUseContent(ToolCall("call-1", "read", {}))],
+            ),
+            [(0, 0)],
+        ),
+        (
+            Message(
+                MessageRole.TOOL_RESULT,
+                tool_result=ToolResult("call-1", "result"),
+            ),
+            [(0, 0)],
+        ),
+        (
+            Message(
+                MessageRole.ASSISTANT,
+                [
+                    ImageContent(
+                        png_block()["data"],
+                        "image/png",
+                    )
+                ],
+            ),
+            [(0, 0)],
+        ),
+    ],
+)
+def test_conversation_breakpoint_targets_each_cacheable_block_type(
+    message: Message, expected: list[tuple[int, int]]
+) -> None:
+    payload = build_messages_payload(
+        [message, Message(MessageRole.USER, [TextContent("current")])],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert _conversation_cache_locations(payload) == expected
+
+
+def test_degenerate_empty_conversation_has_no_breakpoint() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.ASSISTANT, [TextContent("")]),
+            Message(MessageRole.USER, [TextContent("")]),
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert _conversation_cache_locations(payload) == []
+
+
+def test_empty_system_prompt_is_omitted_from_payload() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.SYSTEM, [TextContent("  ")]),
+            Message(MessageRole.USER, [TextContent("run")]),
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert "system" not in payload
+
+
+def test_authorization_url_contains_validated_redirect_uri() -> None:
+    url = build_authorization_url("state", "challenge", "http://localhost/callback")
+    assert "redirect_uri=http%3A%2F%2Flocalhost%2Fcallback" in url
+
+
+def test_claude_keychain_bootstrap_reads_oauth_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    def run(*args: object, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return type("Result", (), {"returncode": 0, "stdout": json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "keychain-access",
+                "refreshToken": "keychain-refresh",
+                "expiresAt": 4_000_000_000,
+            }
+        })})()
+
+    monkeypatch.setattr(anthropic_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(anthropic_module.sys, "platform", "darwin")
+    monkeypatch.setattr(anthropic_module.subprocess, "run", run)
+    tokens = AnthropicCredentialStore(tmp_path / "zeta.json").bootstrap()
+
+    assert tokens == OAuthTokens("keychain-access", "keychain-refresh", 4_000_000_000)
+    assert calls == [
+        (
+            (["security", "find-generic-password", "-s", "Claude Code-credentials", "-w"],),
+            {
+                "capture_output": True,
+                "check": False,
+                "env": {"PATH": anthropic_module.os.defpath},
+                "text": True,
+                "timeout": 2,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        type("Result", (), {"returncode": 1, "stdout": ""})(),
+        type("Result", (), {"returncode": 0, "stdout": "not json"})(),
+    ],
+)
+def test_claude_keychain_bootstrap_treats_invalid_output_as_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, result: object
+) -> None:
+    monkeypatch.setattr(anthropic_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(anthropic_module.sys, "platform", "darwin")
+    monkeypatch.setattr(anthropic_module.subprocess, "run", lambda *args, **kwargs: result)
+
+    assert AnthropicCredentialStore(tmp_path / "zeta.json").bootstrap() is None
+
+
+def test_claude_keychain_bootstrap_treats_timeout_as_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def run(*args: object, **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(anthropic_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(anthropic_module.sys, "platform", "darwin")
+    monkeypatch.setattr(anthropic_module.subprocess, "run", run)
+
+    assert AnthropicCredentialStore(tmp_path / "zeta.json").bootstrap() is None
+
+
+def test_claude_file_bootstrap_wins_over_keychain(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude_dir = tmp_path / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / ".credentials.json").write_text(json.dumps({
+        "claudeAiOauth": {
+            "accessToken": "file-access",
+            "refreshToken": "file-refresh",
+            "expiresAt": 4_000_000_000,
+        }
+    }))
+    monkeypatch.setattr(anthropic_module.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(anthropic_module.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        anthropic_module.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("keychain should not be queried"),
+    )
+
+    assert AnthropicCredentialStore(tmp_path / "zeta.json").bootstrap() == OAuthTokens(
+        "file-access", "file-refresh", 4_000_000_000
+    )
+
+
+def test_anthropic_http_error_includes_safe_truncated_body() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "message": "unsupported request " + "x" * 400,
+                "access_token": "anthropic-secret",
+            }
+        }
+    ).encode()
+
+    error = anthropic_module._http_error(400, body)
+
+    assert "unsupported request" in str(error)
+    assert "anthropic-secret" not in str(error)
+    assert len(anthropic_module.error_body_excerpt(body)) == 300
+
+
+def test_anthropic_http_error_redacts_markers_in_valid_json_values() -> None:
+    body = json.dumps(
+        {
+            "error": {
+                "message": (
+                    "access-token=access-secret refresh-token=refresh-secret "
+                    "authorization=authorization-secret"
+                )
+            }
+        }
+    ).encode()
+
+    error = anthropic_module._http_error(400, body)
+
+    assert "access-secret" not in str(error)
+    assert "refresh-secret" not in str(error)
+    assert "authorization-secret" not in str(error)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sse_error_redacts_authorization_marker(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"type":"error","error":{"type":"api_error",'
+                '"message":"authorization=authorization-secret"}}\n\n'
+            ),
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicStreamError) as raised:
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert "authorization-secret" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_post_start_provider_error_salvages_once(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+    stream = "\n".join(
+        [
+            'data: {"type":"message_start","message":{}}',
+            "",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+            "",
+            'data: {"type":"error","error":{"type":"overloaded_error","message":"busy"}}',
+            "",
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    diagnostics_path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events: list[StreamEvent] = []
+    with pytest.raises(AnthropicStreamError, match="overloaded_error: busy"):
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            diagnostics_path=diagnostics_path,
+        ).complete([], []):
+            events.append(event)
+
+    assert len(requests) == 1
+    assert not any(event.type is StreamEventType.RETRY for event in events)
+    assert events[-1].type is StreamEventType.MESSAGE_END
+    assert events[-1].data["truncated"] is True
+    assert events[-1].message == Message(
+        MessageRole.ASSISTANT, [TextContent("partial")]
+    )
+    records = diagnostics_path.read_text().splitlines()
+    assert len(records) == 1
+    assert json.loads(records[0])["cause"] == (
+        "zeta.providers.anthropic_errors.AnthropicStreamError"
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_error_after_message_stop_is_ignored(tmp_path: Path) -> None:
+    stream = "\n".join(
+        [
+            'data: {"type":"message_start","message":{}}',
+            "",
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+            "",
+            'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"complete"}}',
+            "",
+            'data: {"type":"content_block_stop","index":0}',
+            "",
+            'data: {"type":"message_stop"}',
+            "",
+            'data: {"type":"error","error":{"type":"overloaded_error","message":"duplicate"}}',
+            "",
+        ]
+    )
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    diagnostics_path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(
+            client=client,
+            token_store=store,
+            diagnostics_path=diagnostics_path,
+        ).complete([], [])
+    ]
+
+    assert [event.type for event in events].count(StreamEventType.MESSAGE_END) == 1
+    assert events[-1].data.get("truncated") is None
+    assert not diagnostics_path.exists()
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sse_error_redacts_bearer_authorization(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"type":"error","error":{"type":"api_error",'
+                '"message":"authorization: Bearer sse-authorization-secret"}}\n\n'
+            ),
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicStreamError) as raised:
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert "sse-authorization-secret" not in str(raised.value)
+    assert "Bearer" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_sse_error_redacts_multiline_authorization(
+    tmp_path: Path,
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=(
+                'data: {"type":"error","error":\n'
+                'data: {"type":"api_error","message":"authorization: Bearer\\n'
+                'newline-sse-marker"}}\n\n'
+            ),
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicStreamError) as raised:
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+
+    assert "newline-sse-marker" not in str(raised.value)
+    assert "Bearer" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.parametrize("probe", ["block", "delta", "follows", "precedes"])
+def test_anthropic_provider_types_do_not_enter_errors(probe: str) -> None:
+    marker = f"anthropic-{probe}-marker"
+    with pytest.raises(AnthropicStreamError) as raised:
+        if probe == "block":
+            anthropic_module._translate_event(
+                "message",
+                {
+                    "type": "content_block_start",
+                    "index": 0,
+                    "content_block": {"type": marker},
+                },
+                {},
+                set(),
+                set(),
+                {},
+            )
+        elif probe == "delta":
+            anthropic_module._translate_event(
+                "message",
+                {
+                    "type": "content_block_delta",
+                    "index": 0,
+                    "delta": {"type": marker},
+                },
+                {0: anthropic_module._BlockState("text")},
+                {0},
+                set(),
+                {},
+            )
+        elif probe == "follows":
+            anthropic_module._advance_message_state("stopped", marker)
+        else:
+            anthropic_module._advance_message_state("not-started", marker)
+
+    assert marker not in str(raised.value)
+    assert marker not in repr(raised.value)
+
+
+def test_signed_thinking_blocks_use_anthropic_wire_types() -> None:
+    payload = build_messages_payload(
+        [
+            Message(
+                MessageRole.ASSISTANT,
+                [
+                    ThinkingContent("plan", "sig-1"),
+                    RedactedThinkingContent("opaque"),
+                ],
+            )
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert payload["messages"][0]["content"] == [
+        {"type": "thinking", "thinking": "plan", "signature": "sig-1"},
+        {"type": "redacted_thinking", "data": "opaque"},
+    ]
+
+
+def test_thinking_tool_turn_replays_assistant_blocks_before_tool_result() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.USER, [TextContent("inspect this")]),
+            Message(
+                MessageRole.ASSISTANT,
+                [
+                    ThinkingContent("plan", "sig-1"),
+                    RedactedThinkingContent("opaque"),
+                    ToolUseContent(ToolCall("call-1", "read", {"path": "note.txt"})),
+                ],
+            ),
+            Message(
+                MessageRole.TOOL_RESULT,
+                tool_result=ToolResult("call-1", "contents"),
+            ),
+        ],
+        [{"name": "read", "parameters": {"type": "object"}}],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert payload["messages"] == [
+        {"role": "user", "content": [{"type": "text", "text": "inspect this"}]},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "plan", "signature": "sig-1"},
+                {"type": "redacted_thinking", "data": "opaque"},
+                {
+                    "type": "tool_use",
+                    "id": "call-1",
+                    "name": "read",
+                    "input": {"path": "note.txt"},
+                    "cache_control": {"type": "ephemeral"},
+                },
+            ],
+        },
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "call-1",
+                    "content": "contents",
+                    "is_error": False,
+                }
+            ],
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_http_failure_is_typed(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(401, json={"error": {"message": "expired"}}, request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicHTTPError):
+        await anext(AnthropicBackend(client=client, token_store=store).complete([], []))
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_request_entry_transport_failure_is_typed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("secret connection details", request=request)
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    async def no_sleep(delay: float) -> None:
+        del delay
+
+    monkeypatch.setattr(anthropic_module.asyncio, "sleep", no_sleep)
+    with pytest.raises(AnthropicHTTPError) as raised:
+        [
+            event
+            async for event in AnthropicBackend(
+                client=client, token_store=store
+            ).complete([], [])
+        ]
+    assert "secret connection details" not in str(raised.value)
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_early_stream_end_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            'data: {"type":"message_start","message":{}}\n',
+        )
+    record = json.loads(
+        (tmp_path / "logs" / "stream-diagnostics.jsonl").read_text().strip()
+    )
+    assert record["cause"] == "clean-eof"
+    assert record["stream_age_seconds"] >= 0
+    assert record["bytes_received"] > 0
+    assert record["sse_events_received"] == 1
+    assert record["idle_gap_seconds"] >= 0
+    assert record["open_blocks"] == 0
+    assert record["closed_blocks"] == 0
+    assert record["stop_reason"] is None
+    assert record["model"] == "claude-sonnet-4-6"
+
+
+@pytest.mark.asyncio
+async def test_message_stop_salvages_open_text_block(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(
+        MessageRole.ASSISTANT, [TextContent("partial")]
+    )
+    assert events[-1].data["truncated"] is True
+    record = json.loads(
+        (tmp_path / "logs" / "stream-diagnostics.jsonl").read_text().strip()
+    )
+    assert record["cause"] == "message_stop"
+    assert record["open_blocks"] == 1
+    assert record["closed_blocks"] == 0
+
+
+@pytest.mark.asyncio
+async def test_network_eof_salvage_records_exception_and_headers(tmp_path: Path) -> None:
+    request = httpx.Request("POST", "https://test.invalid/v1/messages")
+
+    class Response:
+        status_code = 200
+        headers = {"request-id": "req-123", "model": "header-model"}
+
+        async def aiter_lines(self):
+            for line in (
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+                "",
+            ):
+                yield line
+            raise httpx.ReadError(
+                "peer closed; Bearer bearer-secret api-key=api-secret token=token-secret",
+                request=request,
+            )
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with pytest.raises(AnthropicStreamError) as raised:
+        [
+            event
+            async for event in AnthropicBackend(client=Client(), token_store=store).complete(
+                [], []
+            )
+        ]
+    assert "peer closed" not in str(raised.value)
+    record = json.loads(
+        (tmp_path / "logs" / "stream-diagnostics.jsonl").read_text().strip()
+    )
+    assert record["cause"] == "httpx.ReadError"
+    assert "peer closed" not in record["cause"]
+    assert "bearer-secret" not in record["cause"]
+    assert "api-secret" not in record["cause"]
+    assert "token-secret" not in record["cause"]
+    assert record["request_id"] == "req-123"
+    assert record["model"] == "header-model"
+    assert record["sse_events_received"] == 3
+    assert record["open_blocks"] == 1
+    assert record["closed_blocks"] == 0
+
+
+def test_stream_diagnostic_log_rotates_at_size_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    monkeypatch.setattr(diagnostics_module, "STREAM_DIAGNOSTICS_MAX_BYTES", 160)
+
+    diagnostics_module.write_stream_diagnostic(
+        path, {"cause": "clean-eof", "model": "x" * 1000}
+    )
+    diagnostics_module.write_stream_diagnostic(
+        path, {"cause": "message_stop", "model": "y" * 1000}
+    )
+
+    assert path.exists()
+    assert path.with_name("stream-diagnostics.jsonl.1").exists()
+    assert path.stat().st_size <= 160
+    assert path.with_name("stream-diagnostics.jsonl.1").stat().st_size <= 160
+
+
+def test_stream_diagnostic_omits_exception_message_and_bounds_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    monkeypatch.setattr(diagnostics_module, "STREAM_DIAGNOSTICS_MAX_BYTES", 256)
+
+    diagnostics_module.write_stream_diagnostic(
+        path,
+        {
+            "cause": "ReadError: Bearer very-secret-token api-key=another-secret "
+            + "x" * 1000
+        },
+    )
+
+    assert path.stat().st_size <= 256
+    record = json.loads(path.read_text())
+    assert "cause" not in record
+    assert "very-secret-token" not in path.read_text()
+    assert "another-secret" not in path.read_text()
+
+
+def test_stream_diagnostic_omits_free_form_cause(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    message = "stream failed with sk-ant-api03-anthropic-secret"
+
+    diagnostics_module.write_stream_diagnostic(
+        path,
+        {
+            "cause": message,
+        },
+    )
+
+    record = json.loads(path.read_text())
+    assert "cause" not in record
+    assert message not in path.read_text()
+
+
+def test_stream_diagnostic_omits_quoted_exception_message(tmp_path: Path) -> None:
+    path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+    message = 'Bearer "prefix_SECRET_SUFFIX"TAIL'
+
+    diagnostics_module.write_stream_diagnostic(
+        path, {"cause": f"ReadError: {message}"}
+    )
+
+    record = json.loads(path.read_text())
+    assert "cause" not in record
+    assert message not in path.read_text()
+
+
+def test_stream_diagnostic_keeps_closed_cause_sentinel(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "logs" / "stream-diagnostics.jsonl"
+
+    diagnostics_module.write_stream_diagnostic(path, {"cause": "clean-eof"})
+
+    record = json.loads(path.read_text())
+    assert record["cause"] == "clean-eof"
+
+
+@pytest.mark.asyncio
+async def test_message_stop_salvages_parseable_open_tool_block(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"read"}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\"}"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(
+        MessageRole.ASSISTANT,
+        [ToolUseContent(ToolCall("call-1", "read", {"path": "README.md"}))],
+    )
+    assert events[-1].data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_message_stop_drops_unparseable_open_tool_block(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"read"}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\""}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(MessageRole.ASSISTANT)
+    assert events[-1].data == {
+        "truncated": True,
+        "dropped_tool_calls": 1,
+        "usage": {},
+        "stop_reason": None,
+    }
+
+
+@pytest.mark.asyncio
+async def test_message_stop_salvages_mixed_open_blocks(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}',
+                "",
+                'data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call-1","name":"read"}}',
+                "",
+                'data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\""}}',
+                "",
+                'data: {"type":"content_block_start","index":2,"content_block":{"type":"redacted_thinking","data":"opaque"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(
+        MessageRole.ASSISTANT,
+        [TextContent("partial"), RedactedThinkingContent("opaque")],
+    )
+    assert events[-1].data["dropped_tool_calls"] == 1
+
+
+@pytest.mark.asyncio
+async def test_eof_after_empty_text_start_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            'data: {"type":"message_start","message":{}}\n\n'
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n',
+        )
+
+
+@pytest.mark.asyncio
+async def test_eof_after_tool_start_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            'data: {"type":"message_start","message":{}}\n\n'
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"read"}}\n',
+        )
+
+
+@pytest.mark.asyncio
+async def test_eof_with_open_redacted_thinking_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            'data: {"type":"message_start","message":{}}\n\n'
+            'data: {"type":"content_block_start","index":0,"content_block":{"type":"redacted_thinking","data":"opaque"}}\n',
+        )
+
+
+@pytest.mark.asyncio
+async def test_message_stop_keeps_unsigned_thinking_for_display(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"plan"}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"partial-sig"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(
+        MessageRole.ASSISTANT, [ThinkingContent("plan")]
+    )
+    assert events[-1].data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_early_stream_end_with_partial_text_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            "\n".join(
+                [
+                    'data: {"type":"message_start","message":{}}',
+                    "",
+                    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                    "",
+                    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"cut off"}}',
+                ]
+            ),
+        )
+
+
+def test_salvaged_context_omits_unsigned_thinking_on_replay() -> None:
+    payload = build_messages_payload(
+        [
+            Message(MessageRole.USER, [TextContent("continue")]),
+            Message(
+                MessageRole.ASSISTANT,
+                [ThinkingContent("partial plan"), TextContent("partial answer")],
+            ),
+        ],
+        [],
+        model="claude-test",
+        max_tokens=4096,
+        thinking_budget=2048,
+    )
+
+    assert payload["messages"][-1] == {
+        "role": "assistant",
+        "content": [{"type": "text", "text": "partial answer"}],
+    }
+
+
+@pytest.mark.asyncio
+async def test_closed_unsigned_thinking_remains_strict(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_unsigned_thinking_with_open_sibling_remains_strict(
+    tmp_path: Path,
+) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_closed_malformed_tool_with_open_sibling_remains_strict(
+    tmp_path: Path,
+) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call-1","name":"read"}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"path\\":\\"README.md\\""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_eof_message_delta_is_typed(tmp_path: Path) -> None:
+    with pytest.raises(AnthropicStreamError, match="before message completion"):
+        await _collect_anthropic_events(
+            tmp_path,
+            'data: {"type":"message_start","message":{}}\n\n'
+            'data: {"type":"message_delta","delta":{"stop_reason":"max_tokens"},"usage":{"output_tokens":7}}',
+        )
+
+
+@pytest.mark.asyncio
+async def test_two_turn_replay_omits_empty_salvaged_text_block(tmp_path: Path) -> None:
+    truncated = (
+        'data: {"type":"message_start","message":{}}\n\n'
+        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n'
+    )
+    requests: list[dict[str, object]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        requests.append(payload)
+        stream = truncated if len(requests) == 1 else SSE
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    store = ConversationStore(tmp_path / "sessions")
+    token_store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    token_store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    loop = AgentLoop(
+        AnthropicBackend(client=client, token_store=token_store),
+        store,
+        tool_schemas=[],
+skill_catalog=SkillCatalog.empty(),
+    )
+
+    [event async for event in loop.run_turn("first")]
+    [event async for event in loop.run_turn("second")]
+
+    assert len(requests) == 2
+    assert all(
+        message != {"role": "assistant", "content": []}
+        for message in requests[1]["messages"]
+    )
+    assert any(
+        block.get("text") == "second"
+        for message in requests[1]["messages"]
+        for block in message["content"]
+    )
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_malformed_nested_sse_is_typed(tmp_path: Path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text='data: {"type":"message_start","message":{}}\n\ndata: {"type":"message_delta","delta":"bad"}\n\ndata: {"type":"message_stop"}\n\n',
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicStreamError):
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refreshes_share_rotating_token_lock(tmp_path: Path) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "access_token": "rotated-access",
+                "refresh_token": "rotated-refresh",
+                "expires_in": 3600,
+            },
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json", token_url="https://test.invalid/token")
+    store.save(OAuthTokens("expired-access", "rotating-refresh", 1))
+    client = client_for(handler)
+
+    assert await asyncio.gather(store.access_token(client), store.access_token(client)) == [
+        "rotated-access",
+        "rotated-access",
+    ]
+    assert len(requests) == 1
+    await client.aclose()
+
+
+@pytest.mark.asyncio
+async def test_cancellation_survives_failing_owned_client_cleanup(
+    tmp_path: Path,
+) -> None:
+    stopped = asyncio.Event()
+
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            await stopped.wait()
+            yield ""
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            raise RuntimeError("stream cleanup failed")
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+        async def aclose(self):
+            raise RuntimeError("cleanup failed")
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with patch("zeta.providers.anthropic.httpx.AsyncClient", return_value=Client()):
+        task = asyncio.create_task(
+            anext(AnthropicBackend(token_store=store).complete([], []))
+        )
+        await asyncio.sleep(0)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_cancellation_during_owned_client_close_is_not_swallowed(
+    tmp_path: Path,
+) -> None:
+    close_started = asyncio.Event()
+    never = asyncio.Event()
+
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in SSE.splitlines():
+                yield line
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+        async def aclose(self):
+            close_started.set()
+            await never.wait()
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    async def consume() -> list[object]:
+        return [event async for event in AnthropicBackend(token_store=store).complete([], [])]
+
+    with patch("zeta.providers.anthropic.httpx.AsyncClient", return_value=Client()):
+        task = asyncio.create_task(consume())
+        await close_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+
+@pytest.mark.asyncio
+async def test_consumer_aclose_suppresses_failing_stream_cleanup(
+    tmp_path: Path,
+) -> None:
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"message_start","message":{}}'
+            yield ""
+            await asyncio.Event().wait()
+            yield ""
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            raise RuntimeError("stream cleanup failed")
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+        async def aclose(self):
+            raise RuntimeError("client cleanup failed")
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with patch("zeta.providers.anthropic.httpx.AsyncClient", return_value=Client()):
+        stream = AnthropicBackend(token_store=store).complete([], [])
+        await anext(stream)
+        await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_response_cleanup_cancellation_wins_over_stream_error(
+    tmp_path: Path,
+) -> None:
+    cleanup_started = asyncio.Event()
+    never = asyncio.Event()
+
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"message_delta","delta":"bad"}'
+            yield ""
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            cleanup_started.set()
+            await never.wait()
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    task = asyncio.create_task(
+        anext(AnthropicBackend(client=Client(), token_store=store).complete([], []))
+    )
+    await cleanup_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError) as raised:
+        await task
+    assert isinstance(raised.value.__cause__, AnthropicStreamError)
+
+
+@pytest.mark.asyncio
+async def test_client_cleanup_cancellation_wins_over_stream_error(
+    tmp_path: Path,
+) -> None:
+    cleanup_started = asyncio.Event()
+    never = asyncio.Event()
+
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            yield 'data: {"type":"message_delta","delta":"bad"}'
+            yield ""
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+        async def aclose(self):
+            cleanup_started.set()
+            await never.wait()
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with patch("zeta.providers.anthropic.httpx.AsyncClient", return_value=Client()):
+        task = asyncio.create_task(
+            anext(AnthropicBackend(token_store=store).complete([], []))
+        )
+        await cleanup_started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+    assert isinstance(raised.value.__cause__, AnthropicStreamError)
+
+
+@pytest.mark.asyncio
+async def test_response_cleanup_http_error_is_typed(tmp_path: Path) -> None:
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in SSE.splitlines():
+                yield line
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            raise httpx.ConnectError("response cleanup secret")
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with pytest.raises(AnthropicHTTPError) as raised:
+        [
+            event
+            async for event in AnthropicBackend(
+                client=Client(), token_store=store
+            ).complete([], [])
+        ]
+    assert "response cleanup secret" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_client_cleanup_http_error_is_typed(tmp_path: Path) -> None:
+    class Response:
+        status_code = 200
+
+        async def aiter_lines(self):
+            for line in SSE.splitlines():
+                yield line
+
+    class Stream:
+        async def __aenter__(self):
+            return Response()
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            return Stream()
+
+        async def aclose(self):
+            raise httpx.TimeoutException("client cleanup secret")
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    with patch("zeta.providers.anthropic.httpx.AsyncClient", return_value=Client()):
+        with pytest.raises(AnthropicHTTPError) as raised:
+            [
+                event
+                async for event in AnthropicBackend(token_store=store).complete([], [])
+            ]
+    assert "client cleanup secret" not in str(raised.value)
+
+
+@pytest.mark.asyncio
+async def test_cancel_mid_thinking_drops_partial_block_before_resume(
+    tmp_path: Path,
+) -> None:
+    thinking_started = asyncio.Event()
+    never = asyncio.Event()
+    calls = 0
+
+    class Response:
+        status_code = 200
+
+        def __init__(self, lines, *, wait_after=True):
+            self.lines = lines
+            self.wait_after = wait_after
+
+        async def aiter_lines(self):
+            for line in self.lines:
+                yield line
+            if self.wait_after:
+                await never.wait()
+
+    class Stream:
+        def __init__(self, response):
+            self.response = response
+
+        async def __aenter__(self):
+            return self.response
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+    class Client:
+        def stream(self, method, url, *, headers, content):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return Stream(
+                    Response(
+                        [
+                            'data: {"type":"message_start","message":{}}',
+                            "",
+                            'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                            "",
+                            'data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"partial"}}',
+                            "",
+                        ]
+                    )
+                )
+            return Stream(
+                Response(
+                    [
+                        'data: {"type":"message_start","message":{}}',
+                        "",
+                        'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                        "",
+                        'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"resumed"}}',
+                        "",
+                        'data: {"type":"content_block_stop","index":0}',
+                        "",
+                        'data: {"type":"message_stop"}',
+                        "",
+                    ],
+                    wait_after=False,
+                )
+            )
+
+    store = ConversationStore(tmp_path / "sessions")
+    token_store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    token_store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    backend = AnthropicBackend(client=Client(), token_store=token_store)
+    loop = AgentLoop(backend, store, skill_catalog=SkillCatalog.empty())
+
+    task = asyncio.create_task(
+        consume_loop_turn(loop, thinking_started)
+    )
+    await thinking_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    messages = store.messages()
+    assert len(messages) == 1
+    assert calls == 1
+    events = [event async for event in loop.run_turn("resume")]
+    assert events[-1].type.name == "AGENT_END"
+    assert calls == 2
+
+
+async def _assert_malformed_stream_raises(tmp_path: Path, stream: str) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    with pytest.raises(AnthropicStreamError):
+        [event async for event in AnthropicBackend(client=client, token_store=store).complete([], [])]
+    await client.aclose()
+
+
+async def _collect_anthropic_events(tmp_path: Path, stream: str) -> list[StreamEvent]:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "text/event-stream"},
+            text=stream,
+            request=request,
+        )
+
+    store = AnthropicCredentialStore(tmp_path / "zeta.json")
+    store.save(OAuthTokens("access-test", "refresh-test", 4_000_000_000))
+    client = client_for(handler)
+    events = [
+        event
+        async for event in AnthropicBackend(client=client, token_store=store).complete([], [])
+    ]
+    await client.aclose()
+    return events
+
+
+async def consume_loop_turn(loop: AgentLoop, thinking_started: asyncio.Event) -> None:
+    async for event in loop.run_turn("start"):
+        if event.type.name == "MESSAGE_UPDATE" and event.content is not None:
+            thinking_started.set()
+
+
+@pytest.mark.asyncio
+async def test_delta_without_block_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_message_stop_without_message_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_message_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"message_start","message":{}}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_block_before_message_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_delta_before_message_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_event_after_message_stop_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+                'data: {"type":"message_start","message":{}}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_delta_after_block_stop_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_message_stop_with_open_block_is_salvaged(tmp_path: Path) -> None:
+    events = await _collect_anthropic_events(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+    assert events[-1].message == Message(MessageRole.ASSISTANT)
+    assert events[-1].data["truncated"] is True
+
+
+@pytest.mark.asyncio
+async def test_stop_without_block_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_block_stop_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_duplicate_block_start_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_delta_type_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"unknown_delta"}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_unknown_block_type_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"unknown_block"}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_text_delta_inside_thinking_block_is_rejected(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"bad"}}',
+                "",
+                'data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"sig"}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_identifiers_must_be_strings(tmp_path: Path) -> None:
+    await _assert_malformed_stream_raises(
+        tmp_path,
+        "\n".join(
+            [
+                'data: {"type":"message_start","message":{}}',
+                "",
+                'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":["tool-1"],"name":{"value":"read"},"input":{}}}',
+                "",
+                'data: {"type":"content_block_stop","index":0}',
+                "",
+                'data: {"type":"message_stop"}',
+                "",
+            ]
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("detail,code,status", [
+    ({"type": "permission_error"}, "permission_denied", None),
+    ({"type": "authentication_error"}, "auth_error", None),
+    ({"type": "not_found_error"}, "model_not_found", None),
+    ({"status_code": 403}, "stream_error", 403),
+    ({"type": "api_error"}, "api_error", None),
+    ({"status_code": "403"}, "stream_error", None),
+])
+async def test_stream_error_preserves_structured_metadata(detail, code, status):
+    from zeta.loop import _error_info
+
+    payload = {"type": "error", "error": {**detail, "message": "Denied"}}
+    response = httpx.Response(200, text=f"data: {json.dumps(payload)}\n\n")
+    try:
+        with pytest.raises(AnthropicStreamError) as raised:
+            [event async for event in anthropic_module._decode_response(response)]
+        info = _error_info(raised.value, provider_error=True)
+        assert (info.code, info.status_code) == (code, status)
+        assert info.provider_error
+    finally:
+        await response.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message_fields", [
+    {}, {"message": None}, {"message": {"text": "Denied"}}, {"message": ""},
+    {"message": "\ud800"}, {"message": '"\\ud800"'},
+    {"message": "[" * 2000 + "0" + "]" * 2000},
+])
+@pytest.mark.parametrize("detail,code,status", [
+    ({"type": "permission_error"}, "permission_denied", None),
+    ({"type": "not_found_error"}, "model_not_found", None),
+    ({"status_code": 403}, "stream_error", 403),
+    ({"code": [], "type": "permission_error"}, "permission_denied", None),
+])
+async def test_stream_error_message_cannot_discard_metadata(message_fields, detail, code, status):
+    payload = {"type": "error", "error": {**detail, **message_fields}}
+    response = httpx.Response(200, text=f"data: {json.dumps(payload)}\n\n")
+    try:
+        with pytest.raises(AnthropicStreamError) as raised:
+            [item async for item in anthropic_module._decode_response(response)]
+        assert (raised.value.code, raised.value.status_code) == (code, status)
+        reason = detail.get("type")
+        assert str(raised.value) == (f"{reason}: stream error" if reason else "stream error")
+    finally:
+        await response.aclose()

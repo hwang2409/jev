@@ -1,0 +1,1047 @@
+"""Composition root for the full-screen zeta terminal UI."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import weakref
+from collections import deque
+from collections.abc import Callable, Sequence
+from pathlib import Path
+from shutil import (
+    get_terminal_size,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.get_terminal_size
+)
+from typing import Any
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.application import get_app
+from prompt_toolkit.enums import EditingMode
+from prompt_toolkit.formatted_text import FormattedText
+from prompt_toolkit.key_binding.key_processor import KeyPressEvent
+from prompt_toolkit.styles import DynamicStyle, Style
+from rich.console import Console, RenderableType
+from rich.padding import Padding
+from rich.text import Text
+
+from ..core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
+from ..core.project_context import (
+    discover_repo_root,
+    load_project_context,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_project_context
+)
+from ..core.session import (
+    env_home,
+)
+from ..core.slash import (
+    UsageTracker,
+    context_window,
+    create_slash_registry,
+)
+from ..loop import AgentLoop
+from ..persistence import DraftPersistence, history_for
+from ..providers.factory import build_backend as build_network_backend
+from ..runtime.cleanup import close_session
+from ..settings import (
+    load_settings,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_settings
+)
+from ..submission_pipeline import SubmissionPipeline
+from ..tools._user_discovery import ExternalToolDiscovery
+from ..tools.exec import trusted_macro_display
+from ..types import (
+    CompletionBackend,
+    Message,
+    StreamEvent,
+    StreamEventType,
+    TextContent,
+    ThinkingContent,
+    assistant_text,
+)
+from . import theme
+from .agent_card import AgentRunCommandMixin
+from .checkpoints import CheckpointTranscriptMixin
+from .composer import (
+    ClipboardError,
+    ComposerAttachmentMixin,
+    ComposerCompleter,
+    FullScreenPromptSession,
+    SubmissionMixin,
+    TurnConsumerMixin,
+    UndoCandidate,
+    build_key_bindings,
+    copy_to_clipboard,
+    status_formatted_text,
+    vim_state_label,
+)
+from .fake_backend import FakeInteractiveBackend
+from .layout import (
+    CONTENT_MARGIN,
+    content_width,
+    detach_completion_menus,
+    full_screen_content,
+)
+from .models import MODEL_CATALOGS
+from .models import load_model_catalog as _load_model_catalog
+from .render import (
+    format_status,
+    render_approval_card,
+    render_markdown,
+    render_thought,
+    render_thought_live,
+)
+from .slash_handlers import SlashHandlerMixin
+from .slash_handlers.command_runtime import CommandRuntimeMixin
+from .slash_handlers.model_picker import ModelPicker
+from .theme import RICH_THEME
+from .todo import TodoWidget
+from .transcript import TranscriptWidget, stream_key
+from .transcript_presenter import TranscriptPresenter
+
+
+def background_notice(app: Any, message: str) -> None:
+    """Print one dim background task notice and refresh the prompt."""
+
+    app._print(Text(message, style=theme.DIM))
+    app._invalidate_prompt()
+
+
+def build_backend(
+    provider: str,
+    model: str | None,
+    *,
+    home: str | Path | None = None,
+    stall_seconds: float | None = None,
+    stall_retries: int | None = None,
+) -> tuple[CompletionBackend, str]:
+    """Build the selected provider without loading network credentials for fake."""
+
+    if provider == "fake":
+        selected_model = model or "offline"
+        return FakeInteractiveBackend(model=selected_model), selected_model
+    return build_network_backend(
+        provider,
+        model,
+        home=home,
+        stall_seconds=stall_seconds,
+        stall_retries=stall_retries,
+    )
+
+
+class TUIApp(
+    SubmissionMixin,
+    TurnConsumerMixin,
+    CheckpointTranscriptMixin,
+    ComposerAttachmentMixin,
+    CommandRuntimeMixin,
+    SlashHandlerMixin,
+    AgentRunCommandMixin,
+):
+    """Full-screen transcript, persistent composer, and follow-up queue."""
+
+    def __init__(
+        self,
+        loop: AgentLoop,
+        *,
+        provider: str,
+        model: str,
+        zeta_home: str | Path | None = None,
+        verbose: bool = False,
+        console: Console | None = None,
+        session: PromptSession[str] | None = None,
+        history_path: str | Path | None = None,
+        draft_path: str | Path | None = None,
+        approval_policy: ApprovalPolicy | None = None,
+        context_files: Sequence[str] = (),
+        on_model_change: Callable[[str], None] | None = None,
+        vim_mode: bool = True,
+        on_vim_mode_change: Callable[[bool], None] | None = None,
+        on_budget_change: Callable[[int], None] | None = None,
+        model_catalog_loader: Callable[[str], frozenset[str] | None] | None = None,
+        startup_notices: Sequence[str] = (),
+        startup_warnings: Sequence[str] = (),
+        startup_alerts: Sequence[str] = (),
+        external_tools: ExternalToolDiscovery | None = None,
+        workspace_snapshot_cap: int | None = None,
+        ephemeral_root: Path | None = None,
+        session_name: str = "",
+        on_name_change: Callable[[str], None] | None = None,
+        key_remap: Any | None = None,
+    ) -> None:
+        app = weakref.proxy(self)
+        self.loop = loop
+        self._workspace_snapshot_cap = workspace_snapshot_cap
+        self.loop.tool_registry.background_tasks.set_notice_sink(
+            lambda message: background_notice(app, message)
+        )
+        self._hooks = loop.hooks
+        if self._hooks is not None:
+            self._hooks.notice_sink = lambda message: app._print_hook_notice(message)
+        self.provider = provider
+        self.model = model
+        self.verbose = verbose
+        self.console = console or Console(theme=RICH_THEME)
+        self._active_task: asyncio.Task[None] | None = None
+        self._pending_attachments: list[Path] = []
+        self._pending_attachment_tokens: dict[str, Path] = {}
+        self._next_image_token = 1
+        self._composer_insertions: list[str] = []
+        self._exit_requested = False
+        self._loop_state = "idle"
+        self._usage: dict[str, Any] = {}
+        self._usage_tracker = UsageTracker(
+            self.loop.context_assembler, provider=provider
+        )
+        self._assistant_text = ""
+        self._thinking_text = ""
+        self._thinking_duration: float | None = None
+        self._thinking_started_at: float | None = None
+        self._stream_kind: str | None = None
+        self._stream_identity: tuple[str, object] | None = None
+        self._partial = ""
+        self._streaming = False
+        self._spinner_active = False
+        self._spinner_frame = 0
+        self._spinner_reset = asyncio.Event()
+        self._abort_requested = False
+        self._macro_receipts = deque()
+        self._last_passthrough: str = ""
+        self._input_loop_active = False
+        self._active_turn_submission_id: int | None = None
+        self._resuming_tool = False
+        self._session = session
+        self._history_path = (
+            Path(history_path) if history_path else env_home() / "history"
+        )
+        self._history = None
+        self._draft = DraftPersistence(
+            draft_path or self.loop.store.session_dir / "draft",
+            directory_fd=self.loop.store.directory_fd if draft_path is None else None,
+        )
+        self._draft_session: PromptSession[str] | None = None
+        self._undo_candidate: UndoCandidate | None = None
+        self._approval_policy = approval_policy
+        self._context_files = tuple(context_files)
+        self._on_model_change = on_model_change
+        self.vim_mode = vim_mode
+        self._on_vim_mode_change = on_vim_mode_change
+        self._on_budget_change = on_budget_change
+        self._model_catalog_loader = model_catalog_loader or _load_model_catalog
+        self._model_catalog: frozenset[str] | None = MODEL_CATALOGS.get(provider)
+        self._model_catalog_loaded = self._model_catalog is not None
+        self._model_catalog_task: asyncio.Task[None] | None = None
+        self._model_picker: ModelPicker | None = None
+        self._model_picker_unit: Any = None
+        self._zeta_home: Path | None = (
+            Path(zeta_home).resolve() if zeta_home is not None else None
+        )
+        repo_root = discover_repo_root(Path(self.loop.store.cwd))
+        skill_catalog = self.loop.tool_registry.skill_catalog
+        self._slash_commands = create_slash_registry(
+            zeta_home=self._zeta_home,
+            project_dir=repo_root,
+            skill_catalog=skill_catalog,
+        )
+        self.loop.set_mcp_prompt_refresh(
+            lambda mount: app._slash_commands.set_mcp_prompts(mount.prompt_entries)
+        )
+        self._submissions = SubmissionPipeline(app)
+        self._compaction_shown = False
+        self._turn_had_visible_output = False
+        self._failed_turn: tuple[str, Message] | None = None
+        self._active_session: PromptSession[str] | None = None
+        self._prompt_styles: dict[bool, Style] = {}
+        self._transcript = TranscriptWidget()
+        self._transcript.set_copy_handler(lambda text: app._copy_selection(text))
+        self._todo_widget = TodoWidget(self.loop.store)
+        self._presenter = TranscriptPresenter(
+            self._transcript,
+            self.console,
+            lambda: app._full_screen_active(),
+            lambda renderable: app._print(renderable),
+        )
+        self.loop.set_background_event_sink(lambda event: app._handle_background_event(event))
+        self.loop.set_mcp_notice_sink(lambda message: background_notice(app, message))
+        self._fork_rebuilt = False
+        self._startup_notices: tuple[str, ...] = tuple(startup_notices)
+        self._startup_warnings: tuple[str, ...] = tuple(startup_warnings)
+        self._startup_alerts: tuple[str, ...] = tuple(startup_alerts)
+        self._external_tools = external_tools
+        self._ephemeral_root = ephemeral_root
+        self._new_session_requested = False
+        self._session_name = session_name
+        self._on_name_change = on_name_change
+        self._key_remap: dict[str, str] = dict(key_remap or {})
+
+    @property
+    def ephemeral_root(self) -> Path | None:
+        return self._ephemeral_root
+
+    @property
+    def new_session_requested(self) -> bool:
+        return self._new_session_requested
+
+    def request_new_session(self) -> None:
+        self._new_session_requested = True
+        self.request_exit()
+
+    @property
+    def _transcript_lines(self) -> list[str]:
+        """Expose rendered lines for diagnostics while keeping logical units in the widget."""
+        width = content_width(get_app().output.get_size().columns)
+        return self._transcript.lines(width)
+
+    @property
+    def queued_messages(self) -> tuple[str, ...]:
+        return tuple(
+            block.text
+            for message, _candidate in self._submissions.queued
+            for block in message.content[:1]
+            if isinstance(block, TextContent)
+        )
+
+    @property
+    def active(self) -> bool:
+        return self._submissions.active or (
+            self._active_task is not None and not self._active_task.done()
+        )
+
+    def retry_available(self) -> bool:
+        """Return whether the last failed turn can be retried."""
+
+        return self._failed_turn is not None and not self.active
+
+    def retry_failed_turn(self) -> None:
+        """Retry the last failed user message without appending it again."""
+
+        if not self.retry_available():
+            return
+        failed_turn = self._failed_turn
+        self._failed_turn = None
+        if failed_turn is None:
+            return
+        user_text, user_message = failed_turn
+        self._active_task = asyncio.create_task(
+            self._submissions.retry(user_text, user_message)
+        )
+
+    @property
+    def pending_approvals(self) -> tuple[ApprovalRequest, ...]:
+        return self._submissions.pending_approvals
+
+    @property
+    def approval_policy(self) -> ApprovalPolicy | None:
+        return self._approval_policy
+
+    def _start_model_catalog_load(self) -> None:
+        if self._model_catalog_task is not None:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._model_catalog_task = loop.create_task(
+            self._load_model_catalog_in_background()
+        )
+
+    async def _load_model_catalog_in_background(self) -> None:
+        try:
+            self._model_catalog = await asyncio.to_thread(
+                self._model_catalog_loader, self.provider
+            )
+        except Exception:
+            self._model_catalog = None
+        finally:
+            self._model_catalog_loaded = True
+            self._model_catalog_task = None
+            self.refresh_model_picker()
+
+    def _present_pending_approvals(self) -> None:
+        for index, request in enumerate(self.pending_approvals):
+            self._print_unit(
+                render_approval_card(
+                    request.tool_call.name,
+                    request.tool_call.arguments,
+                    label=request.label,
+                    key=str(request.key),
+                    shortcut=index == 0,
+                    trusted_display=trusted_macro_display(request.tool_call.id),
+                )
+            )
+
+    async def _handle_approval_input(self, value: str) -> bool:
+        action = self._submissions._approval_action_for(value)
+        if action is None:
+            return False
+        decision, requested_key = action
+        if self._submissions.active:
+            await self._submissions.approval_action_wait(decision, requested_key)
+            return True
+        pending = self.pending_approvals
+        if not pending:
+            self._print(Text("[approval] no pending requests", style="dim"))
+            return True
+        if requested_key is None:
+            self._print(
+                Text(f"[approval] use {value.split(maxsplit=1)[0]} <approval-key>", style="yellow")
+            )
+            return True
+        request = next(
+            (request for request in pending if str(request.key) == requested_key),
+            None,
+        )
+        if request is None:
+            self._print(
+                Text(f"[approval] unknown request: {requested_key}", style="yellow")
+            )
+            return True
+        if self._approval_policy is None:
+            return True
+        key = request.key
+        resolved = (
+            self._approval_policy.approve(key)
+            if decision is ApprovalDecision.ALLOW
+            else self._approval_policy.deny(key)
+        )
+        if resolved:
+            self._print(Text(f"[approval] {value.split(maxsplit=1)[0]}d {key}", style="green"))
+            if self.active:
+                self._present_pending_approvals()
+                return True
+
+            async def resume() -> Any:
+                return await self.loop.resume_pending_tool(
+                    request.request_id,
+                    prepared=True,
+                    event_sink=self._handle_resumed_tool_event,
+                )
+
+            resume_task: asyncio.Task[Any] | None = None
+            try:
+                await self.loop.ensure_mcp_servers()
+                if not self.loop.prepare_resume_pending_tool(request.request_id):
+                    self._present_pending_approvals()
+                    return True
+                self._resuming_tool = True
+                resume_task = asyncio.create_task(resume())
+                self._active_task = resume_task
+                await asyncio.shield(resume_task)
+            except asyncio.CancelledError:
+                parent_cancelled = (
+                    asyncio.current_task() is not None
+                    and asyncio.current_task().cancelling() > 0
+                )
+                self.loop.abort()
+                self._abort_approval(key)
+                self.loop.finalize_canceled(request.request_id)
+                if resume_task is not None:
+                    resume_task.cancel()
+                    await asyncio.gather(resume_task, return_exceptions=True)
+                self._print(Text("[aborted]", style="yellow"))
+                if parent_cancelled:
+                    raise
+                return True
+            finally:
+                self._resuming_tool = False
+                if resume_task is not None and self._active_task is resume_task:
+                    self._active_task = None
+        self._present_pending_approvals()
+        return True
+
+    def _prompt_style(self) -> Style:
+        focused = get_app().current_buffer.name == "DEFAULT_BUFFER"
+        style = self._prompt_styles.get(focused)
+        if style is None:
+            style = Style.from_dict(
+                {
+                    "": f"fg:{theme.BODY}",
+                    "prompt": f"fg:{theme.ACCENT} bold",
+                    "placeholder": f"italic fg:{theme.DIM}",
+                    "status-bar": f"noreverse fg:{theme.CHROME}",
+                    "frame": "",
+                    "frame.border": (
+                        f"fg:{theme.COMPOSER_FOCUS}" if focused else f"fg:{theme.COMPOSER_BORDER}"
+                    ),
+                    "text-area": f"fg:{theme.BODY}",
+                    "text-area.prompt": f"fg:{theme.ACCENT} bold",
+                    # The slash-command menu: prompt-toolkit's default is gray
+                    # on gray, unreadable on a dark terminal. Rows sit on the
+                    # palette's highlight background; the current row takes
+                    # the accent so the pick is unmistakable.
+                    "completion-menu": f"bg:{theme.MENU_BG} fg:{theme.BODY}",
+                    "completion-menu.completion": f"bg:{theme.MENU_BG} fg:{theme.BODY}",
+                    "completion-menu.completion.current": (
+                        f"bg:{theme.ACCENT} fg:{theme.ON_ACCENT} bold"
+                    ),
+                    "completion-menu.meta.completion": f"bg:{theme.MENU_BG} fg:{theme.DIM}",
+                    "completion-menu.meta.completion.current": (
+                        f"bg:{theme.ACCENT} fg:{theme.ON_ACCENT}"
+                    ),
+                    "scrollbar.background": f"bg:{theme.MENU_BG}",
+                    "scrollbar.button": f"bg:{theme.DIM}",
+                }
+            )
+            self._prompt_styles[focused] = style
+        return style
+
+    def _make_session(self) -> PromptSession[str]:
+        app = weakref.proxy(self)
+        if self._history is None:
+            self._history = history_for(self._history_path)
+        bindings = build_key_bindings(
+            on_interrupt=lambda: app.abort_active(),
+            on_exit=lambda: app.request_exit(),
+            on_submit=lambda value: app._submit_input(value),
+            on_paste=lambda event: app._paste_from_keybinding(event),
+            on_page_up=self._transcript.page_up,
+            on_page_down=self._transcript.page_down,
+            on_search_start=self._transcript.begin_search,
+            search_active=lambda: app._transcript.search_active,
+            on_search_input=self._transcript.update_search,
+            on_search_backspace=self._transcript.search_backspace,
+            on_search_next=self._transcript.next_search_match,
+            on_search_previous=self._transcript.previous_search_match,
+            on_search_end=self._transcript.end_search,
+            on_previous_user=self._transcript.previous_user_message,
+            on_next_user=self._transcript.next_user_message,
+            on_toggle_agent=self._transcript.toggle_latest_agent,
+            on_retry=lambda: app.retry_failed_turn(),
+            retry_available=lambda: app.retry_available(),
+            on_undo=lambda: app.undo_sent_turn(),
+            append_history=False,
+            on_approve=lambda: app._answer_first_pending("approve"),
+            on_deny=lambda: app._answer_first_pending("deny"),
+            approval_active=lambda: bool(app.pending_approvals),
+            on_plan_toggle=lambda: app.toggle_plan_mode(),
+            on_scroll_up=self._transcript.scroll_up,
+            on_scroll_down=self._transcript.scroll_down,
+            # Route through the weakref proxy like every callback above: a bound
+            # method on self would pin the app alive past close() and trip
+            # test_closed_tui_drops_callbacks_without_gc.
+            on_picker_move=lambda delta: app.model_picker_move(delta),
+            on_picker_select=lambda: app.model_picker_select(),
+            on_picker_cancel=lambda: app.model_picker_cancel(),
+            picker_active=lambda: app.model_picker_active,
+            key_remap=self._key_remap,
+        )
+        session = FullScreenPromptSession(
+            message=[("class:prompt", " > ")],
+            placeholder=[("class:placeholder", "type a message...")],
+            history=self._history,
+            key_bindings=bindings,
+            completer=ComposerCompleter(
+                self._slash_commands,
+                self.loop.store.cwd,
+                model_choices=lambda: app.model_choices(),
+                current_model=lambda: app.model,
+            ),
+            reserve_space_for_menu=0,
+            multiline=True,
+            mouse_support=True,
+            editing_mode=EditingMode.VI if self.vim_mode else EditingMode.EMACS,
+            bottom_toolbar=lambda: app._status_toolbar(),
+            erase_when_done=True,
+            show_frame=True,
+            style=DynamicStyle(lambda: app._prompt_style()),
+        )
+        self._attach_draft(session)
+        return session
+
+    def _attach_draft(self, session: PromptSession[str]) -> None:
+        if self._draft_session is session:
+            return
+        self._attach_draft_state(session.default_buffer, self._draft.load_state())
+        self._draft_session = session
+
+    def _record_prompt(self, value: str, draft_revision: int | None = None) -> None:
+        if self._history is None:
+            self._history = history_for(self._history_path)
+        self._history.append_string(value)
+        if draft_revision is None:
+            self._draft.clear()
+        else:
+            self._draft.clear_submitted(draft_revision)
+
+    def request_exit(self) -> None:
+        self._exit_requested = True
+        self.abort_active()
+
+    def _insert_paste_token(self, token: str) -> None:
+        if isinstance(self._active_session, FullScreenPromptSession):
+            self._active_session.app.current_buffer.insert_text(token)
+        else:
+            self._composer_insertions.append(token)
+
+    def _paste_from_keybinding(self, event: KeyPressEvent | None = None) -> None:
+        result = self.slash_paste("")
+        if result.startswith("[Image #"):
+            if event is None:
+                self._insert_paste_token(result)
+            else:
+                event.current_buffer.insert_text(result)
+        elif result != "paste unavailable: clipboard does not contain an image":
+            self._print_system(result)
+
+    def _abort_approval(self, request_id: str | tuple[str, str]) -> None:
+        if self._approval_policy is not None:
+            self._approval_policy.abort(request_id)
+
+    def _copy_selection(self, text: str) -> str:
+        """Put a finished mouse selection on both clipboards; describe the outcome."""
+
+        lines = text.count("\n") + 1
+        noun = "line" if lines == 1 else "lines"
+        # prompt-toolkit's own clipboard so vi `p` can paste into the composer
+        # even when no system clipboard tool exists.
+        get_app().clipboard.set_text(text)
+        try:
+            copy_to_clipboard(text)
+        except ClipboardError as exc:
+            return f"copy failed: {exc}"
+        return f"copied {lines} {noun}"
+
+    def _answer_first_pending(self, verb: str) -> None:
+        """Answer the request the y/n shortcuts point at, if it is still there."""
+
+        pending = self.pending_approvals
+        if pending:
+            self._submit_input(f"{verb} {pending[0].key}")
+
+    def _status_toolbar(self) -> FormattedText:
+        terminal_width = get_app().output.get_size().columns
+        width = content_width(terminal_width)
+        usage = dict(self._usage)
+        usage.setdefault(
+            "cache_read_input_tokens",
+            self.loop.context_assembler.cache_read_input_tokens_this_session,
+        )
+        usage.setdefault(
+            "cache_creation_input_tokens",
+            self.loop.context_assembler.cache_creation_input_tokens_this_session,
+        )
+        status = format_status(
+            self.provider,
+            self.model,
+            self._loop_state,
+            usage,
+            self._partial,
+            session_id=self.loop.store.session_id[:8],
+            token_count=self.loop.context_assembler.token_count,
+            retained_tail=self.loop.context_assembler.retained_tail,
+            streaming=self._streaming,
+            width=width,
+            spinner_frame=self._spinner_frame,
+            spinner_active=self._spinner_active,
+            model_window=context_window(self.provider, self.model),
+            vim_state=vim_state_label(self.vim_mode),
+            plan_state="PLAN" if self.loop.plan_mode else None,
+            background_count=self.loop.tool_registry.background_tasks.running_count,
+            undo_available=(
+                self._undo_candidate is not None
+                and self.active
+                and self._loop_state
+                in {"streaming", "compacting", "tool-running", "approval"}
+            ),
+            transcript_navigation=self._full_screen_active(),
+            transcript_search=(
+                self._transcript.search_query
+                if self._transcript.search_active
+                else None
+            ),
+            transcript_match=self._transcript.search_status(),
+            transcript_position=self._transcript.position_indicator(),
+            copy_notice=self._transcript.copy_notice,
+        )
+        fragments = status_formatted_text(status)
+        return fragments
+
+    def _full_screen_active(self) -> bool:
+        return isinstance(self._active_session, FullScreenPromptSession)
+
+    def _append_transcript(self, renderable: RenderableType | None) -> None:
+        if renderable is not None:
+            self._transcript.append(renderable)
+
+    def _print(self, renderable: RenderableType | None) -> None:
+        if renderable is not None:
+            if self._full_screen_active():
+                self._append_transcript(renderable)
+            else:
+                self.console.print(
+                    Padding(renderable, (0, CONTENT_MARGIN, 0, CONTENT_MARGIN))
+                )
+
+    def _print_unit(self, renderable: RenderableType | None) -> None:
+        self._presenter.print_unit(renderable)
+
+    def _handle_tool_event(self, event: StreamEvent) -> bool:
+        if event.type is StreamEventType.TOOL_APPROVAL_START:
+            if event.tool_call is not None and not event.data.get("inline_shell"):
+                self._submissions.notify_approval_started(
+                    event.tool_call,
+                    event.data.get("submission_id", self._active_turn_submission_id),
+                )
+            self._reset_stream_state()
+            self._loop_state = "approval"
+            self._present_pending_approvals()
+            return False
+        if event.type is StreamEventType.TOOL_APPROVAL_END:
+            if event.tool_call is not None and not event.data.get("inline_shell"):
+                self._submissions.notify_approval_finished(event.tool_call)
+            self._loop_state = "streaming"
+            return False
+        if event.type is StreamEventType.TOOL_EXECUTION_START:
+            self._reset_stream_state()
+            self._loop_state = "tool-running"
+            presentation = self._presenter.handle_tool_event(
+                event,
+                aborted=False,
+            )
+            if presentation is not None and presentation.visible_output:
+                self._turn_had_visible_output = True
+            return False
+        if event.type is StreamEventType.TOOL_EXECUTION_UPDATE:
+            presentation = self._presenter.handle_tool_event(
+                event,
+                aborted=False,
+            )
+            if presentation is not None and presentation.visible_output:
+                self._turn_had_visible_output = True
+            return False
+        if event.type is not StreamEventType.TOOL_EXECUTION_END:
+            return False
+
+        aborted = self._abort_requested or self._loop_state == "interrupted"
+        self._loop_state = (
+            "interrupted"
+            if aborted
+            else ("idle" if self._resuming_tool else "streaming")
+        )
+        presentation = self._presenter.handle_tool_event(
+            event,
+            aborted=aborted,
+        )
+        if presentation is not None and presentation.visible_output:
+            self._turn_had_visible_output = True
+        stop_after_tool = presentation is not None and presentation.stop_after_tool
+        self._abort_requested = False
+        return stop_after_tool
+
+    def _handle_background_event(self, event: StreamEvent) -> None:
+        """Render child progress while keeping completion notices at turn boundaries."""
+
+        if event.type in {
+            StreamEventType.TOOL_EXECUTION_START,
+            StreamEventType.TOOL_EXECUTION_UPDATE,
+            StreamEventType.TOOL_EXECUTION_END,
+        }:
+            self._presenter.handle_tool_event(event, aborted=False)
+            self._invalidate_prompt()
+
+    def _handle_resumed_tool_event(self, event: StreamEvent) -> None:
+        self._handle_tool_event(event)
+        self._invalidate_prompt()
+
+    def _discard_tool_region(self) -> None:
+        self._presenter.discard_tool_region()
+
+    @property
+    def _tool_region(self):
+        return self._presenter.tool_region
+
+    def _print_committed(self, lines: list[str], *, thinking: bool = False) -> None:
+        value = "\n".join(lines)
+        if thinking:
+            if value:
+                self._presenter.finish_thinking(
+                    render_thought(value, self._thinking_duration)
+                )
+                self._turn_had_visible_output = True
+            return
+        if value:
+            self._assistant_text += value
+            self._presenter.update_assistant(Text(self._assistant_text, style=theme.BODY))
+            self._turn_had_visible_output |= bool(value.strip())
+
+    def _update_usage(self, event: StreamEvent) -> None:
+        usage = event.data.get("usage")
+        if isinstance(usage, dict):
+            self._usage.update(usage)
+
+    @staticmethod
+    def _invalidate_prompt() -> None:
+        get_app().invalidate()
+
+    def _flush_stream_kind(self, *, preserve_inline: bool = False) -> None:
+        if (
+            self._stream_kind in {"thinking", "redacted-thinking"}
+            and self._thinking_text
+        ):
+            self._print_committed([self._thinking_text], thinking=True)
+        elif self._stream_kind == "assistant" and self._assistant_text:
+            self._presenter.finish_assistant(
+                Text(self._assistant_text, style=theme.BODY),
+                preserve_inline=preserve_inline,
+            )
+        self._stream_kind = self._stream_identity = None
+        self._partial = self._thinking_text = ""
+        self._thinking_duration = self._thinking_started_at = None
+
+    def _flush_markdown(self) -> None:
+        if self._assistant_text:
+            self._presenter.finish_assistant(render_markdown(self._assistant_text))
+
+    def _finish_message(self, event: StreamEvent) -> None:
+        if self._stream_kind in {"thinking", "redacted-thinking"}:
+            self._flush_stream_kind()
+        value = (
+            assistant_text(event.message)
+            if event.message is not None
+            else self._assistant_text
+        )
+        self._presenter.finish_assistant_message(
+            render_markdown(value) if value else None
+        )
+        if value:
+            self._turn_had_visible_output |= bool(value.strip())
+        self._stream_kind = self._stream_identity = None
+        self._reset_stream_buffers()
+
+    def _flush_pending_stream(self) -> None:
+        self._flush_stream_kind()
+        self._presenter.reset_assistant_unit()
+
+    def _consume_text(self, event: StreamEvent) -> None:
+        incoming_kind, incoming_identity = stream_key(event)
+        if self._stream_kind is not None and (incoming_kind, incoming_identity) != (
+            self._stream_kind,
+            self._stream_identity,
+        ):
+            self._flush_pending_stream()
+        redacted = incoming_kind == "redacted-thinking"
+        thinking = redacted
+        value = "redacted" if thinking else event.delta
+        if isinstance(event.content, TextContent):
+            value = event.content.text
+        elif isinstance(event.content, ThinkingContent):
+            value = event.content.text
+            thinking = True
+        if not value:
+            return
+        self._streaming = True
+        stream_kind = incoming_kind
+        assert stream_kind is not None
+        self._stream_kind = stream_kind
+        self._stream_identity = incoming_identity
+        if thinking:
+            if self._thinking_started_at is None:
+                self._thinking_started_at = time.monotonic()
+                self._presenter.start_thinking(render_thought_live(value))
+            self._thinking_text += value
+            self._thinking_duration = max(
+                0.0, time.monotonic() - self._thinking_started_at
+            )
+            self._partial = self._thinking_text
+            self._presenter.update_thinking(render_thought_live(self._thinking_text))
+            return
+        self._assistant_text += value
+        self._partial = self._assistant_text
+        self._presenter.update_assistant(Text(self._assistant_text, style=theme.BODY))
+
+    def _reset_stream_state(self) -> None:
+        self._stream_kind = self._stream_identity = None
+        self._partial = self._thinking_text = ""
+        self._thinking_duration = self._thinking_started_at = None
+        self._streaming = False
+
+    def _reset_stream_buffers(self) -> None:
+        self._assistant_text = self._thinking_text = ""
+        self._thinking_duration = self._thinking_started_at = None
+
+    def _print_system(self, output: str) -> None:
+        self._print_unit(Text(f"system · {output}", style=theme.ERROR if output.startswith("mcp error:") else theme.CHROME))
+
+    def _print_hook_notice(self, output: str) -> None:
+        self._print_unit(Text(f"hook · {output}", style=theme.DIM))
+
+    def _prepare_stream_event(self, event: StreamEvent) -> None:
+        if event.type is StreamEventType.MESSAGE_START:
+            self._flush_pending_stream()
+            self._presenter.reset_assistant_message()
+            self._assistant_text = ""
+            return
+        if event.type is StreamEventType.MESSAGE_END:
+            return
+        if event.type is StreamEventType.ERROR:
+            self._flush_stream_kind(preserve_inline=True)
+            self._presenter.reset_assistant_unit()
+            return
+        if (
+            event.type is StreamEventType.RETRY
+            and event.data.get("is_stall")
+        ):
+            self._presenter.reset_assistant_unit()
+            self._reset_stream_state()
+            self._reset_stream_buffers()
+            return
+        if event.type is not StreamEventType.MESSAGE_UPDATE:
+            self._flush_pending_stream()
+            return
+        incoming_kind, incoming_identity = stream_key(event)
+        current = self._stream_kind, self._stream_identity
+        if (incoming_kind, incoming_identity) != current:
+            self._flush_pending_stream()
+
+    async def _read_prompt(self, session: PromptSession[str]) -> str | None:
+        app = weakref.proxy(self)
+
+        def insert_pending_tokens() -> None:
+            if app._composer_insertions:
+                session.app.current_buffer.insert_text(
+                    "".join(app._composer_insertions)
+                )
+                app._composer_insertions.clear()
+
+        try:
+            value = await session.prompt_async(
+                [("class:prompt", " > ")],
+                bottom_toolbar=lambda: app._status_toolbar(),
+                placeholder=[("class:placeholder", "type a message...")],
+                pre_run=insert_pending_tokens,
+            )
+        except EOFError:
+            return None
+        return value
+
+    async def _run_full_screen(self, session: FullScreenPromptSession) -> None:
+        prompt_task = asyncio.create_task(session.app.run_async())
+        self._input_loop_active = True
+        try:
+            while not self._exit_requested:
+                try:
+                    await prompt_task
+                except (EOFError, asyncio.CancelledError):
+                    pass
+                break
+        finally:
+            self._input_loop_active = False
+            if not prompt_task.done():
+                prompt_task.cancel()
+                await asyncio.gather(prompt_task, return_exceptions=True)
+
+    def _install_full_screen_layout(self, session: FullScreenPromptSession) -> None:
+        root = session.layout.container
+        composer_rows = list(root.children)
+        footer = composer_rows.pop()
+        # The command menu leaves the composer's own float container so it
+        # can open upward over the transcript with room for a dozen rows.
+        for row in composer_rows:
+            detach_completion_menus(row)
+        root.children[:] = [
+            full_screen_content(
+                self._transcript.window(),
+                composer_rows,
+                footer,
+                self._todo_widget,
+                self.loop.store,
+                on_scroll_up=self._transcript.scroll_up,
+                on_scroll_down=self._transcript.scroll_down,
+            )
+        ]
+
+    async def run(self, session: PromptSession[str] | None = None) -> None:
+        """Run the alternate-screen app until Ctrl-D or an exit request."""
+
+        try:
+            await self.loop.activate()
+            session = session or self._session or self._make_session()
+            self._active_session = session
+            self._attach_draft(session)
+            if isinstance(session, FullScreenPromptSession):
+                self._install_full_screen_layout(session)
+            self._rebuild_transcript()
+            await self.loop.ensure_mcp_servers()
+            for warning in self._startup_warnings:
+                self._print_unit(Text(warning, style=theme.ERROR))
+            # After the MCP mount so argument-scoped rules dropped for a
+            # just-mounted subject-less tool are reported too (ZETA-86).
+            if self._approval_policy is not None:
+                for notice in self._approval_policy.notices:
+                    self._print_unit(Text(notice, style=theme.ERROR))
+            for alert in self._startup_alerts:
+                self._print_unit(Text(alert, style=theme.COMMAND))
+            for notice in self._startup_notices:
+                self._print_unit(Text(notice, style=theme.DIM))
+            for notice in self._slash_commands.notices:
+                style = theme.COMMAND if notice in self._slash_commands.warning_notices else theme.DIM
+                self._print_unit(Text(f"command · {notice}", style=style))
+            self._present_pending_approvals()
+            prompt_task: asyncio.Task[str | None] | None = None
+            try:
+                if isinstance(session, FullScreenPromptSession):
+                    await self._run_full_screen(session)
+                    return
+                prompt_task = asyncio.create_task(self._read_prompt(session))
+                self._input_loop_active = True
+                while prompt_task is not None and not self._exit_requested:
+                    value = await prompt_task
+                    if value is None:
+                        break
+                    if not await self._handle_approval_input(value):
+                        self._submit_input(value)
+                    if self._exit_requested:
+                        break
+                    prompt_task = asyncio.create_task(self._read_prompt(session))
+            finally:
+                self._input_loop_active = False
+                if prompt_task is not None and not prompt_task.done():
+                    prompt_task.cancel()
+                    await asyncio.gather(prompt_task, return_exceptions=True)
+                if self._active_task is not None and not self._active_task.done():
+                    self._active_task.cancel()
+                    await asyncio.gather(self._active_task, return_exceptions=True)
+                if isinstance(session, FullScreenPromptSession):
+                    session.restore_terminal()
+        finally:
+            await self.close()
+
+    async def close(self) -> None:
+        """Own shutdown for the TUI and headless frontends."""
+        self._closed = True
+        try:
+            await self._submissions.close()
+        finally:
+            try:
+                try:
+                    self._draft.detach()
+                finally:
+                    await close_session(self.loop, self._workspace_snapshot_store)
+            finally:
+                self._workspace_snapshot_store = None
+                self.loop.set_background_event_sink(None)
+                self.loop.set_mcp_notice_sink(None)
+                self.loop.set_mcp_prompt_refresh(None)
+                self.loop.tool_registry.background_tasks.set_notice_sink(None)
+                if self._hooks is not None:
+                    self._hooks.notice_sink = None
+                self._active_session = None
+                self._draft_session = None
+                self._session = None
+
+
+
+from .bootstrap import create_app, format_picker_row
+
+__all__ = [
+    "FakeInteractiveBackend",
+    "TUIApp",
+    "build_backend",
+    "create_app",
+    "format_picker_row",
+    "main",
+]
+
+
+def __getattr__(name: str) -> object:
+    if name == "main":
+        from ..cli import main
+
+        return main
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
