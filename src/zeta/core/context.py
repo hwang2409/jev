@@ -193,6 +193,60 @@ class CompactionPolicy:
         on_success: Callable[[], None] | None = None,
         on_usage: Callable[[Mapping[str, Any]], None] | None = None,
     ) -> str:
+        summary = await self._summarize_with_overflow(
+            messages,
+            backend=backend,
+            system_prompt=system_prompt,
+            max_source_tokens=max_source_tokens,
+            on_usage=on_usage,
+        )
+        if on_success is not None:
+            on_success()
+        return summary
+
+    async def _summarize_with_overflow(
+        self,
+        messages: Sequence[Message],
+        *,
+        backend: CompletionBackend | None = None,
+        system_prompt: Message | None = None,
+        max_source_tokens: int | None = None,
+        on_usage: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> str:
+        try:
+            return await self._summarize_once(
+                messages,
+                backend=backend,
+                system_prompt=system_prompt,
+                max_source_tokens=max_source_tokens,
+                on_usage=on_usage,
+            )
+        except SummaryInputTooLarge:
+            if len(messages) < 2:
+                raise
+            midpoint = len(messages) // 2
+            summaries: list[str] = []
+            for chunk in (messages[:midpoint], messages[midpoint:]):
+                summaries.append(
+                    await self._summarize_with_overflow(
+                        chunk,
+                        backend=backend,
+                        system_prompt=system_prompt,
+                        max_source_tokens=max_source_tokens,
+                        on_usage=on_usage,
+                    )
+                )
+            return "\n\n".join(summaries)
+
+    async def _summarize_once(
+        self,
+        messages: Sequence[Message],
+        *,
+        backend: CompletionBackend | None = None,
+        system_prompt: Message | None = None,
+        max_source_tokens: int | None = None,
+        on_usage: Callable[[Mapping[str, Any]], None] | None = None,
+    ) -> str:
         completion_backend = backend or self.backend
         if completion_backend is None:
             raise SummaryCompletionError("compaction requires a completion backend")
@@ -259,8 +313,6 @@ class CompactionPolicy:
         summary = _text_from_message(result).strip()
         if not summary or not any(character.isalnum() for character in summary):
             raise SummaryCompletionError("summary completion returned an empty summary")
-        if on_success is not None:
-            on_success()
         return summary
 
     @staticmethod
@@ -612,8 +664,29 @@ class ContextAssembler:
             ),
             "",
         )
+        latest_assistant_text = next(
+            (
+                _text_from_message(item.message)[:300]
+                for item in reversed(items)
+                if item.message.role is MessageRole.ASSISTANT
+                and _text_from_message(item.message)
+            ),
+            "",
+        )
+        candidate_ids = set(tools_by_id)
+        recent_tool_actions = [
+            self._tool_action_outcome(items, index)
+            for index, item in enumerate(items)
+            if self._is_tool_result(item)
+            and self._source_id(item) not in candidate_ids
+        ][-3:]
         try:
-            result = await jev.triage(task, request_items)
+            result = await jev.triage(
+                task,
+                request_items,
+                latest_assistant_text=latest_assistant_text,
+                recent_tool_actions=recent_tool_actions,
+            )
             dropped_ids = {
                 item_id
                 for item_id, probability in result.keep_probabilities.items()
@@ -654,6 +727,32 @@ class ContextAssembler:
             return triaged_messages, stats
         except Exception:  # noqa: BLE001 - triage must fail open
             return None
+
+    @staticmethod
+    def _tool_action_outcome(items: Sequence[_ContextItem], index: int) -> str:
+        result = items[index].message.tool_result
+        if result is None:
+            return "unknown: error"
+        call_index = ContextAssembler._find_tool_call(
+            items, result.tool_call_id, index
+        )
+        if call_index is None:
+            return f"unknown: {'error' if result.is_error else 'ok'}"
+        call = next(
+            (
+                block.tool_call
+                for block in items[call_index].message.content
+                if isinstance(block, ToolUseContent)
+                and block.tool_call.id == result.tool_call_id
+            ),
+            None,
+        )
+        if call is None:
+            return f"unknown: {'error' if result.is_error else 'ok'}"
+        target = call.arguments.get("path") or call.arguments.get("command")
+        label = f"{call.name} {target}" if isinstance(target, str) else call.name
+        label = " ".join(label.split())
+        return f"{label}: {'error' if result.is_error else 'ok'}"
 
     @staticmethod
     def _tool_name(items: Sequence[_ContextItem], index: int) -> str:

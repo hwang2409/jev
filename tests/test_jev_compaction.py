@@ -27,8 +27,13 @@ def user(text: str) -> Message:
     return Message(MessageRole.USER, [TextContent(text)])
 
 
-def tool_messages(call_id: str, tool: str, content: str) -> tuple[Message, Message]:
-    call = ToolCall(call_id, tool, {})
+def tool_messages(
+    call_id: str,
+    tool: str,
+    content: str,
+    arguments: dict[str, Any] | None = None,
+) -> tuple[Message, Message]:
+    call = ToolCall(call_id, tool, arguments or {})
     return (
         Message(MessageRole.ASSISTANT, [ToolUseContent(call)]),
         Message(
@@ -76,7 +81,9 @@ async def test_budget_recovery_tombstones_and_persists_tool_pairing(
     result_entry = store.append_message(result)
     store.append_message(user("current objective"))
     backend = FakeBackend([])
-    async def fake_triage(_task: str, items: list[dict[str, str]]) -> jev.TriageResult:
+    async def fake_triage(
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
         return await _triage(items, {result_entry.id: 0.1})
 
     monkeypatch.setattr("zeta.core.context.jev.triage", fake_triage)
@@ -142,7 +149,7 @@ async def test_calibrated_budget_still_runs_summary_without_recovery(
     backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
 
     async def keep_everything(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         return triage_result({item["id"]: 1.0 for item in items})
 
@@ -184,7 +191,7 @@ async def test_calibrated_budget_skips_summary_after_genuine_recovery(
     backend = FakeBackend([])
 
     async def drop_result(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         return triage_result({items[0]["id"]: 0.1})
 
@@ -243,7 +250,7 @@ async def test_reloaded_triage_content_can_be_compacted_again(
     )
 
     async def drop_all(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         return triage_result({item["id"]: 0.1 for item in items})
 
@@ -299,7 +306,7 @@ async def test_replayed_marker_persists_retained_suffix_after_restart(
     store.append_message(user("current objective"))
 
     async def keep_everything(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         return triage_result({item["id"]: 1.0 for item in items})
 
@@ -371,7 +378,7 @@ async def test_legacy_triage_marker_gets_unique_ids_on_reload(
     requests: list[list[dict[str, str]]] = []
 
     async def triage_items(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         requests.append(items)
         probabilities = {item["id"]: 1.0 for item in items}
@@ -420,7 +427,7 @@ async def test_reloaded_triage_items_keep_distinct_ids(
     requests: list[list[dict[str, str]]] = []
 
     async def triage_items(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         requests.append(items)
         probabilities = {item["id"]: 1.0 for item in items}
@@ -474,7 +481,7 @@ async def test_triage_usage_is_a_service_tagged_event(
     backend = FakeBackend([ScriptedTurn([TextContent("done")])])
 
     async def drop_result(
-        _task: str, items: list[dict[str, str]]
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
         return jev.TriageResult(
             {items[0]["id"]: 0.1},
@@ -548,7 +555,9 @@ async def test_recent_tool_results_are_not_triaged(
     store.append_message(user("recent"))
     requests: list[list[dict[str, str]]] = []
 
-    async def fake_triage(_task: str, items: list[dict[str, str]]) -> jev.TriageResult:
+    async def fake_triage(
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
         requests.append(items)
         return triage_result({old_result_entry.id: 0.1})
 
@@ -586,7 +595,9 @@ async def test_size_floor_skips_jev_and_uses_stock_summary(
     backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
     called = False
 
-    async def fake_triage(_task: str, _items: list[dict[str, str]]) -> jev.TriageResult:
+    async def fake_triage(
+        _task: str, _items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
         nonlocal called
         called = True
         return triage_result({})
@@ -619,7 +630,9 @@ async def test_jev_error_keeps_stock_compaction_byte_identical(
         store.append_message(user("tail"))
         return store
 
-    async def fail_triage(_task: str, _items: list[dict[str, str]]) -> jev.TriageResult:
+    async def fail_triage(
+        _task: str, _items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
         raise jev.JevRouterError("JEV_API_KEY is not set")
 
     monkeypatch.setattr("zeta.core.context.jev.triage", fail_triage)
@@ -663,7 +676,9 @@ async def test_still_over_budget_summarizes_post_tombstone_range(
     result_entry = store.append_message(result)
     store.append_message(user("tail"))
     backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
-    async def fake_triage(_task: str, items: list[dict[str, str]]) -> jev.TriageResult:
+    async def fake_triage(
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
         return await _triage(items, {result_entry.id: 0.1})
 
     monkeypatch.setattr("zeta.core.context.jev.triage", fake_triage)
@@ -684,6 +699,135 @@ async def test_still_over_budget_summarizes_post_tombstone_range(
     assert marker.data["jev_triage"]["skipped_summarize"] is False
 
 
+@pytest.mark.asyncio
+async def test_triage_state_includes_progress_after_persisting_tool_action(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("process the files"))
+    read_call, read_result = tool_messages("read-1", "read", "x" * 400)
+    store.append_message(read_call)
+    read_entry = store.append_message(read_result)
+    store.append_message(
+        Message(MessageRole.ASSISTANT, [TextContent("the extracted line is ready")])
+    )
+    write_call, write_result = tool_messages(
+        "write-1", "write", "ok", {"path": "keyfacts.txt", "content": "line"}
+    )
+    store.append_message(write_call)
+    store.append_message(write_result)
+    store.append_message(user("continue"))
+    captured: dict[str, Any] = {}
+
+    async def fake_triage(
+        _task: str,
+        items: list[dict[str, str]],
+        **kwargs: Any,
+    ) -> jev.TriageResult:
+        captured["items"] = items
+        captured.update(kwargs)
+        return triage_result({read_entry.id: 0.1})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", fake_triage)
+
+    def progress_count(message: Message) -> int:
+        if message.role is MessageRole.TOOL_RESULT:
+            content = message.tool_result.content if message.tool_result else ""
+            return 1 if content == "ok" or content.startswith("[dropped") else 15
+        return 1
+
+    assembler = ContextAssembler(
+        store,
+        token_budget=10,
+        retained_tail=1,
+        token_counter=progress_count,
+    )
+
+    await assembler.assemble()
+
+    assert [item["id"] for item in captured["items"]] == [read_entry.id]
+    assert captured["latest_assistant_text"] == "the extracted line is ready"
+    assert captured["recent_tool_actions"] == ["write keyfacts.txt: ok"]
+
+
+@pytest.mark.asyncio
+async def test_summary_overflow_is_chunked_and_session_continues(tmp_path: Any) -> None:
+    store = ConversationStore(tmp_path)
+    for index in range(4):
+        store.append_message(user(f"old-{index} " + "x" * 100))
+    store.append_message(user("tail"))
+    backend = FakeBackend(
+        [
+            ScriptedTurn([TextContent(f"summary-{index}")])
+            for index in range(4)
+        ]
+    )
+    assembler = ContextAssembler(
+        store,
+        token_budget=160,
+        retained_tail=1,
+        token_counter=lambda _message: 50,
+        backend=backend,
+        jev_compaction=False,
+    )
+
+    first = await assembler.assemble()
+    second = await assembler.assemble()
+
+    assert len(backend.calls) == 4
+    assert "old-0" in backend.calls[0][0][-1].content[0].text
+    assert "old-1" in backend.calls[1][0][-1].content[0].text
+    assert "old-2" in backend.calls[2][0][-1].content[0].text
+    assert "old-3" in backend.calls[3][0][-1].content[0].text
+    assert "summary-0" in first[1].content[0].text
+    assert "summary-3" in first[1].content[0].text
+    assert [message.to_dict() for message in second] == [
+        message.to_dict() for message in first
+    ]
+
+
+@pytest.mark.asyncio
+async def test_tombstones_shrink_source_before_summary_cap(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old"))
+    call, result = tool_messages("call-1", "read", "x" * 3000)
+    store.append_message(call)
+    result_entry = store.append_message(result)
+    store.append_message(user("tail"))
+    backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
+
+    async def drop_result(
+        _task: str, items: list[dict[str, str]], **_kwargs: Any
+    ) -> jev.TriageResult:
+        return triage_result({items[0]["id"]: 0.1})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", drop_result)
+
+    def count(message: Message) -> int:
+        if message.role is MessageRole.TOOL_RESULT:
+            return 12_000 if message.tool_result is result else 11_000
+        return 1
+
+    assembler = ContextAssembler(
+        store,
+        token_budget=1_000,
+        retained_tail=1,
+        token_counter=count,
+        backend=backend,
+    )
+
+    await assembler.assemble()
+
+    assert len(backend.calls) == 1
+    source = backend.calls[0][0][-1].content[0].text
+    assert "dropped by jev-compaction" in source
+    assert "x" * 100 not in source
+    marker = next(entry for entry in store.replay() if entry.type == "compaction")
+    assert marker.data["jev_triage"]["skipped_summarize"] is False
+
+
 def test_triage_request_shape_and_parser() -> None:
     item = {
         "id": "entry-1",
@@ -691,9 +835,19 @@ def test_triage_request_shape_and_parser() -> None:
         "tool": "read",
         "excerpt": "result",
     }
-    request = jev.build_triage_request("t" * 600, [item])
+    request = jev.build_triage_request(
+        "t" * 600,
+        [item],
+        latest_assistant_text="a" * 400,
+        recent_tool_actions=["one", "two", "three", "four"],
+    )
 
-    assert request["state"] == {"task": "t" * 500, "items": [item]}
+    assert request["state"] == {
+        "task": "t" * 500,
+        "latest_assistant_text": "a" * 300,
+        "recent_tool_actions": ["two", "three", "four"],
+        "items": [item],
+    }
     assert request["questions"]["entry-1"]["type"] == "noul"
     assert "item entry-1" in request["questions"]["entry-1"]["instructions"]
     parsed = jev.parse_triage_response(

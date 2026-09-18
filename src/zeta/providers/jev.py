@@ -97,12 +97,21 @@ def parse_response(data: dict[str, Any]) -> RouteResult:
 
 
 def build_triage_request(
-    task: str, items: list[dict[str, str]]
+    task: str,
+    items: list[dict[str, str]],
+    *,
+    latest_assistant_text: str = "",
+    recent_tool_actions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Build the request body for compaction triage."""
 
     return {
-        "state": {"task": task[:500], "items": items},
+        "state": {
+            "task": task[:500],
+            "latest_assistant_text": latest_assistant_text[:300],
+            "recent_tool_actions": list(recent_tool_actions or [])[-3:],
+            "items": items,
+        },
         "model": MODEL,
         "questions": {
             item["id"]: {
@@ -174,13 +183,24 @@ async def route_step(
     raise JevRouterError("Jev request failed after retries")
 
 
-async def triage(task: str, items: list[dict[str, str]]) -> TriageResult:
+async def triage(
+    task: str,
+    items: list[dict[str, str]],
+    *,
+    latest_assistant_text: str = "",
+    recent_tool_actions: list[str] | None = None,
+) -> TriageResult:
     """Ask Jev which tool results can be dropped during compaction."""
 
     key = os.environ.get("JEV_API_KEY")
     if not key:
         raise JevRouterError("JEV_API_KEY is not set")
-    body = build_triage_request(task, items)
+    body = build_triage_request(
+        task,
+        items,
+        latest_assistant_text=latest_assistant_text,
+        recent_tool_actions=recent_tool_actions,
+    )
     headers = {"Authorization": f"Bearer {key}"}
     delay = 1.0
     async with httpx.AsyncClient(timeout=60.0) as client:

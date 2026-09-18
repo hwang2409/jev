@@ -26,8 +26,11 @@ Claude call. Otherwise stock summarization runs on the smaller range.
 3. One Jev call (`providers/jev.py`, reuse the existing client; add a
    `triage(...)` helper):
    - state: `{"task": <latest user objective: the most recent user message
-     text, truncated 500 chars>, "items": [{"id", "kind", "tool",
-     "excerpt"}...]}` — excerpt = first 200 chars of the result text.
+     text, truncated 500 chars>, "latest_assistant_text": <latest assistant
+     text, truncated 300 chars>, "recent_tool_actions": [<last 3
+     non-candidate tool outcomes>], "items": [{"id", "kind", "tool",
+     "excerpt"}...]}`. Each recent action is one line, such as
+     `write keyfacts.txt: ok`. Excerpt = first 200 chars of the result text.
    - questions: per item id, one Noul: "Will the details of item <id> be
      needed to finish the task, beyond what the excerpt already shows?"
    - Same auth/retry/error conventions as `route_step`.
