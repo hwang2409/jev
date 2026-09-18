@@ -172,7 +172,6 @@ def build_messages_payload(
     _validate_thinking_parameters(max_tokens, thinking_budget)
     system: list[dict[str, Any]] = []
     wire_messages: list[dict[str, Any]] = []
-    latest_user_wire_index: int | None = None
     for message in messages:
         if message.role is MessageRole.SYSTEM:
             content = _wire_content(message.content)
@@ -200,8 +199,6 @@ def build_messages_payload(
         role = "assistant" if message.role is MessageRole.ASSISTANT else "user"
         content = _wire_content(message.content)
         if content or role != "assistant":
-            if message.role is MessageRole.USER:
-                latest_user_wire_index = len(wire_messages)
             wire_messages.append({"role": role, "content": content})
 
     if system:
@@ -220,17 +217,16 @@ def build_messages_payload(
         payload["system"] = system
     if tools:
         payload["tools"] = tools
-    # The active user turn can grow during tool calls, so cache only completed
-    # conversation history before that turn.
-    if latest_user_wire_index is not None:
-        for message in reversed(wire_messages[:latest_user_wire_index]):
-            content = message["content"]
-            if not isinstance(content, list):
-                continue
-            for block in reversed(content):
-                if _is_cacheable_block(block):
-                    block["cache_control"] = {"type": "ephemeral"}
-                    return payload
+    # The newest message can still be revised, so cache the last completed
+    # message. Compaction rewrites history and naturally recreates this cache.
+    for message in reversed(wire_messages[:-1]):
+        content = message["content"]
+        if not isinstance(content, list):
+            continue
+        for block in reversed(content):
+            if _is_cacheable_block(block):
+                block["cache_control"] = {"type": "ephemeral"}
+                return payload
     return payload
 
 

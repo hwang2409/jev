@@ -1148,6 +1148,83 @@ def _conversation_cache_locations(payload: dict[str, object]) -> list[tuple[int,
     ]
 
 
+def test_conversation_breakpoint_advances_through_active_turn() -> None:
+    tools = [{"name": "read", "parameters": {"type": "object"}}]
+    request = Message(MessageRole.USER, [TextContent("inspect this")])
+    tool_use = Message(
+        MessageRole.ASSISTANT,
+        [ToolUseContent(ToolCall("call-1", "read", {}))],
+    )
+    tool_result = Message(
+        MessageRole.TOOL_RESULT,
+        [TextContent("file contents")],
+        tool_result=ToolResult("call-1", "file contents"),
+    )
+    calls = [
+        [request],
+        [request, tool_use],
+        [request, tool_use, tool_result],
+        [
+            request,
+            tool_use,
+            tool_result,
+            Message(MessageRole.ASSISTANT, [TextContent("done")]),
+        ],
+    ]
+    expected_locations = [[], [(0, 0)], [(1, 0)], [(2, 0)]]
+    payloads = [
+        build_messages_payload(
+            messages,
+            tools,
+            model="claude-test",
+            max_tokens=4096,
+            thinking_budget=2048,
+        )
+        for messages in calls
+    ]
+
+    marked_spans: list[tuple[int, int, bytes]] = []
+    for payload, expected in zip(payloads, expected_locations, strict=True):
+        assert _conversation_cache_locations(payload) == expected
+        marker_count = sum(
+            "cache_control" in block
+            for message in payload["messages"]
+            for block in message["content"]
+        )
+        marker_count += sum(
+            "cache_control" in block for block in payload.get("system", [])
+        )
+        marker_count += sum(
+            "cache_control" in tool for tool in payload.get("tools", [])
+        )
+        assert marker_count <= 4
+        assert all(
+            "cache_control" not in block
+            for block in payload["messages"][-1]["content"]
+        )
+        if expected:
+            message_index, block_index = expected[0]
+            block = dict(payload["messages"][message_index]["content"][block_index])
+            block.pop("cache_control", None)
+            marked_spans.append(
+                (
+                    message_index,
+                    block_index,
+                    json.dumps(block, ensure_ascii=False, separators=(",", ":")).encode(),
+                )
+            )
+
+    for span_index, (message_index, block_index, expected_bytes) in enumerate(
+        marked_spans
+    ):
+        for payload in payloads[span_index + 2 :]:
+            block = dict(payload["messages"][message_index]["content"][block_index])
+            block.pop("cache_control", None)
+            assert json.dumps(
+                block, ensure_ascii=False, separators=(",", ":")
+            ).encode() == expected_bytes
+
+
 def _content_prefix_without_cache_metadata(payload: dict[str, object]) -> bytes:
     marker = b',"cache_control":{"type":"ephemeral"}'
     return request_bytes(payload).replace(marker, b"")
@@ -1731,6 +1808,7 @@ def test_thinking_tool_turn_replays_assistant_blocks_before_tool_result() -> Non
                     "id": "call-1",
                     "name": "read",
                     "input": {"path": "note.txt"},
+                    "cache_control": {"type": "ephemeral"},
                 },
             ],
         },
@@ -2270,7 +2348,11 @@ skill_catalog=SkillCatalog.empty(),
         message != {"role": "assistant", "content": []}
         for message in requests[1]["messages"]
     )
-    assert requests[1]["messages"][-1]["content"][-1]["text"] == "second"
+    assert any(
+        block.get("text") == "second"
+        for message in requests[1]["messages"]
+        for block in message["content"]
+    )
     await client.aclose()
 
 
