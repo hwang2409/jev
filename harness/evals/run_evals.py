@@ -39,6 +39,11 @@ def _valid_argument_constraints(value: object) -> bool:
             return False
         if set(constraint) == {"equals"}:
             continue
+        if set(constraint) == {"equals", "casefold"} and (
+            type(constraint["equals"]) is str
+            and type(constraint["casefold"]) is bool
+        ):
+            continue
         if set(constraint) == {"covers"}:
             window = constraint["covers"]
             start = _parse_datetime(window.get("start")) if type(window) is dict else None
@@ -59,6 +64,44 @@ def _valid_argument_constraints(value: object) -> bool:
             continue
         return False
     return True
+
+
+def _valid_relative_path(value: object) -> bool:
+    if type(value) is not str or not value:
+        return False
+    path = Path(value)
+    return not path.is_absolute() and ".." not in path.parts
+
+
+def _valid_check(value: object) -> bool:
+    if type(value) is not dict:
+        return False
+    if set(value) in (
+        {"path", "equals"},
+        {"path", "normalized_equals"},
+        {"path", "contains"},
+        {"corpus_path", "equals"},
+        {"corpus_path", "normalized_equals"},
+        {"corpus_path", "contains"},
+    ):
+        path_key = "corpus_path" if "corpus_path" in value else "path"
+        value_key = next(key for key in value if key != path_key)
+        return _valid_relative_path(value[path_key]) and type(value[value_key]) is str
+    return False
+
+
+def _valid_required_call(value: object) -> bool:
+    if type(value) is not dict or type(value.get("tool")) is not str:
+        return False
+    if set(value) == {"tool"}:
+        return bool(value["tool"])
+    if set(value) == {"tool", "args_contains"}:
+        return bool(value["tool"]) and type(value["args_contains"]) is str and bool(
+            value["args_contains"]
+        )
+    if set(value) == {"tool", "args"}:
+        return bool(value["tool"]) and _valid_argument_constraints(value["args"])
+    return False
 
 
 def _valid_call_shape(value: object, *, allow_args_not: bool = False) -> bool:
@@ -85,31 +128,15 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
             task = json.loads(line)
             if not isinstance(task, dict):
                 raise ValueError("each task must be a JSON object")
+            checks = task.get("checks")
+            if type(checks) is not list or any(
+                not _valid_check(check) for check in checks
+            ):
+                raise ValueError("checks must contain valid file checks")
             required_call_sequence = task.get("required_call_sequence")
             if required_call_sequence is not None and (
                 type(required_call_sequence) is not list
-                or any(
-                    type(entry) is not dict
-                    or (
-                        set(entry) == {"tool", "args_contains"}
-                        and (
-                            type(entry["tool"]) is not str
-                            or not entry["tool"]
-                            or type(entry["args_contains"]) is not str
-                            or not entry["args_contains"]
-                        )
-                    )
-                    or (
-                        set(entry) == {"tool", "args"}
-                        and (
-                            type(entry["tool"]) is not str
-                            or not entry["tool"]
-                            or not _valid_argument_constraints(entry["args"])
-                        )
-                    )
-                    or set(entry) not in ({"tool", "args_contains"}, {"tool", "args"})
-                    for entry in required_call_sequence
-                )
+                or any(not _valid_required_call(entry) for entry in required_call_sequence)
             ):
                 raise ValueError(
                     "required_call_sequence must contain valid call constraints"
@@ -236,14 +263,16 @@ def verify_checks(
     """Verify task checks against files in a scratch directory."""
     results: list[bool] = []
     for check in checks:
-        relative_path = check["path"]
-        if relative_path.startswith("memory/"):
+        if "corpus_path" in check:
             if memory_root is None:
                 results.append(False)
                 continue
-            path = memory_root / relative_path.removeprefix("memory/")
+            path = _safe_check_path(memory_root, check["corpus_path"])
         else:
-            path = scratch_dir / relative_path
+            path = _safe_check_path(scratch_dir, check["path"])
+        if path is None:
+            results.append(False)
+            continue
         try:
             content = path.read_text(encoding="utf-8")
         except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError):
@@ -261,6 +290,15 @@ def verify_checks(
         else:
             results.append(False)
     return results
+
+
+def _safe_check_path(root: Path, relative: str) -> Path | None:
+    if type(relative) is not str:
+        return None
+    target = (root / relative).resolve()
+    if root.resolve() not in target.parents:
+        return None
+    return target
 
 
 def qualified_tool_calls(
@@ -306,6 +344,8 @@ def contains_ordered_subsequence(
             return False
         if "args_contains" in required:
             return required["args_contains"] in tool_call["arguments"]
+        if set(required) == {"tool"}:
+            return True
         try:
             arguments = json.loads(tool_call["arguments"])
         except json.JSONDecodeError:
@@ -328,8 +368,17 @@ def _matches_argument_constraints(
     if type(arguments) is not dict:
         return False
     for field, constraint in constraints.items():
-        if set(constraint) == {"equals"}:
-            if field not in arguments or arguments[field] != constraint["equals"]:
+        if set(constraint) in ({"equals"}, {"equals", "casefold"}):
+            actual = arguments.get(field)
+            expected = constraint["equals"]
+            if constraint.get("casefold"):
+                matches = (
+                    type(actual) is str
+                    and actual.casefold() == expected.casefold()
+                )
+            else:
+                matches = actual == expected
+            if field not in arguments or not matches:
                 return False
             continue
         window = constraint["covers"]
@@ -703,7 +752,8 @@ def _verify_calendar_created(
             and event.get("title") == check["title"]
             and event.get("start") == check["start"]
             and event.get("end") == check["end"]
-            and event.get("calendar") == check["calendar"]
+            and isinstance(event.get("calendar"), str)
+            and event["calendar"].casefold() == check["calendar"].casefold()
             for event in created
         )
         for check in checks

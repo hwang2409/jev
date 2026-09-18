@@ -144,8 +144,12 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
     }
     assert tasks[0]["required_call_sequence"] == [
         {"tool": "memory_store", "args_contains": "launch-review"},
-        {"tool": "memory_search", "args_contains": "Tuesday"},
+        {"tool": "memory_search"},
     ]
+    assert tasks[0]["checks"][0] == {
+        "corpus_path": "launch-review.md",
+        "contains": "Tuesday at 15:00 in Room Cedar",
+    }
     assert tasks[6]["checks_calendar_created"] == [
         {
             "title": "Project kickoff",
@@ -174,7 +178,7 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
                 "title": {"equals": "Project kickoff"},
                 "start": {"equals": "2026-09-19T16:00:00"},
                 "end": {"equals": "2026-09-19T17:00:00"},
-                "calendar": {"equals": "work"},
+                "calendar": {"equals": "work", "casefold": True},
             },
         },
         {
@@ -196,11 +200,11 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
                 "title": {"equals": "Project kickoff"},
                 "start": {"equals": "2026-09-19T16:00:00"},
                 "end": {"equals": "2026-09-19T17:00:00"},
-                "calendar": {"equals": "work"},
+                "calendar": {"equals": "work", "casefold": True},
             },
         }
     ]
-    assert "2026-09-19T10:00:00" not in tasks[5]["prompt"]
+    assert "write exactly: <ISO start> to <ISO end>" in tasks[5]["prompt"]
 
 
 @pytest.mark.parametrize(
@@ -307,12 +311,73 @@ def test_verify_calendar_created_checks_exact_event_fields(tmp_path: Path) -> No
             }
         ],
     ) == [True]
+    (scratch / "calendar-seed.json.out").write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "Work",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
     assert eval_runner._verify_calendar_created(
         scratch,
         [
             {
                 "title": "Project kickoff",
-                "start": "2026-09-19T17:00:00",
+                "start": "2026-09-19T16:00:00",
+                "end": "2026-09-19T17:00:00",
+                "calendar": "work",
+            }
+        ],
+    ) == [True]
+    (scratch / "calendar-seed.json.out").write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "personal",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert eval_runner._verify_calendar_created(
+        scratch,
+        [
+            {
+                "title": "Project kickoff",
+                "start": "2026-09-19T16:00:00",
+                "end": "2026-09-19T17:00:00",
+                "calendar": "work",
+            }
+        ],
+    ) == [False]
+    (scratch / "calendar-seed.json.out").write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T17:00:00",
+                    "end": "2026-09-19T18:00:00",
+                    "calendar": "work",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    assert eval_runner._verify_calendar_created(
+        scratch,
+        [
+            {
+                "title": "Project kickoff",
+                "start": "2026-09-19T16:00:00",
                 "end": "2026-09-19T17:00:00",
                 "calendar": "work",
             }
@@ -625,7 +690,7 @@ def test_create_sequence_rejects_nonmatching_creates_and_accepts_genuine_run() -
     [
         "read",
         ["read", 3],
-        [{"tool": "read"}],
+        [{"tool": 3}],
         [{"tool": "read", "args_contains": 3}],
         [{"tool": "read", "args": {"path": {"contains": "manifest.txt"}}}],
         [
@@ -976,6 +1041,115 @@ def test_verify_checks_supports_equals_contains_and_missing(tmp_path: Path) -> N
             {"path": "missing.txt", "contains": "nope"},
         ],
     ) == [True, True, True, False]
+
+
+def test_verify_checks_resolves_corpus_paths_and_rejects_wrong_content(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "isolated-corpus"
+    corpus.mkdir()
+    (corpus / "launch-review.md").write_text(
+        "The launch review is on Tuesday at 15:00 in Room Cedar.\n",
+        encoding="utf-8",
+    )
+
+    assert verify_checks(
+        tmp_path,
+        [
+            {
+                "corpus_path": "launch-review.md",
+                "contains": "Tuesday at 15:00 in Room Cedar",
+            }
+        ],
+        corpus,
+    ) == [True]
+    assert verify_checks(
+        tmp_path,
+        [{"corpus_path": "launch-review.md", "contains": "Wednesday"}],
+        corpus,
+    ) == [False]
+
+
+def test_verify_checks_keeps_normalized_slot_check_exact(tmp_path: Path) -> None:
+    slot = tmp_path / "free-slot.txt"
+    slot.write_text("2026-09-19T10:00:00 to 2026-09-19T11:00:00\n", encoding="utf-8")
+
+    assert verify_checks(
+        tmp_path,
+        [
+            {
+                "path": "free-slot.txt",
+                "normalized_equals": "2026-09-19T10:00:00 to 2026-09-19T11:00:00",
+            }
+        ],
+    ) == [True]
+    slot.write_text("2026-09-19T11:00:00 to 2026-09-19T12:00:00\n", encoding="utf-8")
+    assert verify_checks(
+        tmp_path,
+        [
+            {
+                "path": "free-slot.txt",
+                "normalized_equals": "2026-09-19T10:00:00 to 2026-09-19T11:00:00",
+            }
+        ],
+    ) == [False]
+
+
+def test_calendar_casefold_only_normalizes_calendar_field() -> None:
+    required = [
+        {
+            "tool": "calendar_create",
+            "args": {
+                "title": {"equals": "Project kickoff"},
+                "start": {"equals": "2026-09-19T16:00:00"},
+                "end": {"equals": "2026-09-19T17:00:00"},
+                "calendar": {"equals": "work", "casefold": True},
+            },
+        }
+    ]
+    matching = [
+        {
+            "tool": "calendar_create",
+            "arguments": json.dumps(
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "Work",
+                }
+            ),
+        }
+    ]
+    wrong_calendar = [
+        {
+            "tool": "calendar_create",
+            "arguments": json.dumps(
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "personal",
+                }
+            ),
+        }
+    ]
+    wrong_title = [
+        {
+            "tool": "calendar_create",
+            "arguments": json.dumps(
+                {
+                    "title": "Project Kickoff",
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "Work",
+                }
+            ),
+        }
+    ]
+
+    assert contains_ordered_subsequence(matching, required) is True
+    assert contains_ordered_subsequence(wrong_calendar, required) is False
+    assert contains_ordered_subsequence(wrong_title, required) is False
 
 
 def test_verify_normalized_equals_rejects_extra_output(tmp_path: Path) -> None:
