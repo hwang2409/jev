@@ -32,6 +32,12 @@ class RouteResult:
     usage: dict[str, int]
 
 
+@dataclass(frozen=True, slots=True)
+class TriageResult:
+    keep_probabilities: dict[str, float]
+    usage: dict[str, int]
+
+
 def build_request(
     step: str, history: list[str], catalog: dict[str, str]
 ) -> dict[str, Any]:
@@ -90,6 +96,46 @@ def parse_response(data: dict[str, Any]) -> RouteResult:
         raise JevRouterError(f"invalid Jev response: {exc}") from exc
 
 
+def build_triage_request(
+    task: str, items: list[dict[str, str]]
+) -> dict[str, Any]:
+    """Build the request body for compaction triage."""
+
+    return {
+        "state": {"task": task[:500], "items": items},
+        "model": MODEL,
+        "questions": {
+            item["id"]: {
+                "type": "noul",
+                "instructions": (
+                    f"Will the details of item {item['id']} be needed to finish "
+                    "the task, beyond what the excerpt already shows?"
+                ),
+            }
+            for item in items
+        },
+    }
+
+
+def parse_triage_response(data: dict[str, Any], item_ids: list[str]) -> TriageResult:
+    """Parse one successful Jev triage response."""
+
+    try:
+        answers = data["answers"]
+        probabilities = {
+            item_id: float(answers[item_id]["noul"])
+            for item_id in item_ids
+        }
+        if any(not 0 <= probability <= 1 for probability in probabilities.values()):
+            raise ValueError("noul probabilities must be between 0 and 1")
+        usage = data.get("usage", {})
+        if not isinstance(usage, dict):
+            raise TypeError("usage must be an object")
+        return TriageResult(probabilities, dict(usage))
+    except (KeyError, TypeError, ValueError) as exc:
+        raise JevRouterError(f"invalid Jev triage response: {exc}") from exc
+
+
 async def route_step(
     step: str, catalog: dict[str, str], history: list[str] | None = None
 ) -> RouteResult:
@@ -128,12 +174,52 @@ async def route_step(
     raise JevRouterError("Jev request failed after retries")
 
 
+async def triage(task: str, items: list[dict[str, str]]) -> TriageResult:
+    """Ask Jev which tool results can be dropped during compaction."""
+
+    key = os.environ.get("JEV_API_KEY")
+    if not key:
+        raise JevRouterError("JEV_API_KEY is not set")
+    body = build_triage_request(task, items)
+    headers = {"Authorization": f"Bearer {key}"}
+    delay = 1.0
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        for attempt in range(_MAX_ATTEMPTS):
+            try:
+                response = await client.post(
+                    API_URL, json=body, headers=headers, timeout=60.0
+                )
+            except httpx.HTTPError as exc:
+                raise JevRouterError(f"Jev request failed: {exc}") from exc
+            if response.status_code in {429, 529} and attempt < _MAX_ATTEMPTS - 1:
+                await asyncio.sleep(delay)
+                delay *= 2
+                continue
+            if response.status_code >= 400:
+                detail = getattr(response, "text", "").strip()
+                suffix = f": {detail}" if detail else ""
+                raise JevRouterError(
+                    f"Jev request failed with HTTP {response.status_code}{suffix}",
+                    status_code=response.status_code,
+                )
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise JevRouterError("Jev response was not valid JSON") from exc
+            return parse_triage_response(data, [item["id"] for item in items])
+    raise JevRouterError("Jev request failed after retries")
+
+
 __all__ = [
     "API_URL",
     "MODEL",
     "JevRouterError",
     "RouteResult",
+    "TriageResult",
     "build_request",
+    "build_triage_request",
     "parse_response",
+    "parse_triage_response",
     "route_step",
+    "triage",
 ]

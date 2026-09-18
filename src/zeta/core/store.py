@@ -11,7 +11,7 @@ import time
 import uuid
 import warnings
 import weakref
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Self
@@ -608,6 +608,19 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                     or len(replaces) != len(set(replaces))
                 ):
                     raise ValueError("compaction replaces must be unique string IDs")
+                triage_messages = entry.data.get("triage_messages")
+                if triage_messages is not None:
+                    if type(triage_messages) is not list:
+                        raise ValueError("compaction triage_messages must be an array")
+                    for message in triage_messages:
+                        if type(message) is not dict:
+                            raise ValueError(
+                                "compaction triage message must be an object"
+                            )
+                        Message.from_dict(message)
+                jev_triage = entry.data.get("jev_triage")
+                if jev_triage is not None and type(jev_triage) is not dict:
+                    raise ValueError("compaction jev_triage must be an object")
             elif entry.type == "warning":
                 if type(entry.data.get("message")) is not str:
                     raise ValueError("warning message must be a string")
@@ -852,6 +865,8 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
         replaces: Iterable[str] = (),
         parent_id: str | None = None,
         expected_parent_id: str | None = None,
+        triage_messages: Sequence[Message] | None = None,
+        jev_triage: Mapping[str, Any] | None = None,
     ) -> ConversationEntry:
         data = {
             "summary": summary,
@@ -859,6 +874,10 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
             "source_seq_end": source_seq_end,
             "replaces": list(replaces),
         }
+        if triage_messages is not None:
+            data["triage_messages"] = [message.to_dict() for message in triage_messages]
+        if jev_triage is not None:
+            data["jev_triage"] = dict(jev_triage)
         if expected_parent_id is None:
             return self._append_row("compaction", data, parent_id)
         with self._append_lock():

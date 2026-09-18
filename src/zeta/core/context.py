@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .store import ConversationEntry, ConversationStore
+from ..providers import jev
 from ..types import (
     CompletionBackend,
     ContentBlock,
@@ -59,6 +60,8 @@ class _ContextItem:
 
 
 IMAGE_TOKEN_ESTIMATE = 1024
+JEV_TRIAGE_SIZE_FLOOR = 200
+JEV_TRIAGE_DROP_THRESHOLD = 0.35
 
 
 def _message_token_count(message: Message) -> int:
@@ -278,6 +281,7 @@ class ContextAssembler:
         compaction_policy: CompactionPolicy | None = None,
         token_counter: Callable[[Message], int] | None = None,
         on_completion_success: Callable[[], None] | None = None,
+        jev_compaction: bool = True,
     ) -> None:
         if token_budget <= 0:
             raise ValueError("token budget must be positive")
@@ -290,6 +294,8 @@ class ContextAssembler:
         self.compaction_policy = compaction_policy or CompactionPolicy(backend)
         self.token_counter = token_counter or _message_token_count
         self.on_completion_success = on_completion_success
+        self.jev_compaction = jev_compaction
+        self.last_compaction_data: dict[str, Any] = {}
         self.system_prompt = (
             system_prompt
             if isinstance(system_prompt, Message)
@@ -401,6 +407,7 @@ class ContextAssembler:
         backend: CompletionBackend | None = None,
         force: bool = False,
     ) -> AssembledContext:
+        self.last_compaction_data = {}
         branch = self.store.replay()
         branch_id = self._branch_id(branch)
         items = self._visible_items(branch)
@@ -454,8 +461,44 @@ class ContextAssembler:
             for entry in source_entries.values()
             if entry.type == "compaction"
         ]
+        triaged_messages = [item.message for item in candidates]
+        jev_triage: dict[str, Any] | None = None
+        if self.jev_compaction:
+            triage = await self._try_jev_triage(items, candidates)
+            if triage is not None:
+                triaged_messages, jev_triage = triage
+                triage_context = self._context(
+                    [
+                        *system_messages,
+                        *triaged_messages,
+                        *(item.message for item in items[boundary:]),
+                    ],
+                    True,
+                )
+                if triage_context.token_count <= self.token_budget:
+                    if self._branch_id(self.store.replay()) != branch_id:
+                        raise StaleBranchError("active branch changed during compaction")
+                    try:
+                        self.store.append_compaction_marker(
+                            "jev triage compaction",
+                            source_start,
+                            source_end,
+                            replaces=replaces,
+                            expected_parent_id=branch_id,
+                            triage_messages=triaged_messages,
+                            jev_triage=jev_triage,
+                        )
+                    except ValueError as exc:
+                        raise StaleBranchError(
+                            "active branch changed during compaction"
+                        ) from exc
+                    self.last_compaction_data = {"jev_triage": jev_triage}
+                    self._provider_token_total = None
+                    self.last_context = triage_context
+                    return triage_context
+                jev_triage["skipped_summarize"] = False
         summary = await self.compaction_policy.summarize(
-            [item.message for item in candidates],
+            triaged_messages,
             backend=backend or self.backend,
             system_prompt=system_prompt,
             # Cap the source at the budget minus a small overhead for the
@@ -488,12 +531,132 @@ class ContextAssembler:
                 source_end,
                 replaces=replaces,
                 expected_parent_id=branch_id,
+                jev_triage=jev_triage,
             )
         except ValueError as exc:
             raise StaleBranchError("active branch changed during compaction") from exc
         self._provider_token_total = None
         self.last_context = proposed
+        if jev_triage is not None:
+            self.last_compaction_data = {"jev_triage": jev_triage}
         return proposed
+
+    async def _try_jev_triage(
+        self,
+        items: Sequence[_ContextItem],
+        candidates: Sequence[_ContextItem],
+    ) -> tuple[list[Message], dict[str, Any]] | None:
+        request_items: list[dict[str, str]] = []
+        tools_by_id: dict[str, str] = {}
+        for index, item in enumerate(candidates):
+            message = item.message
+            if (
+                item.entry is None
+                or message.role is not MessageRole.TOOL_RESULT
+                or message.tool_result is None
+                or len(message.tool_result.content) <= JEV_TRIAGE_SIZE_FLOOR
+            ):
+                continue
+            tool = self._tool_name(candidates, index)
+            request_items.append(
+                {
+                    "id": item.entry.id,
+                    "kind": "tool_result",
+                    "tool": tool,
+                    "excerpt": message.tool_result.content[:200],
+                }
+            )
+            tools_by_id[item.entry.id] = tool
+        if not request_items:
+            return None
+
+        task = next(
+            (
+                _text_from_message(item.message)
+                for item in reversed(items)
+                if item.message.role is MessageRole.USER
+            ),
+            "",
+        )
+        try:
+            result = await jev.triage(task, request_items)
+            dropped_ids = {
+                item_id
+                for item_id, probability in result.keep_probabilities.items()
+                if probability < JEV_TRIAGE_DROP_THRESHOLD
+            }
+            dropped_items: list[dict[str, Any]] = []
+            triaged_messages: list[Message] = []
+            tokens_recovered = 0
+            for item in candidates:
+                entry = item.entry
+                if entry is None or entry.id not in dropped_ids:
+                    triaged_messages.append(item.message)
+                    continue
+                estimate = self.token_counter(item.message)
+                tombstone = self._tombstone(
+                    item.message,
+                    tools_by_id.get(entry.id, "unknown"),
+                    estimate,
+                )
+                tokens_recovered += max(0, estimate - self.token_counter(tombstone))
+                dropped_items.append({"id": entry.id, "tokens": estimate})
+                triaged_messages.append(tombstone)
+
+            stats: dict[str, Any] = {
+                "candidates": len(request_items),
+                "dropped": len(dropped_items),
+                "tokens_recovered": tokens_recovered,
+                "skipped_summarize": True,
+                "dropped_items": dropped_items,
+            }
+            if result.usage:
+                stats["usage"] = dict(result.usage)
+            return triaged_messages, stats
+        except Exception:  # noqa: BLE001 - triage must fail open
+            return None
+
+    @staticmethod
+    def _tool_name(items: Sequence[_ContextItem], index: int) -> str:
+        result = items[index].message.tool_result
+        if result is None:
+            return "unknown"
+        call_index = ContextAssembler._find_tool_call(items, result.tool_call_id, index)
+        if call_index is None:
+            return "unknown"
+        for block in items[call_index].message.content:
+            if isinstance(block, ToolUseContent):
+                return block.tool_call.name
+        return "unknown"
+
+    @staticmethod
+    def _tombstone(message: Message, tool: str, estimate: int) -> Message:
+        result = message.tool_result
+        if result is None:
+            return message
+        text = (
+            f"[dropped by jev-compaction: {tool} result, "
+            f"~{max(1, estimate)} tokens]"
+        )
+        block = {
+            "type": "text",
+            "text": text,
+            "truncated": False,
+            "full_size": len(text.encode("utf-8")),
+        }
+        return Message(
+            MessageRole.TOOL_RESULT,
+            [TextContent(text)],
+            tool_result=type(result)(
+                result.tool_call_id,
+                text,
+                result.is_error,
+                content_blocks=[block],
+                structured_content=result.structured_content,
+                is_canceled=result.is_canceled,
+            ),
+            metadata=dict(message.metadata),
+        )
 
     def _context(self, messages: list[Message], compacted: bool) -> AssembledContext:
         return AssembledContext(
@@ -573,6 +736,12 @@ class ContextAssembler:
 
     @staticmethod
     def _marker_items(entry: ConversationEntry) -> list[_ContextItem]:
+        triage_messages = entry.data.get("triage_messages")
+        if isinstance(triage_messages, list):
+            return [
+                _ContextItem(entry, Message.from_dict(message), fixed=True)
+                for message in triage_messages
+            ]
         messages = ContextAssembler._marker_messages(
             entry.data["source_seq_start"],
             entry.data["source_seq_end"],
