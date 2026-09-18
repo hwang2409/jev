@@ -374,6 +374,24 @@ def test_duplicate_generated_id_is_rejected_on_append(tmp_path: Path) -> None:
             store.append_message(message(MessageRole.USER, "two"))
 
 
+def test_message_revision_only_targets_newest_active_message(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path)
+    earlier = store.append_message(message(MessageRole.USER, "first"))
+    newest = store.append_message(message(MessageRole.ASSISTANT, "second"))
+
+    with pytest.raises(ValueError, match="newest active message"):
+        store.append_message_revision(earlier.id, message(MessageRole.USER, "revised"))
+
+    store.append_message_revision(
+        newest.id, message(MessageRole.ASSISTANT, "revised second")
+    )
+
+    assert [item.content[0].text for item in store.messages()] == [
+        "first",
+        "revised second",
+    ]
+
+
 def test_session_id_path_and_header_mismatches_are_rejected(tmp_path: Path) -> None:
     for session_id in ("../escape", "/", "//"):
         with pytest.raises(ConversationIntegrityError, match="safe path"):

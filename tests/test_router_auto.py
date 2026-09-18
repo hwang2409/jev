@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import copy
+import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -20,6 +23,22 @@ from zeta.types import Message, MessageRole, TextContent, ToolCall, ToolResult
 
 async def collect(events):
     return [event async for event in events]
+
+
+def without_cache_control(value: Any) -> Any:
+    result = copy.deepcopy(value)
+
+    def remove_markers(node: Any) -> None:
+        if isinstance(node, dict):
+            node.pop("cache_control", None)
+            for child in node.values():
+                remove_markers(child)
+        elif isinstance(node, list):
+            for child in node:
+                remove_markers(child)
+
+    remove_markers(result)
+    return result
 
 
 def result(
@@ -100,7 +119,26 @@ async def test_auto_surface_is_static_across_three_turns(
 async def test_auto_requests_extend_history_for_both_provider_shapes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(loop_module, "auto_route", async_result(result("read")))
+    route_calls = 0
+
+    async def route(*_args):
+        nonlocal route_calls
+        route_calls += 1
+        if route_calls == 1:
+            return result("read")
+        if route_calls == 2:
+            return result(
+                "read",
+                confidence=0.7,
+                probabilities={"read": 0.4, "write": 0.3, "bash": 0.2},
+            )
+        if route_calls == 3:
+            return result("read", needs_tool=0.2)
+        if route_calls == 4:
+            raise RuntimeError("jev down")
+        return result("read")
+
+    monkeypatch.setattr(loop_module, "auto_route", route)
     loop = build_loop(
         tmp_path,
         [
@@ -114,11 +152,18 @@ async def test_auto_requests_extend_history_for_both_provider_shapes(
                     ToolCall("invoke-2", "invoke", {"tool": "read", "args": {}})
                 ]
             ),
-            ScriptedTurn(content=[TextContent("done")]),
+            ScriptedTurn(content=[TextContent("first complete")]),
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall("invoke-3", "invoke", {"tool": "read", "args": {}})
+                ]
+            ),
+            ScriptedTurn(content=[TextContent("second complete")]),
         ],
     )
 
-    await collect(loop.run_turn("read twice"))
+    await collect(loop.run_turn("first request"))
+    await collect(loop.run_turn("second request"))
 
     anthropic = [
         build_messages_payload(
@@ -127,17 +172,32 @@ async def test_auto_requests_extend_history_for_both_provider_shapes(
             model="test",
             max_tokens=16_384,
             thinking_budget=8_192,
-        )["messages"]
+        )
         for messages, tools in loop.backend.calls
     ]
     codex = [
-        build_responses_payload(messages, tools, model="test")["input"]
+        build_responses_payload(messages, tools, model="test")
         for messages, tools in loop.backend.calls
     ]
-    for payloads in (anthropic, codex):
-        assert len(payloads[0]) < len(payloads[1]) < len(payloads[2])
-        assert payloads[0] == payloads[1][: len(payloads[0])]
-        assert payloads[1] == payloads[2][: len(payloads[1])]
+    assert route_calls == 5
+    assert len(anthropic) == len(codex) == 5
+    for payloads, message_key in ((anthropic, "messages"), (codex, "input")):
+        # cache_control markers direct cache writes; prefix matching is content-based.
+        # upstream ZETA-39 moves them by design, so compare annotation-stripped messages.
+        messages = [without_cache_control(payload[message_key]) for payload in payloads]
+        for previous, current in zip(messages, messages[1:]):
+            assert len(previous) < len(current)
+            assert previous == current[: len(previous)]
+
+        tool_bytes = [
+            json.dumps(
+                payload.get("tools", []),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+            for payload in payloads
+        ]
+        assert all(value == tool_bytes[0] for value in tool_bytes)
 
 
 @pytest.mark.asyncio

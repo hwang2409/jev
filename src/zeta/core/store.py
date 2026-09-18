@@ -800,6 +800,11 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
             )
             if target is None or target.type != "message":
                 raise ValueError("message revision target is not an active message")
+            message_entries = [entry for entry in branch if entry.type == "message"]
+            if not message_entries or target.id != message_entries[-1].id:
+                raise ValueError(
+                    "message revision target must be the newest active message"
+                )
             return self._snapshot_entry(
                 self._append_row_unlocked(
                     "message_revision",
