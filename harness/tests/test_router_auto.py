@@ -14,7 +14,7 @@ from zeta.core.store import ConversationStore
 from zeta.loop import AgentLoop
 from zeta.providers.anthropic_payload import build_messages_payload
 from zeta.providers.codex_payload import build_responses_payload
-from zeta.providers.jev import AutoRouteResult
+from zeta.providers.jev import AutoRouteResult, MemoryGateResult
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
 from zeta.types import (
@@ -64,7 +64,7 @@ def result(
 
 
 def async_result(value: AutoRouteResult):
-    async def route(*_args):
+    async def route(*_args, **_kwargs):
         return value
 
     return route
@@ -605,10 +605,10 @@ async def test_memory_injection_is_bounded_and_dedupes_tool_results(
         if isinstance(block, TextContent)
         and block.text.startswith("Recalled reference material")
     ]
-    assert len(injected) == 1
-    assert "a" * 600 in injected[0]
-    assert "b" * 600 in injected[0]
-    assert "c" not in injected[0]
+    assert len(injected) == 2
+    assert any(text.endswith("a" * 600) for text in injected)
+    assert any(text.endswith("b" * 600) for text in injected)
+    assert all(not text.endswith("c" * 100) for text in injected)
     assert loop.store.messages()[0].metadata["compaction_droppable"] is True
 
 
@@ -684,3 +684,66 @@ async def test_auto_injection_does_not_make_a_second_jev_call(
     await collect(loop.run_turn("answer this"))
 
     assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_stock_memory_gate_runs_once_per_user_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gate_calls = 0
+    search_calls = 0
+
+    async def gate(_query: str) -> MemoryGateResult:
+        nonlocal gate_calls
+        gate_calls += 1
+        return MemoryGateResult(0.9, {"input_tokens": 1})
+
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        nonlocal search_calls
+        search_calls += 1
+        return {
+            "content": [],
+            "isError": False,
+            "structuredContent": {
+                "items": [memory_result("stock.md", ["Fact"], "stored")]
+            },
+        }
+
+    monkeypatch.setattr(loop_module, "memory_gate", gate)
+    monkeypatch.setattr(loop_module, "_memory_search", search)
+    loop = build_loop(
+        tmp_path,
+        [ScriptedTurn(content=[TextContent("first")]), ScriptedTurn(content=[TextContent("second")])],
+    )
+    loop.router_mode = False
+    loop.memory_injection = True
+    loop.tool_registry.memory_config = "fixture.toml"
+
+    await collect(loop.run_turn("answer this"))
+
+    assert gate_calls == 1
+    assert search_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_gate_failure_is_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def gate(_query: str) -> MemoryGateResult:
+        raise RuntimeError("jev unavailable")
+
+    monkeypatch.setattr(loop_module, "memory_gate", gate)
+    loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
+    loop.router_mode = False
+    loop.memory_injection = True
+    loop.tool_registry.memory_config = "fixture.toml"
+
+    events = await collect(loop.run_turn("answer this"))
+
+    assert not any(event.type.value == "error" for event in events)
+    assert not any(
+        isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+        for message in loop.store.messages()
+        for block in message.content
+    )

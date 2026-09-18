@@ -498,6 +498,32 @@ def test_parse_events_counts_auto_routing_decisions() -> None:
     assert result["route_expansions"] == 1
 
 
+def test_parse_events_surfaces_memory_injection_stats() -> None:
+    result = parse_events(
+        [
+            {
+                "type": "usage",
+                "service": "jev",
+                "routing_decision": {
+                    "memory_injection": {
+                        "gate_score": 0.8,
+                        "injected_count": 2,
+                        "chars": 1200,
+                    }
+                },
+            }
+        ]
+    )
+
+    assert result["memory_injection"] == {
+        "decisions": [
+            {"gate_score": 0.8, "injected_count": 2, "chars": 1200}
+        ],
+        "injected_count": 2,
+        "chars": 1200,
+    }
+
+
 @pytest.mark.asyncio
 async def test_parse_events_counts_only_real_unrouted_rejections(
     tmp_path: Path,

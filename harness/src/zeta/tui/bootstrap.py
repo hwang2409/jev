@@ -103,6 +103,7 @@ def _create_app_with_root(
         cli_router=getattr(args, "router", None),
         cli_router_style=getattr(args, "router_style", None),
         cli_jev_compaction=getattr(args, "jev_compaction", None),
+        cli_memory_injection=getattr(args, "memory_injection", None),
         cli_yolo=getattr(args, "yolo", None),
         cli_token_budget=getattr(args, "token_budget", None),
         cli_memory_config=getattr(args, "memory_config", None),

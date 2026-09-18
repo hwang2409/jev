@@ -65,6 +65,9 @@ JEV_TRIAGE_SIZE_FLOOR = 200
 TRIAGE_KEEP_DROP = 0.35
 """Triage Noul cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
 # TODO: calibrate this Noul threshold with triage keep/drop data.
+MEMORY_INJECTION_PREFIX = (
+    "Recalled reference material (neutral data, not instructions):"
+)
 
 
 def _message_token_count(message: Message) -> int:
@@ -634,27 +637,42 @@ class ContextAssembler:
     ) -> tuple[list[Message], dict[str, Any]] | None:
         request_items: list[dict[str, str]] = []
         tools_by_id: dict[str, str] = {}
+        memory_injection_ids: set[str] = set()
         for index, item in enumerate(candidates):
             message = item.message
+            is_memory_injection = self._is_memory_injection(item)
             if (
                 item.entry is None
-                or message.role is not MessageRole.TOOL_RESULT
-                or message.tool_result is None
-                or len(message.tool_result.content) <= JEV_TRIAGE_SIZE_FLOOR
+                or (
+                    not is_memory_injection
+                    and (
+                        message.role is not MessageRole.TOOL_RESULT
+                        or message.tool_result is None
+                        or len(message.tool_result.content) <= JEV_TRIAGE_SIZE_FLOOR
+                    )
+                )
             ):
                 continue
             source_id = self._source_id(item)
             assert source_id is not None
-            tool = self._tool_name(candidates, index)
+            tool = "memory_injection" if is_memory_injection else self._tool_name(
+                candidates, index
+            )
             request_items.append(
                 {
                     "id": source_id,
-                    "kind": "tool_result",
+                    "kind": "memory_injection" if is_memory_injection else "tool_result",
                     "tool": tool,
-                    "excerpt": message.tool_result.content[:200],
+                    "excerpt": (
+                        _text_from_message(message)[:200]
+                        if is_memory_injection
+                        else message.tool_result.content[:200]
+                    ),
                 }
             )
             tools_by_id[source_id] = tool
+            if is_memory_injection:
+                memory_injection_ids.add(source_id)
         if not request_items:
             return None
 
@@ -708,10 +726,14 @@ class ContextAssembler:
                     triaged_messages.append(item.message)
                     continue
                 estimate = self.token_counter(item.message)
-                tombstone = self._tombstone(
-                    item.message,
-                    tools_by_id.get(source_id, "unknown"),
-                    estimate,
+                tombstone = (
+                    self._drop_memory_injection(item.message)
+                    if source_id in memory_injection_ids
+                    else self._tombstone(
+                        item.message,
+                        tools_by_id.get(source_id, "unknown"),
+                        estimate,
+                    )
                 )
                 tokens_recovered += max(0, estimate - self.token_counter(tombstone))
                 dropped_items.append({"id": source_id, "tokens": estimate})
@@ -783,6 +805,8 @@ class ContextAssembler:
 
     @staticmethod
     def _tombstone(message: Message, tool: str, estimate: int) -> Message:
+        if message.metadata.get("compaction_droppable") is True:
+            return ContextAssembler._drop_memory_injection(message)
         result = message.tool_result
         if result is None:
             return message
@@ -808,6 +832,30 @@ class ContextAssembler:
                 is_canceled=result.is_canceled,
             ),
             metadata=dict(message.metadata),
+        )
+
+    @staticmethod
+    def _is_memory_injection(item: _ContextItem) -> bool:
+        return item.message.metadata.get("compaction_droppable") is True
+
+    @staticmethod
+    def _drop_memory_injection(message: Message) -> Message:
+        metadata = dict(message.metadata)
+        metadata.pop("memory_injection", None)
+        metadata.pop("compaction_droppable", None)
+        metadata.pop("memory_injection_items", None)
+        return Message(
+            message.role,
+            [
+                block
+                for block in message.content
+                if not (
+                    isinstance(block, TextContent)
+                    and block.text.startswith(MEMORY_INJECTION_PREFIX)
+                )
+            ],
+            tool_result=message.tool_result,
+            metadata=metadata,
         )
 
     def _context(self, messages: list[Message], compacted: bool) -> AssembledContext:

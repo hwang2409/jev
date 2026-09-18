@@ -44,6 +44,7 @@ def build_unattended_loop(
         if loaded.settings.jev_compaction is None
         else loaded.settings.jev_compaction
     )
+    memory_injection = bool(loaded.settings.memory_injection)
     skill_catalog = SkillCatalog.from_snapshot(session.metadata.skill_catalog)
     # Automation sessions never mount user-defined agents, even if metadata
     # was modified outside the restricted runner.
@@ -71,5 +72,6 @@ def build_unattended_loop(
         router_mode=router_mode,
         router_style=router_style,
         jev_compaction=jev_compaction,
+        memory_injection=memory_injection,
         on_completion_success=lambda: SessionManager(home).touch(metadata),
     )

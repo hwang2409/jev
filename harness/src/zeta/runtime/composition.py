@@ -126,6 +126,7 @@ def compose_runtime(
             "router_mode": config.router,
             "router_style": config.router_style,
             "jev_compaction": config.jev_compaction,
+            "memory_injection": config.memory_injection,
             "system_prompt": project_context.system_prompt,
         }
         if max_turns is not None and max_turns > 0:
