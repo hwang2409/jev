@@ -794,7 +794,7 @@ async def test_tombstones_shrink_source_before_summary_cap(
     store.append_message(user("old"))
     call, result = tool_messages("call-1", "read", "x" * 3000)
     store.append_message(call)
-    result_entry = store.append_message(result)
+    store.append_message(result)
     store.append_message(user("tail"))
     backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
 
@@ -849,11 +849,20 @@ def test_triage_request_shape_and_parser() -> None:
         "items": [item],
     }
     assert request["questions"]["entry-1"]["type"] == "noul"
-    assert "item entry-1" in request["questions"]["entry-1"]["instructions"]
+    instructions = request["questions"]["entry-1"]["instructions"]
+    assert instructions["item_field"] == "items[entry-1]"
+    assert instructions["state_fields"] == [
+        "task",
+        "latest_assistant_text",
+        "recent_tool_actions",
+        "items",
+    ]
+    assert request["questions"]["entry-1"]["criteria"]["true"]["examples"]
     parsed = jev.parse_triage_response(
         {"answers": {"entry-1": {"noul": 0.2}}}, ["entry-1"]
     )
     assert parsed.keep_probabilities == {"entry-1": 0.2}
+    assert parsed.call_confidence == pytest.approx(0.6)
 
 
 @pytest.mark.asyncio

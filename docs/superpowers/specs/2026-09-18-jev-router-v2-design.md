@@ -65,3 +65,10 @@ Targeted test files only.
 
 Removing v1 (keep for A/B), MCP special-casing, provider-side strict schemas
 for invoke, GUI.
+
+## Adversarial-content residual risk
+
+Structured criteria, named state fields, and injection probes reduce routing
+errors from hostile result text. They cannot guarantee that a future Jev model
+ignores persuasive content inside `last_results`. Keep fail-open behavior and
+rerun the probes when the model or prompt changes.

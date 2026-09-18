@@ -90,6 +90,12 @@ GUI changes, MCP tools in the catalog (keep whatever the registry reports,
 but no special handling), baseline-vs-router token benchmarking (later),
 upstream zeta merges (never).
 
+## Adversarial-content residual risk
+
+Structured criteria and injection probes reduce routing errors from hostile
+state text. They cannot guarantee that a future Jev model ignores persuasive
+content in `current_step` or `recent_steps`. Keep routing fail-open.
+
 ## Status: live smoke PASSED (2026-09-18)
 
 Headless run at head `b8b9bbb0` (claude provider, subscription OAuth, yolo,

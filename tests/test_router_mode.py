@@ -37,6 +37,31 @@ def routed(
     )
 
 
+def test_catalog_uses_structured_criteria_for_confusable_tools() -> None:
+    catalog = route_module.build_catalog(
+        [
+            {"name": "read", "description": "Read a file"},
+            {"name": "write", "description": "Write a file"},
+            {"name": "edit", "description": "Edit a file"},
+            {"name": "fetch", "description": "Fetch a URL"},
+            {"name": "websearch", "description": "Search the web"},
+            {"name": "bash", "description": "Run a shell command"},
+            {"name": "exec", "description": "Run a shell command"},
+        ]
+    )
+
+    assert catalog["bash"] == {
+        "what": "Run a shell command",
+        "not_for": "editing a file in place; use edit",
+        "examples": ["Run pytest tests/test_router_auto.py."],
+    }
+    assert all(
+        set(entry) == {"what", "not_for", "examples"}
+        and 1 <= len(entry["examples"]) <= 2
+        for entry in catalog.values()
+    )
+
+
 def build_loop(
     tmp_path: Path,
     turns: list[ScriptedTurn],
@@ -129,6 +154,9 @@ async def test_headless_route_event_preserves_jev_usage(
     assert route_result["structured_content"] == {
         "service": "jev",
         "usage": {"input_tokens": 12, "output_tokens": 3},
+        "confidence": 0.9,
+        "needs_tool": 1.0,
+        "step_clarity": 0.8,
     }
 
 

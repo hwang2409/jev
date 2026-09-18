@@ -83,6 +83,13 @@ correctly, and the event stream reports triage stats.
 Summarize-prompt changes, mid-range user/assistant message triage, Score-
 based multi-level importance (Noul v1 only), GUI.
 
+## Adversarial-content residual risk
+
+Structured criteria, named state fields, and injection probes reduce routing
+errors from hostile tool-result text. They cannot guarantee that a future Jev
+model ignores persuasive content inside the `items` state. Keep the fail-open
+path and rerun the probes when the model or prompt changes.
+
 ## Status: COMPLETE, live demos passed (2026-09-18)
 
 Head `35eb793a`. Review loop: 5 -> 2 -> 2 -> 0 findings across 4 rounds
