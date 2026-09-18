@@ -57,6 +57,7 @@ class _ContextItem:
     entry: ConversationEntry | None
     message: Message
     fixed: bool = False
+    source_id: str | None = None
 
 
 IMAGE_TOKEN_ESTIMATE = 1024
@@ -475,7 +476,14 @@ class ContextAssembler:
                     ],
                     True,
                 )
-                if triage_context.token_count <= self.token_budget:
+                tokens_recovered = jev_triage.get("tokens_recovered", 0)
+                if type(tokens_recovered) is not int:
+                    tokens_recovered = 0
+                triage_token_count = max(
+                    0,
+                    self._total_tokens(all_messages) - tokens_recovered,
+                )
+                if triage_token_count <= self.token_budget:
                     if self._branch_id(self.store.replay()) != branch_id:
                         raise StaleBranchError("active branch changed during compaction")
                     try:
@@ -486,6 +494,11 @@ class ContextAssembler:
                             replaces=replaces,
                             expected_parent_id=branch_id,
                             triage_messages=triaged_messages,
+                            triage_source_ids=[
+                                self._source_id(item)
+                                for item in candidates
+                                if item.entry is not None
+                            ],
                             jev_triage=jev_triage,
                         )
                     except ValueError as exc:
@@ -557,16 +570,18 @@ class ContextAssembler:
                 or len(message.tool_result.content) <= JEV_TRIAGE_SIZE_FLOOR
             ):
                 continue
+            source_id = self._source_id(item)
+            assert source_id is not None
             tool = self._tool_name(candidates, index)
             request_items.append(
                 {
-                    "id": item.entry.id,
+                    "id": source_id,
                     "kind": "tool_result",
                     "tool": tool,
                     "excerpt": message.tool_result.content[:200],
                 }
             )
-            tools_by_id[item.entry.id] = tool
+            tools_by_id[source_id] = tool
         if not request_items:
             return None
 
@@ -590,17 +605,22 @@ class ContextAssembler:
             tokens_recovered = 0
             for item in candidates:
                 entry = item.entry
-                if entry is None or entry.id not in dropped_ids:
+                source_id = self._source_id(item)
+                if (
+                    entry is None
+                    or source_id is None
+                    or source_id not in dropped_ids
+                ):
                     triaged_messages.append(item.message)
                     continue
                 estimate = self.token_counter(item.message)
                 tombstone = self._tombstone(
                     item.message,
-                    tools_by_id.get(entry.id, "unknown"),
+                    tools_by_id.get(source_id, "unknown"),
                     estimate,
                 )
                 tokens_recovered += max(0, estimate - self.token_counter(tombstone))
-                dropped_items.append({"id": entry.id, "tokens": estimate})
+                dropped_items.append({"id": source_id, "tokens": estimate})
                 triaged_messages.append(tombstone)
 
             stats: dict[str, Any] = {
@@ -628,6 +648,16 @@ class ContextAssembler:
             if isinstance(block, ToolUseContent):
                 return block.tool_call.name
         return "unknown"
+
+    @staticmethod
+    def _source_id(item: _ContextItem) -> str | None:
+        if item.source_id is not None:
+            return item.source_id
+        if item.entry is None:
+            return None
+        if item.entry.type == "compaction" and item.message.tool_result is not None:
+            return f"{item.entry.id}:{item.message.tool_result.tool_call_id}"
+        return item.entry.id
 
     @staticmethod
     def _tombstone(message: Message, tool: str, estimate: int) -> Message:
@@ -738,9 +768,16 @@ class ContextAssembler:
     def _marker_items(entry: ConversationEntry) -> list[_ContextItem]:
         triage_messages = entry.data.get("triage_messages")
         if isinstance(triage_messages, list):
+            source_ids = entry.data.get("triage_source_ids")
+            if not isinstance(source_ids, list) or len(source_ids) != len(triage_messages):
+                source_ids = [None] * len(triage_messages)
             return [
-                _ContextItem(entry, Message.from_dict(message), fixed=True)
-                for message in triage_messages
+                _ContextItem(
+                    entry,
+                    Message.from_dict(message),
+                    source_id=(source_ids[index] if isinstance(source_ids[index], str) else None),
+                )
+                for index, message in enumerate(triage_messages)
             ]
         messages = ContextAssembler._marker_messages(
             entry.data["source_seq_start"],

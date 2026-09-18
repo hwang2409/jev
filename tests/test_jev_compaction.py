@@ -128,6 +128,221 @@ async def test_budget_recovery_tombstones_and_persists_tool_pairing(
 
 
 @pytest.mark.asyncio
+async def test_calibrated_budget_still_runs_summary_without_recovery(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    call, result = tool_messages("call-1", "read", "x" * 400)
+    store.append_message(call)
+    store.append_message(result)
+    store.append_message(user("current objective"))
+    backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
+
+    async def keep_everything(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        return triage_result({item["id"]: 1.0 for item in items})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", keep_everything)
+    assembler = ContextAssembler(
+        store,
+        token_budget=20,
+        retained_tail=1,
+        token_counter=compact_count,
+        backend=backend,
+    )
+    assembler.record_usage({"total_tokens": 100})
+    summary_called = False
+
+    async def summarize(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal summary_called
+        summary_called = True
+        return "summary"
+
+    monkeypatch.setattr(assembler.compaction_policy, "summarize", summarize)
+
+    await assembler.assemble()
+
+    assert summary_called is True
+    marker = next(entry for entry in store.replay() if entry.type == "compaction")
+    assert marker.data["jev_triage"]["skipped_summarize"] is False
+
+
+@pytest.mark.asyncio
+async def test_calibrated_budget_skips_summary_after_genuine_recovery(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    call, result = tool_messages("call-1", "read", "x" * 400)
+    store.append_message(call)
+    result_entry = store.append_message(result)
+    store.append_message(user("current objective"))
+    backend = FakeBackend([])
+
+    async def drop_result(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        return triage_result({items[0]["id"]: 0.1})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", drop_result)
+
+    def calibrated_count(message: Message) -> int:
+        if message.role is MessageRole.TOOL_RESULT:
+            return 1 if message.tool_result and message.tool_result.content.startswith(
+                "[dropped by jev-compaction:"
+            ) else 90
+        return 1
+
+    assembler = ContextAssembler(
+        store,
+        token_budget=20,
+        retained_tail=1,
+        token_counter=calibrated_count,
+        backend=backend,
+    )
+    assembler.record_usage({"total_tokens": 100})
+
+    await assembler.assemble()
+
+    assert backend.calls == []
+    marker = next(entry for entry in store.replay() if entry.type == "compaction")
+    assert marker.data["jev_triage"]["dropped_items"] == [
+        {"id": result_entry.id, "tokens": 90}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_reloaded_triage_content_can_be_compacted_again(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    call, result = tool_messages("call-1", "read", "x" * 400)
+    store.append_message(call)
+    store.append_message(result)
+    store.append_message(user("current objective"))
+    first = ContextAssembler(
+        store,
+        token_budget=1,
+        retained_tail=1,
+        token_counter=lambda message: (
+            1
+            if message.role is MessageRole.TOOL_RESULT
+            and message.tool_result is not None
+            and message.tool_result.content.startswith("[dropped by jev-compaction:")
+            else 1
+            if message.content
+            and isinstance(message.content[0], TextContent)
+            and "new objective" in message.content[0].text
+            else 0
+        ),
+    )
+
+    async def drop_all(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        return triage_result({item["id"]: 0.1 for item in items})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", drop_all)
+    await first.assemble(force=True)
+    session_id = store.session_id
+    store.close()
+
+    reopened = ConversationStore(tmp_path, session_id=session_id, _must_exist=True)
+    reopened.append_message(user("new objective"))
+    backend = FakeBackend([ScriptedTurn([TextContent("second summary")])])
+    second = ContextAssembler(
+        reopened,
+        token_budget=1,
+        retained_tail=1,
+        token_counter=lambda message: (
+            1
+            if message.role is MessageRole.TOOL_RESULT
+            and message.tool_result is not None
+            and message.tool_result.content.startswith("[dropped by jev-compaction:")
+            else 1
+            if message.content
+            and isinstance(message.content[0], TextContent)
+            and "new objective" in message.content[0].text
+            else 0
+        ),
+        backend=backend,
+    )
+    summary_called = False
+
+    async def summarize(*_args: Any, **_kwargs: Any) -> str:
+        nonlocal summary_called
+        summary_called = True
+        return "second summary"
+
+    monkeypatch.setattr(second.compaction_policy, "summarize", summarize)
+
+    await second.assemble()
+
+    assert summary_called is True
+
+
+@pytest.mark.asyncio
+async def test_reloaded_triage_items_keep_distinct_ids(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    call_one, result_one = tool_messages("call-1", "read", "x" * 400)
+    call_two, result_two = tool_messages("call-2", "write", "y" * 400)
+    store.append_message(call_one)
+    result_one_entry = store.append_message(result_one)
+    store.append_message(call_two)
+    result_two_entry = store.append_message(result_two)
+    store.append_message(user("current objective"))
+    requests: list[list[dict[str, str]]] = []
+
+    async def triage_items(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        requests.append(items)
+        probabilities = {item["id"]: 1.0 for item in items}
+        if len(requests) == 2:
+            probabilities[items[0]["id"]] = 0.1
+        return triage_result(probabilities)
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", triage_items)
+    assembler = ContextAssembler(
+        store,
+        token_budget=100,
+        retained_tail=1,
+        token_counter=compact_count,
+    )
+    await assembler.assemble(force=True)
+    session_id = store.session_id
+    store.close()
+
+    reopened = ConversationStore(tmp_path, session_id=session_id, _must_exist=True)
+    reopened.append_message(user("new objective"))
+    fresh = ContextAssembler(
+        reopened,
+        token_budget=100,
+        retained_tail=1,
+        token_counter=compact_count,
+    )
+    messages = await fresh.assemble(force=True)
+
+    assert [item["id"] for item in requests[1]] == [
+        result_one_entry.id,
+        result_two_entry.id,
+    ]
+    dropped = [
+        message.tool_result.tool_call_id
+        for message in messages
+        if message.tool_result is not None
+        and message.tool_result.content.startswith("[dropped by jev-compaction:")
+    ]
+    assert dropped == ["call-1"]
+
+
+@pytest.mark.asyncio
 async def test_recent_tool_results_are_not_triaged(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

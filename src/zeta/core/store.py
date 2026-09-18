@@ -618,6 +618,20 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                                 "compaction triage message must be an object"
                             )
                         Message.from_dict(message)
+                triage_source_ids = entry.data.get("triage_source_ids")
+                if triage_source_ids is not None and (
+                    type(triage_source_ids) is not list
+                    or triage_messages is None
+                    or len(triage_source_ids) != len(triage_messages)
+                    or any(
+                        type(source_id) is not str or not source_id
+                        for source_id in triage_source_ids
+                    )
+                    or len(triage_source_ids) != len(set(triage_source_ids))
+                ):
+                    raise ValueError(
+                        "compaction triage_source_ids must be unique strings"
+                    )
                 jev_triage = entry.data.get("jev_triage")
                 if jev_triage is not None and type(jev_triage) is not dict:
                     raise ValueError("compaction jev_triage must be an object")
@@ -866,6 +880,7 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
         parent_id: str | None = None,
         expected_parent_id: str | None = None,
         triage_messages: Sequence[Message] | None = None,
+        triage_source_ids: Sequence[str] | None = None,
         jev_triage: Mapping[str, Any] | None = None,
     ) -> ConversationEntry:
         data = {
@@ -876,6 +891,8 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
         }
         if triage_messages is not None:
             data["triage_messages"] = [message.to_dict() for message in triage_messages]
+        if triage_source_ids is not None:
+            data["triage_source_ids"] = list(triage_source_ids)
         if jev_triage is not None:
             data["jev_triage"] = dict(jev_triage)
         if expected_parent_id is None:
