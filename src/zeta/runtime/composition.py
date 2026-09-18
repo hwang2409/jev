@@ -123,6 +123,7 @@ def compose_runtime(
             "retained_tail": metadata.retained_tail,
             "on_completion_success": completion_callback,
             "on_plan_mode_change": on_plan_mode_change,
+            "router_mode": config.router,
             "system_prompt": project_context.system_prompt,
         }
         if max_turns is not None and max_turns > 0:

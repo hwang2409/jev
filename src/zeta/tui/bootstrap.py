@@ -100,6 +100,7 @@ def _create_app_with_root(
         loaded_settings.settings,
         cli_provider=getattr(args, "provider", None),
         cli_model=getattr(args, "model", None),
+        cli_router=getattr(args, "router", None),
         cli_yolo=getattr(args, "yolo", None),
         cli_token_budget=getattr(args, "token_budget", None),
     )

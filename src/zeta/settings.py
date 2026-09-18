@@ -16,7 +16,7 @@ one table entry (``[approval]\\nallow = [...]``) without restating unrelated
 tables, but replacing a list is one atomic swap.
 
 Trust boundary: the project layer may only contribute safe keys — provider,
-model, token_budget, workspace_snapshot_cap. ``yolo``, ``[approval]``,
+model, router, token_budget, workspace_snapshot_cap. ``yolo``, ``[approval]``,
 ``theme``, and ``[keybindings]`` from the project file are IGNORED with a
 loud startup warning. Global settings retain full key access. A future
 ``/trust`` mechanism may relax this per-repo, but until then a hostile
@@ -50,6 +50,7 @@ _TOP_KEYS = frozenset(
     {
         "provider",
         "model",
+        "router",
         "yolo",
         "token_budget",
         "theme",
@@ -64,6 +65,7 @@ _PROJECT_SAFE_KEYS = frozenset(
     {
         "provider",
         "model",
+        "router",
         "token_budget",
         "workspace_snapshot_cap",
     }
@@ -78,6 +80,7 @@ class Settings:
 
     provider: str | None = None
     model: str | None = None
+    router: bool | None = None
     yolo: bool | None = None
     token_budget: int | None = None
     theme: str | None = None
@@ -96,6 +99,7 @@ class ResolvedConfig:
 
     provider: str
     model: str | None
+    router: bool
     yolo: bool
     token_budget: int | None
     theme: str | None
@@ -150,6 +154,7 @@ def resolve(
     cli_yolo: bool | None,
     cli_token_budget: int | None,
     default_provider: str = "fake",
+    cli_router: bool | None = None,
 ) -> ResolvedConfig:
     """Layer CLI flags over the loaded settings; CLI wins where set.
 
@@ -159,6 +164,9 @@ def resolve(
     """
 
     provider = cli_provider or settings.provider or default_provider
+    router = True if cli_router is None and settings.router is None else (
+        settings.router if cli_router is None else cli_router
+    )
     yolo = bool(settings.yolo) if cli_yolo is None else cli_yolo
     token_budget = (
         cli_token_budget if cli_token_budget is not None else settings.token_budget
@@ -166,6 +174,7 @@ def resolve(
     return ResolvedConfig(
         provider=provider,
         model=cli_model or settings.model,
+        router=bool(router),
         yolo=yolo,
         token_budget=token_budget,
         theme=settings.theme,
@@ -257,6 +266,7 @@ def _validate(
         notices.append(f"settings · ignored unknown key '{key}'")
     provider = _validated_choice(data, "provider", _PROVIDER_CHOICES, notices)
     model = _validated_string(data, "model", notices)
+    router = _validated_bool(data, "router", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
     token_budget = _validated_positive_int(data, "token_budget", notices)
@@ -274,6 +284,7 @@ def _validate(
     return Settings(
         provider=provider,
         model=model,
+        router=router,
         yolo=yolo,
         token_budget=token_budget,
         theme=theme,

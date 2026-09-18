@@ -62,6 +62,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--router",
+        dest="router",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="route tool choices through Jev; --no-router restores the full toolset",
+    )
+    parser.add_argument(
         "--token-budget",
         type=int,
         default=None,
