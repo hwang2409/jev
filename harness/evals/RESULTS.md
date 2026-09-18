@@ -163,3 +163,15 @@ Records: `results/realistic-*.json`.
 Fix the three task calibrations (corpus-relative check paths, format-
 tolerant slot check or format-specified prompt, case-insensitive calendar
 equality) and rerun before treating the checks column as capability truth.
+
+# Calibrated baseline (post-fix rerun) — 2026-09-18
+
+Head `afe4b5e`. Single-run samples; treat small deltas cautiously.
+
+| Mode | Completed | All-checks | Claude tokens | Jev tokens |
+|---|---|---|---|---|
+| auto | 6/8 | 4/8 | 91.6k | 114.0k |
+| router (v1) | 5/8 | 4/8 | 60.9k | 63.0k |
+| stock | 7/8 | 5/8 | 200.6k | 0 |
+
+This is the reference for the memory auto-injection A/B.
