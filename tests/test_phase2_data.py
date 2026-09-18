@@ -105,3 +105,22 @@ def test_full_evalset_has_exact_coverage_and_hard_cases():
     }
     assert len(hard) == 20
     assert {case["id"] for case in hard} == {f"hard-{i}" for i in range(1, 21)}
+
+
+def test_hard_steps_do_not_copy_expected_description_phrases():
+    cases = load_evalset("evalset_full.jsonl")
+    hard = [case for case in cases if case["id"].startswith("hard-")]
+    for case in hard:
+        description_words = re.findall(
+            r"[a-z0-9]+", CATALOG_120[case["expected_tool"]].lower()
+        )
+        step_words = re.findall(r"[a-z0-9]+", case["step"].lower())
+        phrases = {
+            " ".join(description_words[index:index + length])
+            for length in range(4, len(description_words) + 1)
+            for index in range(len(description_words) - length + 1)
+        }
+        assert not any(
+            " ".join(step_words[index:index + 4]) in phrases
+            for index in range(len(step_words) - 3)
+        ), case["id"]
