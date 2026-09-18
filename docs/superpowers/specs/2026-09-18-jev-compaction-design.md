@@ -82,3 +82,15 @@ correctly, and the event stream reports triage stats.
 
 Summarize-prompt changes, mid-range user/assistant message triage, Score-
 based multi-level importance (Noul v1 only), GUI.
+
+## Status: COMPLETE, live demos passed (2026-09-18)
+
+Head `35eb793a`. Review loop: 5 -> 2 -> 2 -> 0 findings across 4 rounds
+(recount, replay persistence, legacy ids, progress context, chunked
+summarize). Live demos: (1) collect-then-write — triage correctly KEPT
+unpersisted reads, task perfect; (2) extract-as-you-go — previously
+session-fatal summarize overflow now completes via tombstone-then-chunk,
+task perfect; router rejection held under compaction (unrouted calls
+bounced and recovered). Observed: triage drops are rare at the 0.35
+keep-threshold — conservative by design; threshold + keep-question
+phrasing are the tuning knobs if more aggressive dropping is wanted.
