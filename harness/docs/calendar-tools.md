@@ -55,3 +55,14 @@ PY
 
 approve the macOS prompt for the python process. A denied prompt returns a
 structured tool error. The command does not create or change calendar data.
+
+## TCC attribution (learned 2026-09-18)
+
+Processes spawned under the wiki supervisor are launchd-parented: macOS
+cannot attribute them to a UI app, so EventKit auto-denies WITHOUT a
+prompt and the Calendars pane stays empty. Grant access by running the
+authorization request from a real terminal app (the interactive zeta
+context); the grant attaches to that terminal. Supervisor-context
+(headless orchestrator) runs remain denied by design — the tool
+degrades to a clean authorization error there. The same applies to any
+future TCC-gated surface (photos, microphone, messages).
