@@ -22,6 +22,61 @@ SCRATCH_ROOT = Path("/tmp/jev-zeta-evals")
 RUN_TIMEOUT_SECONDS = 300
 
 
+def _parse_datetime(value: object) -> datetime | None:
+    if type(value) is not str or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _valid_argument_constraints(value: object) -> bool:
+    if type(value) is not dict or not value:
+        return False
+    for field, constraint in value.items():
+        if type(field) is not str or not field or type(constraint) is not dict:
+            return False
+        if set(constraint) == {"equals"}:
+            continue
+        if set(constraint) == {"covers"}:
+            window = constraint["covers"]
+            start = _parse_datetime(window.get("start")) if type(window) is dict else None
+            end = _parse_datetime(window.get("end")) if type(window) is dict else None
+            if (
+                type(window) is not dict
+                or set(window) != {"start", "end"}
+                or start is None
+                or end is None
+                or field not in {"start", "end"}
+            ):
+                return False
+            try:
+                if start > end:
+                    return False
+            except TypeError:
+                return False
+            continue
+        return False
+    return True
+
+
+def _valid_call_shape(value: object, *, allow_args_not: bool = False) -> bool:
+    if (
+        type(value) is not dict
+        or type(value.get("tool")) is not str
+        or not value["tool"]
+    ):
+        return False
+    valid_keys = ({"tool", "args"}, {"tool", "args_not"})
+    if set(value) not in valid_keys or (
+        not allow_args_not and set(value) == {"tool", "args_not"}
+    ):
+        return False
+    constraint_key = "args_not" if "args_not" in value else "args"
+    return _valid_argument_constraints(value[constraint_key])
+
+
 def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
     """Load task definitions from JSONL."""
     tasks: list[dict[str, Any]] = []
@@ -35,16 +90,29 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
                 type(required_call_sequence) is not list
                 or any(
                     type(entry) is not dict
-                    or set(entry) != {"tool", "args_contains"}
-                    or type(entry["tool"]) is not str
-                    or not entry["tool"]
-                    or type(entry["args_contains"]) is not str
-                    or not entry["args_contains"]
+                    or (
+                        set(entry) == {"tool", "args_contains"}
+                        and (
+                            type(entry["tool"]) is not str
+                            or not entry["tool"]
+                            or type(entry["args_contains"]) is not str
+                            or not entry["args_contains"]
+                        )
+                    )
+                    or (
+                        set(entry) == {"tool", "args"}
+                        and (
+                            type(entry["tool"]) is not str
+                            or not entry["tool"]
+                            or not _valid_argument_constraints(entry["args"])
+                        )
+                    )
+                    or set(entry) not in ({"tool", "args_contains"}, {"tool", "args"})
                     for entry in required_call_sequence
                 )
             ):
                 raise ValueError(
-                    "required_call_sequence must be a list of tool and args_contains objects"
+                    "required_call_sequence must contain valid call constraints"
                 )
             forbidden_tools = task.get("forbidden_tools")
             if forbidden_tools is not None and (
@@ -56,6 +124,17 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
             ):
                 raise ValueError(
                     "forbidden_tools must be a list of nonempty tool names"
+                )
+            forbidden_call_shapes = task.get("forbidden_call_shapes")
+            if forbidden_call_shapes is not None and (
+                type(forbidden_call_shapes) is not list
+                or any(
+                    not _valid_call_shape(shape, allow_args_not=True)
+                    for shape in forbidden_call_shapes
+                )
+            ):
+                raise ValueError(
+                    "forbidden_call_shapes must contain valid call constraints"
                 )
             memory_seed = task.get("memory_seed")
             if memory_seed is not None and (
@@ -218,19 +297,86 @@ def qualified_tool_calls(
 
 def contains_ordered_subsequence(
     tool_calls: Sequence[Mapping[str, str]],
-    required_call_sequence: Sequence[Mapping[str, str]],
+    required_call_sequence: Sequence[Mapping[str, Any]],
 ) -> bool:
     """Return whether required successful calls occur in order."""
+
+    def matches(tool_call: Mapping[str, str], required: Mapping[str, Any]) -> bool:
+        if tool_call["tool"] != required["tool"]:
+            return False
+        if "args_contains" in required:
+            return required["args_contains"] in tool_call["arguments"]
+        try:
+            arguments = json.loads(tool_call["arguments"])
+        except json.JSONDecodeError:
+            return False
+        return _matches_argument_constraints(arguments, required["args"])
+
     required_index = 0
     for tool_call in tool_calls:
         if (
             required_index < len(required_call_sequence)
-            and tool_call["tool"] == required_call_sequence[required_index]["tool"]
-            and required_call_sequence[required_index]["args_contains"]
-            in tool_call["arguments"]
+            and matches(tool_call, required_call_sequence[required_index])
         ):
             required_index += 1
     return required_index == len(required_call_sequence)
+
+
+def _matches_argument_constraints(
+    arguments: object, constraints: Mapping[str, Any]
+) -> bool:
+    if type(arguments) is not dict:
+        return False
+    for field, constraint in constraints.items():
+        if set(constraint) == {"equals"}:
+            if field not in arguments or arguments[field] != constraint["equals"]:
+                return False
+            continue
+        window = constraint["covers"]
+        actual_start = _parse_datetime(arguments.get("start"))
+        actual_end = _parse_datetime(arguments.get("end"))
+        expected_start = _parse_datetime(window["start"])
+        expected_end = _parse_datetime(window["end"])
+        if None in (actual_start, actual_end, expected_start, expected_end):
+            return False
+        try:
+            if actual_start > expected_start or actual_end < expected_end:
+                return False
+        except TypeError:
+            return False
+    return True
+
+
+def contains_forbidden_call_shapes(
+    events: Iterable[Mapping[str, Any]],
+    forbidden_call_shapes: Sequence[Mapping[str, Any]],
+) -> bool:
+    """Return whether any tool call matches a forbidden argument shape."""
+    for event in events:
+        if event.get("type") != "tool_call" or type(event.get("name")) is not str:
+            continue
+        tool_call = {
+            "tool": event["name"],
+            "arguments": json.dumps(
+                event.get("arguments"), ensure_ascii=False, sort_keys=True
+            ),
+        }
+        for shape in forbidden_call_shapes:
+            if tool_call["tool"] != shape["tool"]:
+                continue
+            try:
+                arguments = json.loads(tool_call["arguments"])
+            except json.JSONDecodeError:
+                continue
+            if "args" in shape and _matches_argument_constraints(
+                arguments, shape["args"]
+            ):
+                return True
+            if "args_not" in shape and not _matches_argument_constraints(
+                arguments, shape["args_not"]
+            ):
+                return True
+    return False
 
 
 def contains_forbidden_tool(
@@ -598,14 +744,22 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
             )
         required_call_sequence = task.get("required_call_sequence")
         forbidden_tools = task.get("forbidden_tools")
-        if required_call_sequence is not None or forbidden_tools is not None:
+        forbidden_call_shapes = task.get("forbidden_call_shapes")
+        if (
+            required_call_sequence is not None
+            or forbidden_tools is not None
+            or forbidden_call_shapes is not None
+        ):
             sequence_passed = required_call_sequence is None or contains_ordered_subsequence(
                 qualified_tool_calls(events), required_call_sequence
             )
             forbidden_passed = forbidden_tools is None or not contains_forbidden_tool(
                 events, forbidden_tools
             )
-            checks_passed.append(sequence_passed and forbidden_passed)
+            shapes_passed = forbidden_call_shapes is None or not contains_forbidden_call_shapes(
+                events, forbidden_call_shapes
+            )
+            checks_passed.append(sequence_passed and forbidden_passed and shapes_passed)
     completed = process["returncode"] == 0 and summary["final_message_present"]
     return {
         "task_id": task_id,

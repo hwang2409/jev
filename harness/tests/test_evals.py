@@ -10,6 +10,7 @@ import evals.run_evals as eval_runner
 from evals.run_evals import (
     _print_report,
     build_command,
+    contains_forbidden_call_shapes,
     contains_forbidden_tool,
     contains_ordered_subsequence,
     load_tasks,
@@ -154,11 +155,50 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
         }
     ]
     assert tasks[5]["required_call_sequence"] == [
-        {"tool": "calendar_events", "args_contains": "2026-09-19T09:00:00"}
+        {
+            "tool": "calendar_events",
+            "args": {
+                "start": {
+                    "covers": {
+                        "start": "2026-09-19T09:00:00",
+                        "end": "2026-09-19T12:00:00",
+                    }
+                }
+            },
+        }
     ]
     assert tasks[6]["required_call_sequence"] == [
-        {"tool": "calendar_create", "args_contains": "Project kickoff"},
-        {"tool": "calendar_events", "args_contains": "2026-09-19T00:00:00"},
+        {
+            "tool": "calendar_create",
+            "args": {
+                "title": {"equals": "Project kickoff"},
+                "start": {"equals": "2026-09-19T16:00:00"},
+                "end": {"equals": "2026-09-19T17:00:00"},
+                "calendar": {"equals": "work"},
+            },
+        },
+        {
+            "tool": "calendar_events",
+            "args": {
+                "start": {
+                    "covers": {
+                        "start": "2026-09-19T16:00:00",
+                        "end": "2026-09-19T17:00:00",
+                    }
+                }
+            },
+        },
+    ]
+    assert tasks[6]["forbidden_call_shapes"] == [
+        {
+            "tool": "calendar_create",
+            "args_not": {
+                "title": {"equals": "Project kickoff"},
+                "start": {"equals": "2026-09-19T16:00:00"},
+                "end": {"equals": "2026-09-19T17:00:00"},
+                "calendar": {"equals": "work"},
+            },
+        }
     ]
     assert "2026-09-19T10:00:00" not in tasks[5]["prompt"]
 
@@ -454,6 +494,132 @@ def test_required_call_sequence_checks_ordered_non_route_calls(
     )
 
 
+def test_required_call_sequence_matches_exact_fields_and_windows() -> None:
+    required = [
+        {
+            "tool": "calendar_events",
+            "args": {
+                "start": {
+                    "covers": {
+                        "start": "2026-09-19T09:00:00",
+                        "end": "2026-09-19T12:00:00",
+                    }
+                }
+            },
+        }
+    ]
+    bypass = [
+        {
+            "tool": "calendar_events",
+            "arguments": json.dumps(
+                {
+                    "start": "2026-09-19T09:00:00",
+                    "end": "2026-09-19T09:00:01",
+                    "calendar": None,
+                }
+            ),
+        }
+    ]
+    genuine = [
+        {
+            "tool": "calendar_events",
+            "arguments": json.dumps(
+                {
+                    "start": "2026-09-19T08:00:00",
+                    "end": "2026-09-19T13:00:00",
+                    "calendar": None,
+                }
+            ),
+        }
+    ]
+
+    assert contains_ordered_subsequence(bypass, required) is False
+    assert contains_ordered_subsequence(genuine, required) is True
+
+
+def test_create_sequence_rejects_nonmatching_creates_and_accepts_genuine_run() -> None:
+    create_args = {
+        "title": {"equals": "Project kickoff"},
+        "start": {"equals": "2026-09-19T16:00:00"},
+        "end": {"equals": "2026-09-19T17:00:00"},
+        "calendar": {"equals": "work"},
+    }
+    create = {"tool": "calendar_create", "args": create_args}
+    events = {
+        "tool": "calendar_events",
+        "args": {
+            "start": {
+                "covers": {
+                    "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                }
+            }
+        },
+    }
+    forbidden = [{"tool": "calendar_create", "args_not": create_args}]
+    wrong_create = {
+        "type": "tool_call",
+        "name": "calendar_create",
+        "arguments": {
+            "title": "Wrong meeting",
+            "start": "2026-09-19T15:00:00",
+            "end": "2026-09-19T15:01:00",
+            "calendar": "work",
+            "notes": None,
+        },
+    }
+    matching_create = {
+        "type": "tool_call",
+        "name": "calendar_create",
+        "arguments": {
+            "title": "Project kickoff",
+            "start": "2026-09-19T16:00:00",
+            "end": "2026-09-19T17:00:00",
+            "calendar": "work",
+            "notes": None,
+        },
+    }
+    bypass_calls = [
+        wrong_create,
+        matching_create,
+    ]
+    qualified_bypass_calls = [
+        {
+            "tool": "calendar_create",
+            "arguments": json.dumps(wrong_create["arguments"]),
+        },
+        {
+            "tool": "calendar_create",
+            "arguments": json.dumps(matching_create["arguments"]),
+        },
+    ]
+    genuine_calls = [matching_create]
+    assert contains_ordered_subsequence(qualified_bypass_calls, [create]) is True
+    assert contains_forbidden_call_shapes(bypass_calls, forbidden) is True
+    assert contains_forbidden_call_shapes(genuine_calls, forbidden) is False
+
+    events_call = {
+        "tool": "calendar_events",
+        "arguments": json.dumps(
+            {
+                "start": "2026-09-19T00:00:00",
+                "end": "2026-09-20T00:00:00",
+                "calendar": None,
+            }
+        ),
+    }
+    assert contains_ordered_subsequence(
+        [
+            {
+                "tool": "calendar_create",
+                "arguments": json.dumps(matching_create["arguments"]),
+            },
+            events_call,
+        ],
+        [create, events],
+    ) is True
+
+
 @pytest.mark.parametrize(
     "required_call_sequence",
     [
@@ -461,6 +627,20 @@ def test_required_call_sequence_checks_ordered_non_route_calls(
         ["read", 3],
         [{"tool": "read"}],
         [{"tool": "read", "args_contains": 3}],
+        [{"tool": "read", "args": {"path": {"contains": "manifest.txt"}}}],
+        [
+            {
+                "tool": "calendar_events",
+                "args": {
+                    "start": {
+                        "covers": {
+                            "start": "not-a-date",
+                            "end": "2026-09-19T12:00:00",
+                        }
+                    }
+                },
+            }
+        ],
     ],
 )
 def test_load_tasks_rejects_invalid_required_call_sequence(
