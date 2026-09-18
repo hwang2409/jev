@@ -162,30 +162,56 @@ def run_subprocess(
     events_path: Path,
     *,
     timeout: int = RUN_TIMEOUT_SECONDS,
-    runner: Callable[..., Any] = subprocess.run,
+    runner: Callable[..., Any] | None = None,
 ) -> dict[str, Any]:
     """Run a command and tee its stdout into the event stream file."""
-    try:
-        completed = runner(
+    if runner is not None:
+        try:
+            completed = runner(
+                list(command),
+                cwd=str(cwd),
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            events_path.write_text(_output_text(exc.output), encoding="utf-8")
+            return {
+                "returncode": None,
+                "stderr": _output_text(exc.stderr),
+                "timed_out": True,
+            }
+        events_path.write_text(
+            _output_text(getattr(completed, "stdout", "")), encoding="utf-8"
+        )
+        return {
+            "returncode": completed.returncode,
+            "stderr": _output_text(getattr(completed, "stderr", "")),
+            "timed_out": False,
+        }
+
+    with events_path.open("w", encoding="utf-8") as events_file:
+        process = subprocess.Popen(
             list(command),
             cwd=str(cwd),
-            capture_output=True,
+            stdout=events_file,
+            stderr=subprocess.PIPE,
             text=True,
-            timeout=timeout,
-            check=False,
         )
-    except subprocess.TimeoutExpired as exc:
-        events_path.write_text(_output_text(exc.output), encoding="utf-8")
-        return {
-            "returncode": None,
-            "stderr": _output_text(exc.stderr),
-            "timed_out": True,
-        }
-    stdout = _output_text(getattr(completed, "stdout", ""))
-    events_path.write_text(stdout, encoding="utf-8")
+        try:
+            _, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            _, stderr = process.communicate()
+            return {
+                "returncode": None,
+                "stderr": _output_text(stderr),
+                "timed_out": True,
+            }
     return {
-        "returncode": completed.returncode,
-        "stderr": _output_text(getattr(completed, "stderr", "")),
+        "returncode": process.returncode,
+        "stderr": _output_text(stderr),
         "timed_out": False,
     }
 
