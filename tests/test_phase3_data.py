@@ -50,3 +50,13 @@ def test_each_result_contains_a_follow_up_signal():
             any(token.lower() in values[index + 1].lower() for token in value.split() if len(token) > 3)
             for index, value in enumerate(values[:-1])
         )
+
+
+def test_revised_chains_supply_missing_step_inputs():
+    scenarios = {scenario["id"]: scenario for scenario in load_scenarios()}
+
+    assert "Agenda:" in scenarios["board-logistics"]["results"]["calendar_find_events"]
+    assert "notes/approved-travel-budget-2026.txt" in scenarios["budget-update"]["task"]
+    assert "https://partner.example.test/webinar/usage-analytics-2026" in scenarios[
+        "webinar-booking"
+    ]["task"]

@@ -151,6 +151,7 @@ def run_scenario(
     tool_calls: list[str] = []
     expansions: list[list[str]] = []
     route_calls = 0
+    unrouted_attempts = 0
     input_tokens = 0
     output_tokens = 0
     cache_read_tokens = 0
@@ -190,6 +191,8 @@ def run_scenario(
         uses = _tool_uses(content)
         results = []
         saw_non_route = False
+        current_injected_names = set(injected_names)
+        routed_names: list[str] | None = None
         for use in uses:
             name = str(_value(use, "name", ""))
             use_id = str(_value(use, "id", ""))
@@ -218,12 +221,19 @@ def run_scenario(
                         expansions.append(names)
                     else:
                         names = [selected] if selected in CATALOG_120 else []
-                    injected_names = names
+                    routed_names = names
                     block["content"] = _route_result_text(route_result, names)
                 else:
                     saw_non_route = True
-                    tool_calls.append(name)
-                    block["content"] = execute(name, str(details), overrides)
+                    if mode == "jev" and name not in current_injected_names:
+                        unrouted_attempts += 1
+                        block["content"] = (
+                            f"Tool {name} is unavailable; use route first."
+                        )
+                        block["is_error"] = True
+                    else:
+                        tool_calls.append(name)
+                        block["content"] = execute(name, str(details), overrides)
             except Exception as exc:  # noqa: BLE001 - tool errors become results
                 block["content"] = str(exc)
                 block["is_error"] = True
@@ -231,8 +241,11 @@ def run_scenario(
 
         messages.append({"role": "assistant", "content": content})
         messages.append({"role": "user", "content": results})
-        if mode == "jev" and saw_non_route:
-            injected_names = []
+        if mode == "jev":
+            if routed_names is not None:
+                injected_names = routed_names
+            elif saw_non_route:
+                injected_names = []
         if turns == MAX_TURNS:
             failure = "turn_cap"
             break
@@ -244,6 +257,7 @@ def run_scenario(
         "turns": turns,
         "tool_calls": tool_calls,
         "route_calls": route_calls,
+        "unrouted_attempts": unrouted_attempts,
         "expansions": expansions,
         "input_tokens": input_tokens,
         "output_tokens": output_tokens,

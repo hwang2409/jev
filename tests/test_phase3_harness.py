@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import pytest
+
 from harness import run_scenario
 from router import RouteResult
 from sim_exec import execute
@@ -23,6 +25,15 @@ def tool_use(tool_name, tool_use_id, details):
         "id": tool_use_id,
         "name": tool_name,
         "input": {"details": details},
+    }
+
+
+def route_use(tool_use_id, step):
+    return {
+        "type": "tool_use",
+        "id": tool_use_id,
+        "name": "route",
+        "input": {"step": step},
     }
 
 
@@ -83,6 +94,64 @@ def test_jev_injects_selected_schema_then_clears_it():
         "files_read_document",
     ]
     assert [tool["name"] for tool in client.requests[2]["tools"]] == ["route"]
+    assert result["tool_calls"] == ["files_read_document"]
+
+
+def test_jev_rejects_tool_not_in_current_request():
+    client = StubClient(
+        [
+            response(
+                "tool_use",
+                [tool_use("files_read_document", "t1", "read notes.txt")],
+            ),
+            response("end_turn", [{"type": "text", "text": "done"}]),
+        ]
+    )
+
+    result = run_scenario(
+        scenario(results={"files_read_document": "must not execute"}),
+        "jev",
+        client=client,
+    )
+
+    tool_result = client.requests[1]["messages"][-1]["content"][0]
+    assert tool_result["is_error"] is True
+    assert "unavailable" in tool_result["content"]
+    assert "route first" in tool_result["content"]
+    assert result["tool_calls"] == []
+    assert result["unrouted_attempts"] == 1
+
+
+@pytest.mark.parametrize(
+    "mixed_content",
+    [
+        [route_use("r2", "search next"), tool_use("files_read_document", "t2", "read notes.txt")],
+        [tool_use("files_read_document", "t2", "read notes.txt"), route_use("r2", "search next")],
+    ],
+    ids=["route-then-tool", "tool-then-route"],
+)
+def test_jev_keeps_route_schema_selected_in_mixed_response(mixed_content):
+    client = StubClient(
+        [
+            response("tool_use", [route_use("r1", "read the document")]),
+            response("tool_use", mixed_content),
+            response("end_turn", [{"type": "text", "text": "done"}]),
+        ]
+    )
+
+    result = run_scenario(
+        scenario(),
+        "jev",
+        client=client,
+        route_fn=lambda task, step, catalog: route_result(
+            "files_read_document" if step == "read the document" else "files_search_content"
+        ),
+    )
+
+    assert [tool["name"] for tool in client.requests[2]["tools"]] == [
+        "route",
+        "files_search_content",
+    ]
     assert result["tool_calls"] == ["files_read_document"]
 
 
