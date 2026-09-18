@@ -61,7 +61,17 @@ def build_app(tmp_path: Path, turns: list[ScriptedTurn]):
 # --- schema exposure -------------------------------------------------------
 
 
-async def test_plan_mode_has_no_exit_tool(tmp_path: Path) -> None:
+def test_agent_loop_defaults_to_router_mode(tmp_path: Path) -> None:
+    loop = AgentLoop(
+        FakeBackend([]),
+        ConversationStore(tmp_path),
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+    assert loop.router_mode is True
+
+
+async def test_plan_mode_with_router_mode_has_only_route(tmp_path: Path) -> None:
     loop = build_loop(
         tmp_path, [ScriptedTurn(content=[TextContent("ok")])], router_mode=True
     )

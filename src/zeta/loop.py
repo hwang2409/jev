@@ -239,6 +239,7 @@ class AgentLoop:
         self.router_mode = router_mode
         self._routed_tools: list[str] = []
         self._router_fail_open = False
+        self._router_recent_steps: list[str] = []
         self._router_batch_has_route = False
         self._router_batch_allowed_tools: set[str] | None = None
         self.unrouted_attempts = 0
@@ -266,6 +267,7 @@ class AgentLoop:
         self._provided_tool_schemas = tool_schemas is not None
         self.tool_registry.bind_session_store(store)
         self.tool_registry.set_router_tools_sink(self._record_routed_tools)
+        self.tool_registry.set_router_recent_steps(self._router_recent_steps)
         self.agent_catalog = self.tool_registry.agent_catalog
         if (
             approval_policy is not None
@@ -385,6 +387,9 @@ class AgentLoop:
         if not self.router_mode:
             return
         self._router_batch_has_route = any(call.name == "route" for call in calls)
+        if not self._router_batch_has_route:
+            self._routed_tools = []
+            self._router_fail_open = False
         self._router_batch_allowed_tools = {
             schema["name"]
             for schema in self._active_tool_schemas()
@@ -430,19 +435,12 @@ class AgentLoop:
             "not available this turn — describe your step to route first: "
             f"{tool_call.name}"
         )
-        return ToolResult(
+        result = ToolResult(
             tool_call.id,
             message,
             is_error=True,
-            structured_content={
-                "error": {
-                    "tool": tool_call.name,
-                    "kind": "error",
-                    "hint": "",
-                    "message": message,
-                }
-            },
         )
+        return self.tool_registry.govern_tool_result(tool_call, result)
 
     def _router_result(self, tool_name: str, result: ToolResult) -> None:
         if self.router_mode and tool_name == "route" and result.is_error:
@@ -985,6 +983,9 @@ class AgentLoop:
         persist_user_message: bool = True,
         abort_signal: ToolAbortSignal | None = None,
     ) -> AsyncIterator[StreamEvent]:
+        self._routed_tools = []
+        self._router_fail_open = False
+        self._router_recent_steps.clear()
         if self.hooks is not None:
             self.hooks.user_prompt_submit(user_text)
         if user_message is None:

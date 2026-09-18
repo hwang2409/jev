@@ -48,8 +48,17 @@ async def _route(
     *,
     execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
+    recent_steps = (
+        execution_context.router_recent_steps
+        if execution_context is not None
+        else None
+    )
     try:
-        result = await route_step(arguments["step"], _catalog(registry))
+        result = await route_step(
+            arguments["step"],
+            _catalog(registry),
+            list(recent_steps or []),
+        )
         routed_tools = (
             [result.tool]
             if result.confidence >= 0.8
@@ -80,6 +89,10 @@ async def _route(
             if sink is not None:
                 sink(None)
         return _route_error(f"router failed: {exc}")
+    finally:
+        if recent_steps is not None:
+            recent_steps.append(arguments["step"])
+            del recent_steps[:-5]
 
 
 def register(registry: ToolRegistry) -> None:

@@ -58,6 +58,7 @@ from ..types import (
     ToolResult,
     ToolSchema,
     ToolTextBlock,
+    flatten_tool_content,
     validate_tool_content_block,
 )
 from ._process import BackgroundTaskRegistry
@@ -464,6 +465,7 @@ class ToolRegistry:
         self._todo_store = session_store
         self._agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None = None
         self.router_tools_sink: RouterToolsSink | None = None
+        self.router_recent_steps: list[str] | None = None
         self.background_tasks = BackgroundTaskRegistry(
             session_dir=session_store.session_dir if session_store is not None else None,
             directory_fd=session_store.directory_fd if session_store is not None else None,
@@ -651,6 +653,22 @@ class ToolRegistry:
     def set_router_tools_sink(self, sink: RouterToolsSink | None) -> None:
         self.router_tools_sink = sink
 
+    def set_router_recent_steps(self, steps: list[str] | None) -> None:
+        self.router_recent_steps = steps
+
+    def govern_tool_result(self, tool_call: ToolCall, result: ToolResult) -> ToolResult:
+        """Apply registry error governance to a legacy tool result."""
+
+        governed = _apply_error_governance(_legacy_result(result), tool_call.name)
+        return ToolResult(
+            result.tool_call_id,
+            flatten_tool_content(governed["content"]),
+            is_error=governed["isError"],
+            content_blocks=governed["content"],
+            structured_content=governed["structuredContent"],
+            is_canceled=result.is_canceled,
+        )
+
     def update_bash_cwd(self, cwd: str) -> None:
         if self._session_store is not None:
             self._session_store.set_bash_cwd(cwd)
@@ -780,6 +798,7 @@ class ToolRegistry:
             self._agent_runner,
             _lifecycle_sink,
             self.router_tools_sink,
+            self.router_recent_steps,
         )
         handler = bind_execution_context(definition.handler, execution_context)
         execution_arguments = build_execution_arguments(

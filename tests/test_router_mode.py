@@ -14,7 +14,7 @@ from zeta.providers.jev import JevRouterError, RouteResult
 from zeta.settings import load_settings, resolve
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
-from zeta.types import TextContent, ToolCall
+from zeta.types import TextContent, ToolCall, ToolResult
 
 
 async def collect(events):
@@ -100,6 +100,27 @@ async def test_router_replaces_then_clears_routed_tools(
     )
 
     await collect(loop.run_turn("start"))
+
+    assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
+    assert loop._routed_tools == []
+
+
+@pytest.mark.asyncio
+async def test_router_resets_state_at_the_start_of_each_user_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(route_module, "route_step", lambda *_args: _route("read"))
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "read"})]),
+            ScriptedTurn(content=[TextContent("first done")]),
+            ScriptedTurn(content=[TextContent("second done")]),
+        ],
+    )
+
+    await collect(loop.run_turn("first"))
+    await collect(loop.run_turn("second"))
 
     assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
     assert loop._routed_tools == []
@@ -199,8 +220,10 @@ async def test_router_failure_fails_open_and_excludes_route_from_catalog(
 ) -> None:
     catalogs: list[dict[str, str]] = []
 
-    async def fail(step: str, catalog: dict[str, str]) -> RouteResult:
-        del step
+    async def fail(
+        step: str, catalog: dict[str, str], history: list[str]
+    ) -> RouteResult:
+        del step, history
         catalogs.append(catalog)
         raise JevRouterError("backend unavailable")
 
@@ -222,6 +245,97 @@ async def test_router_failure_fails_open_and_excludes_route_from_catalog(
         "write",
         "bash",
     }
+
+
+@pytest.mark.asyncio
+async def test_router_failure_fail_open_is_consumed_by_one_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail(*_args):
+        raise JevRouterError("backend unavailable")
+
+    monkeypatch.setattr(route_module, "route_step", fail)
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "do it"})]),
+            ScriptedTurn(tool_calls=[ToolCall("read-1", "read", {})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+
+    await collect(loop.run_turn("first"))
+
+    assert {schema["name"] for schema in loop.backend.calls[1][1]} == {
+        "route",
+        "read",
+        "write",
+        "bash",
+    }
+    assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
+    assert loop._router_fail_open is False
+
+
+@pytest.mark.asyncio
+async def test_route_passes_recent_steps_to_jev(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    histories: list[list[str]] = []
+    results = iter([routed("read"), routed("write")])
+
+    async def capture_history(
+        _step: str, _catalog: dict[str, str], history: list[str]
+    ) -> RouteResult:
+        histories.append(history)
+        return next(results)
+
+    monkeypatch.setattr(route_module, "route_step", capture_history)
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "first"})]),
+            ScriptedTurn(tool_calls=[ToolCall("route-2", "route", {"step": "second"})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+
+    await collect(loop.run_turn("start"))
+
+    assert histories == [[], ["first"]]
+
+
+@pytest.mark.asyncio
+async def test_unrouted_rejection_uses_registry_governance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("write-1", "write", {})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+    governed = ToolResult(
+        "write-1",
+        "governed rejection",
+        is_error=True,
+        structured_content={"error": {"source": "registry"}},
+    )
+    calls: list[str] = []
+
+    def govern(tool_call: ToolCall, result: ToolResult) -> ToolResult:
+        calls.append(tool_call.name)
+        assert result.is_error is True
+        return governed
+
+    monkeypatch.setattr(loop.tool_registry, "govern_tool_result", govern)
+
+    await collect(loop.run_turn("start"))
+
+    result = loop.store.messages()[2].tool_result
+    assert result is not None
+    assert result.structured_content == {"error": {"source": "registry"}}
+    assert calls == ["write"]
 
 
 def test_no_router_flag_and_setting_restore_full_toolset(
