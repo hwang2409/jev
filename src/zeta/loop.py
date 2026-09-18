@@ -439,6 +439,7 @@ class AgentLoop:
             tool_call.id,
             message,
             is_error=True,
+            structured_content={"error_kind": "unrouted_tool"},
         )
         return self.tool_registry.govern_tool_result(tool_call, result)
 

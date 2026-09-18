@@ -26,6 +26,17 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
             task = json.loads(line)
             if not isinstance(task, dict):
                 raise ValueError("each task must be a JSON object")
+            required_call_sequence = task.get("required_call_sequence")
+            if required_call_sequence is not None and (
+                type(required_call_sequence) is not list
+                or any(
+                    type(tool_name) is not str or not tool_name
+                    for tool_name in required_call_sequence
+                )
+            ):
+                raise ValueError(
+                    "required_call_sequence must be a list of nonempty tool names"
+                )
             tasks.append(task)
     return tasks
 
@@ -74,6 +85,20 @@ def verify_checks(scratch_dir: Path, checks: Sequence[Mapping[str, str]]) -> lis
         else:
             results.append(False)
     return results
+
+
+def contains_ordered_subsequence(
+    tool_calls: Sequence[str], required_call_sequence: Sequence[str]
+) -> bool:
+    """Return whether required tool names occur in order."""
+    required_index = 0
+    for tool_name in tool_calls:
+        if (
+            required_index < len(required_call_sequence)
+            and tool_name == required_call_sequence[required_index]
+        ):
+            required_index += 1
+    return required_index == len(required_call_sequence)
 
 
 def _number(value: object) -> int:
@@ -140,15 +165,7 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                 usage = structured.get("usage")
                 if service == "jev" and isinstance(usage, Mapping):
                     add_usage("jev", usage)
-                error = structured.get("error")
-                if (
-                    event.get("is_error") is True
-                    and isinstance(error, Mapping)
-                    and error.get("tool") == name
-                    and error.get("kind") == "error"
-                    and error.get("hint") == ""
-                    and error.get("message") == content
-                ):
+                if structured.get("error_kind") == "unrouted_tool":
                     unrouted_attempts += 1
         elif (
             event_type == "message"
@@ -294,6 +311,16 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
     events = read_events(events_path)
     summary = parse_events(events)
     checks_passed = verify_checks(scratch_dir, task["checks"])
+    required_call_sequence = task.get("required_call_sequence")
+    if required_call_sequence is not None:
+        non_route_tool_calls = [
+            name for name in summary["tool_calls"] if name != "route"
+        ]
+        checks_passed.append(
+            contains_ordered_subsequence(
+                non_route_tool_calls, required_call_sequence
+            )
+        )
     completed = process["returncode"] == 0 and summary["final_message_present"]
     return {
         "task_id": task_id,

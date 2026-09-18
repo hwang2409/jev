@@ -244,6 +244,7 @@ async def test_unrouted_registered_tool_is_rejected(
     assert result.is_error is True
     assert "not available this turn" in result.content
     assert result.structured_content == {
+        "error_kind": "unrouted_tool",
         "error": {
             "tool": "write",
             "kind": "error",

@@ -337,7 +337,7 @@ def _legacy_result(result: ToolResult) -> StructuredToolResult:
         structured_result: dict[str, object] = {
             "content": blocks,
             "isError": result.is_error,
-            "structuredContent": None,
+            "structuredContent": result.structured_content,
         }
         if result.is_canceled:
             structured_result["isCanceled"] = True
