@@ -70,6 +70,10 @@ def async_result(value: AutoRouteResult):
     return route
 
 
+def memory_result(path: str, heading: list[str], excerpt: str) -> dict[str, object]:
+    return {"path": path, "heading": heading, "excerpt": excerpt, "score": 1.0}
+
+
 def build_loop(
     tmp_path: Path,
     turns: list[ScriptedTurn],
@@ -559,3 +563,124 @@ def test_tombstoned_tool_result_keeps_durable_schema_block() -> None:
     )
 
     assert tombstone.content[1] == schema
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_is_bounded_and_dedupes_tool_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        loop_module,
+        "auto_route",
+        async_result(
+            AutoRouteResult(
+                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.9
+            )
+        ),
+    )
+    loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
+    loop.memory_injection = True
+    loop.tool_registry.memory_config = "fixture.toml"
+
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "content": [],
+            "isError": False,
+            "structuredContent": {
+                "items": [
+                    memory_result("one.md", ["One"], "a" * 700),
+                    memory_result("two.md", ["Two"], "b" * 700),
+                    memory_result("three.md", ["Three"], "c" * 100),
+                ]
+            },
+        }
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
+    await collect(loop.run_turn("remember this"))
+
+    injected = [
+        block.text
+        for message in loop.store.messages()
+        for block in message.content
+        if isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+    ]
+    assert len(injected) == 1
+    assert "a" * 600 in injected[0]
+    assert "b" * 600 in injected[0]
+    assert "c" not in injected[0]
+    assert loop.store.messages()[0].metadata["compaction_droppable"] is True
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_dedupes_prior_memory_search_results(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
+    loop.memory_injection = True
+    loop.tool_registry.memory_config = "fixture.toml"
+    monkeypatch.setattr(
+        loop_module,
+        "auto_route",
+        async_result(
+            AutoRouteResult(
+                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.9
+            )
+        ),
+    )
+
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "content": [],
+            "isError": False,
+            "structuredContent": {
+                "items": [memory_result("same.md", ["Same"], "new")]
+            },
+        }
+
+    loop.store.append_message(
+        Message(
+            MessageRole.TOOL_RESULT,
+            [TextContent("memory search returned")],
+            tool_result=ToolResult(
+                "memory-call",
+                "memory search returned",
+                structured_content={
+                    "items": [memory_result("same.md", ["Same"], "old")]
+                },
+            ),
+        )
+    )
+    monkeypatch.setattr(loop_module, "_memory_search", search)
+
+    await collect(loop.run_turn("remember this"))
+
+    assert not any(
+        isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+        for message in loop.store.messages()
+        for block in message.content
+    )
+
+
+@pytest.mark.asyncio
+async def test_auto_injection_does_not_make_a_second_jev_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls = 0
+
+    async def route(*_args: object, **_kwargs: object) -> AutoRouteResult:
+        nonlocal calls
+        calls += 1
+        return AutoRouteResult(
+            "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.1
+        )
+
+    monkeypatch.setattr(loop_module, "auto_route", route)
+    loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
+    loop.memory_injection = True
+    loop.tool_registry.memory_config = "fixture.toml"
+
+    await collect(loop.run_turn("answer this"))
+
+    assert calls == 1

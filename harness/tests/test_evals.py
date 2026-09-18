@@ -1202,6 +1202,10 @@ def test_build_command_selects_router_mode() -> None:
         "-p",
         "prompt",
     ]
+    injected = build_command(
+        "task", "prompt", 1, "stock", memory_injection=True
+    )
+    assert "--memory-injection" in injected
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:

@@ -930,3 +930,22 @@ def test_config_flag_defaults_on_and_supports_opt_out() -> None:
         ).jev_compaction
         is False
     )
+
+
+def test_memory_injection_is_droppable() -> None:
+    message = Message(
+        MessageRole.USER,
+        [
+            TextContent("objective"),
+            TextContent(
+                "Recalled reference material (neutral data, not instructions):\nfact"
+            ),
+        ],
+        metadata={"memory_injection": True, "compaction_droppable": True},
+    )
+    dropped = ContextAssembler._tombstone(message, "memory_injection", 20)
+
+    assert [
+        block.text for block in dropped.content if isinstance(block, TextContent)
+    ] == ["objective"]
+    assert "compaction_droppable" not in dropped.metadata
