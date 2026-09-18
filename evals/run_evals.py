@@ -30,12 +30,28 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
             if required_call_sequence is not None and (
                 type(required_call_sequence) is not list
                 or any(
-                    type(tool_name) is not str or not tool_name
-                    for tool_name in required_call_sequence
+                    type(entry) is not dict
+                    or set(entry) != {"tool", "args_contains"}
+                    or type(entry["tool"]) is not str
+                    or not entry["tool"]
+                    or type(entry["args_contains"]) is not str
+                    or not entry["args_contains"]
+                    for entry in required_call_sequence
                 )
             ):
                 raise ValueError(
-                    "required_call_sequence must be a list of nonempty tool names"
+                    "required_call_sequence must be a list of tool and args_contains objects"
+                )
+            forbidden_tools = task.get("forbidden_tools")
+            if forbidden_tools is not None and (
+                type(forbidden_tools) is not list
+                or any(
+                    type(tool_name) is not str or not tool_name
+                    for tool_name in forbidden_tools
+                )
+            ):
+                raise ValueError(
+                    "forbidden_tools must be a list of nonempty tool names"
                 )
             tasks.append(task)
     return tasks
@@ -87,18 +103,64 @@ def verify_checks(scratch_dir: Path, checks: Sequence[Mapping[str, str]]) -> lis
     return results
 
 
+def qualified_tool_calls(
+    events: Iterable[Mapping[str, Any]],
+) -> list[dict[str, str]]:
+    """Return successful, paired, non-route tool calls with serialized arguments."""
+    events = list(events)
+    successful_result_ids = {
+        event.get("id")
+        for event in events
+        if event.get("type") == "tool_result"
+        and type(event.get("id")) is str
+        and event.get("is_error") is False
+    }
+    qualified: list[dict[str, str]] = []
+    for event in events:
+        if event.get("type") != "tool_call":
+            continue
+        name = event.get("name")
+        call_id = event.get("id")
+        if (
+            type(name) is not str
+            or name == "route"
+            or type(call_id) is not str
+            or call_id not in successful_result_ids
+        ):
+            continue
+        arguments = json.dumps(
+            event.get("arguments"), ensure_ascii=False, sort_keys=True
+        )
+        qualified.append({"tool": name, "arguments": arguments})
+    return qualified
+
+
 def contains_ordered_subsequence(
-    tool_calls: Sequence[str], required_call_sequence: Sequence[str]
+    tool_calls: Sequence[Mapping[str, str]],
+    required_call_sequence: Sequence[Mapping[str, str]],
 ) -> bool:
-    """Return whether required tool names occur in order."""
+    """Return whether required successful calls occur in order."""
     required_index = 0
-    for tool_name in tool_calls:
+    for tool_call in tool_calls:
         if (
             required_index < len(required_call_sequence)
-            and tool_name == required_call_sequence[required_index]
+            and tool_call["tool"] == required_call_sequence[required_index]["tool"]
+            and required_call_sequence[required_index]["args_contains"]
+            in tool_call["arguments"]
         ):
             required_index += 1
     return required_index == len(required_call_sequence)
+
+
+def contains_forbidden_tool(
+    events: Iterable[Mapping[str, Any]], forbidden_tools: Sequence[str]
+) -> bool:
+    """Return whether any tool call uses a forbidden tool name."""
+    return any(
+        event.get("type") == "tool_call"
+        and event.get("name") in forbidden_tools
+        for event in events
+    )
 
 
 def _number(value: object) -> int:
@@ -312,15 +374,15 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
     summary = parse_events(events)
     checks_passed = verify_checks(scratch_dir, task["checks"])
     required_call_sequence = task.get("required_call_sequence")
-    if required_call_sequence is not None:
-        non_route_tool_calls = [
-            name for name in summary["tool_calls"] if name != "route"
-        ]
-        checks_passed.append(
-            contains_ordered_subsequence(
-                non_route_tool_calls, required_call_sequence
-            )
+    forbidden_tools = task.get("forbidden_tools")
+    if required_call_sequence is not None or forbidden_tools is not None:
+        sequence_passed = required_call_sequence is None or contains_ordered_subsequence(
+            qualified_tool_calls(events), required_call_sequence
         )
+        forbidden_passed = forbidden_tools is None or not contains_forbidden_tool(
+            events, forbidden_tools
+        )
+        checks_passed.append(sequence_passed and forbidden_passed)
     completed = process["returncode"] == 0 and summary["final_message_present"]
     return {
         "task_id": task_id,

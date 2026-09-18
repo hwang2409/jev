@@ -10,9 +10,11 @@ import evals.run_evals as eval_runner
 from evals.run_evals import (
     _print_report,
     build_command,
+    contains_forbidden_tool,
     contains_ordered_subsequence,
     load_tasks,
     parse_events,
+    qualified_tool_calls,
     run_evals,
     run_subprocess,
     verify_checks,
@@ -97,6 +99,7 @@ def test_tasks_have_required_shape_and_safe_prompts() -> None:
                 "checks",
                 "max_turns",
                 "required_call_sequence",
+                "forbidden_tools",
             },
         )
         assert isinstance(task["id"], str)
@@ -105,9 +108,15 @@ def test_tasks_have_required_shape_and_safe_prompts() -> None:
         assert isinstance(task["setup"], dict)
         assert isinstance(task["max_turns"], int)
         if task["id"] == "chain-and-verify":
-            assert task["required_call_sequence"] == ["read", "write", "read"]
+            assert task["required_call_sequence"] == [
+                {"tool": "read", "args_contains": "incoming/manifest.txt"},
+                {"tool": "write", "args_contains": "stage/total.txt"},
+                {"tool": "read", "args_contains": "summary.md"},
+            ]
+            assert task["forbidden_tools"] == ["bash", "exec"]
         else:
             assert "required_call_sequence" not in task
+            assert "forbidden_tools" not in task
         assert all(
             set(check)
             in ({"path", "equals"}, {"path", "normalized_equals"}, {"path", "contains"})
@@ -214,23 +223,48 @@ async def test_parse_events_counts_only_real_unrouted_rejections(
 @pytest.mark.parametrize(
     ("tool_calls", "expected"),
     [
-        (["read", "write", "read"], True),
-        (["route", "read", "write", "bash"], False),
+        (
+            [
+                {"tool": "read", "arguments": '{"path":"manifest.txt"}'},
+                {"tool": "write", "arguments": '{"path":"total.txt"}'},
+                {"tool": "read", "arguments": '{"path":"summary.md"}'},
+            ],
+            True,
+        ),
+        (
+            [
+                {"tool": "read", "arguments": '{"path":"manifest.txt"}'},
+                {"tool": "write", "arguments": '{"path":"total.txt"}'},
+                {"tool": "bash", "arguments": '{"cmd":"run"}'},
+            ],
+            False,
+        ),
     ],
 )
 def test_required_call_sequence_checks_ordered_non_route_calls(
-    tool_calls: list[str], expected: bool
+    tool_calls: list[dict[str, str]], expected: bool
 ) -> None:
-    non_route_calls = [name for name in tool_calls if name != "route"]
     assert (
-        contains_ordered_subsequence(non_route_calls, ["read", "write", "read"])
+        contains_ordered_subsequence(
+            tool_calls,
+            [
+                {"tool": "read", "args_contains": "manifest.txt"},
+                {"tool": "write", "args_contains": "total.txt"},
+                {"tool": "read", "args_contains": "summary.md"},
+            ],
+        )
         is expected
     )
 
 
 @pytest.mark.parametrize(
     "required_call_sequence",
-    ["read", ["read", 3]],
+    [
+        "read",
+        ["read", 3],
+        [{"tool": "read"}],
+        [{"tool": "read", "args_contains": 3}],
+    ],
 )
 def test_load_tasks_rejects_invalid_required_call_sequence(
     tmp_path: Path, required_call_sequence: object
@@ -253,6 +287,212 @@ def test_load_tasks_rejects_invalid_required_call_sequence(
 
     with pytest.raises(ValueError, match="required_call_sequence"):
         load_tasks(path)
+
+
+@pytest.mark.parametrize("forbidden_tools", ["bash", ["bash", 3]])
+def test_load_tasks_rejects_invalid_forbidden_tools(
+    tmp_path: Path, forbidden_tools: object
+) -> None:
+    path = tmp_path / "tasks.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "task",
+                "prompt": "prompt",
+                "setup": {},
+                "checks": [],
+                "forbidden_tools": forbidden_tools,
+                "max_turns": 1,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="forbidden_tools"):
+        load_tasks(path)
+
+
+def test_qualified_tool_calls_require_successful_result_pair() -> None:
+    events = [
+        {
+            "type": "tool_call",
+            "id": "missing-result",
+            "name": "read",
+            "arguments": {"path": "manifest.txt"},
+        },
+        {
+            "type": "tool_call",
+            "id": "failed",
+            "name": "read",
+            "arguments": {"path": "manifest.txt"},
+        },
+        {
+            "type": "tool_result",
+            "id": "failed",
+            "name": "read",
+            "is_error": True,
+        },
+        {
+            "type": "tool_call",
+            "id": "success",
+            "name": "read",
+            "arguments": {"path": "manifest.txt"},
+        },
+        {
+            "type": "tool_result",
+            "id": "success",
+            "name": "read",
+            "is_error": False,
+        },
+    ]
+
+    assert qualified_tool_calls(events) == [
+        {"tool": "read", "arguments": '{"path": "manifest.txt"}'},
+    ]
+
+
+def test_required_call_sequence_rejects_padding_without_forbidden_rule() -> None:
+    events = _sequence_bypass_events()
+
+    assert contains_ordered_subsequence(
+        qualified_tool_calls(events),
+        [
+            {"tool": "read", "args_contains": "incoming/manifest.txt"},
+            {"tool": "write", "args_contains": "stage/total.txt"},
+            {"tool": "read", "args_contains": "summary.md"},
+        ],
+    ) is False
+
+
+def test_required_call_sequence_rejects_bash_and_padding() -> None:
+    events = _sequence_bypass_events()
+    required = [
+        {"tool": "read", "args_contains": "incoming/manifest.txt"},
+        {"tool": "write", "args_contains": "stage/total.txt"},
+        {"tool": "read", "args_contains": "summary.md"},
+    ]
+
+    assert contains_ordered_subsequence(qualified_tool_calls(events), required) is False
+    assert contains_forbidden_tool(events, ["bash", "exec"]) is True
+
+
+def test_required_call_sequence_accepts_genuine_staged_run() -> None:
+    events = [
+        {
+            "type": "tool_call",
+            "id": "read-manifest",
+            "name": "read",
+            "arguments": {"path": "incoming/manifest.txt"},
+        },
+        {
+            "type": "tool_result",
+            "id": "read-manifest",
+            "name": "read",
+            "is_error": False,
+        },
+        {
+            "type": "tool_call",
+            "id": "write-total",
+            "name": "write",
+            "arguments": {"path": "stage/total.txt", "content": "31\n"},
+        },
+        {
+            "type": "tool_result",
+            "id": "write-total",
+            "name": "write",
+            "is_error": False,
+        },
+        {
+            "type": "tool_call",
+            "id": "read-summary",
+            "name": "read",
+            "arguments": {"path": "summary.md"},
+        },
+        {
+            "type": "tool_result",
+            "id": "read-summary",
+            "name": "read",
+            "is_error": False,
+        },
+    ]
+
+    assert contains_ordered_subsequence(
+        qualified_tool_calls(events),
+        [
+            {"tool": "read", "args_contains": "incoming/manifest.txt"},
+            {"tool": "write", "args_contains": "stage/total.txt"},
+            {"tool": "read", "args_contains": "summary.md"},
+        ],
+    ) is True
+    assert contains_forbidden_tool(events, ["bash", "exec"]) is False
+
+
+def _sequence_bypass_events() -> list[dict[str, object]]:
+    return [
+        {
+            "type": "tool_call",
+            "id": "compound-bash",
+            "name": "bash",
+            "arguments": {
+                "cmd": "create incoming/manifest.txt stage/total.txt summary.md"
+            },
+        },
+        {
+            "type": "tool_result",
+            "id": "compound-bash",
+            "name": "bash",
+            "is_error": False,
+        },
+        {
+            "type": "tool_call",
+            "id": "failed-padding",
+            "name": "read",
+            "arguments": {"path": "incoming/manifest.txt"},
+        },
+        {
+            "type": "tool_result",
+            "id": "failed-padding",
+            "name": "read",
+            "is_error": True,
+        },
+        {
+            "type": "tool_call",
+            "id": "wrong-padding",
+            "name": "read",
+            "arguments": {"path": "unrelated.txt"},
+        },
+        {
+            "type": "tool_result",
+            "id": "wrong-padding",
+            "name": "read",
+            "is_error": False,
+        },
+        {
+            "type": "tool_call",
+            "id": "write-total",
+            "name": "write",
+            "arguments": {"path": "stage/total.txt", "content": "31\n"},
+        },
+        {
+            "type": "tool_result",
+            "id": "write-total",
+            "name": "write",
+            "is_error": False,
+        },
+        {
+            "type": "tool_call",
+            "id": "read-summary",
+            "name": "read",
+            "arguments": {"path": "summary.md"},
+        },
+        {
+            "type": "tool_result",
+            "id": "read-summary",
+            "name": "read",
+            "is_error": False,
+        },
+    ]
 
 
 def test_run_one_requires_the_call_sequence(tmp_path: Path, monkeypatch) -> None:
@@ -280,7 +520,11 @@ def test_run_one_requires_the_call_sequence(tmp_path: Path, monkeypatch) -> None
             "prompt": "prompt",
             "setup": {},
             "checks": [],
-            "required_call_sequence": ["read", "write", "read"],
+            "required_call_sequence": [
+                {"tool": "read", "args_contains": "manifest.txt"},
+                {"tool": "write", "args_contains": "total.txt"},
+                {"tool": "read", "args_contains": "summary.md"},
+            ],
             "max_turns": 1,
         },
         "stock",
