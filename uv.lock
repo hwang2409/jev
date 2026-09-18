@@ -131,6 +131,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pausanias"
+version = "0.1.0"
+source = { directory = "/Users/henry/me/fun/pausanias" }
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", marker = "extra == 'semantic'", specifier = "==2.3.3" },
+    { name = "onnxruntime", marker = "extra == 'semantic'", specifier = "==1.30.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
+]
+provides-extras = ["dev", "semantic"]
+
+[[package]]
 name = "pip"
 version = "26.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -308,6 +321,7 @@ dependencies = [
     { name = "httpx" },
     { name = "markdown-it-py" },
     { name = "mdit-py-plugins" },
+    { name = "pausanias" },
     { name = "prompt-toolkit" },
     { name = "pyyaml" },
     { name = "rich" },
@@ -326,6 +340,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.27" },
     { name = "markdown-it-py", specifier = ">=3.0" },
     { name = "mdit-py-plugins", specifier = ">=0.4" },
+    { name = "pausanias", directory = "/Users/henry/me/fun/pausanias" },
     { name = "prompt-toolkit", specifier = ">=3.0.48" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rich", specifier = ">=13.9" },
