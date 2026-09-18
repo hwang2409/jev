@@ -63,6 +63,8 @@ from zeta.tui.composer import (
     parse_input,
 )
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c6360f8cf00000004000101a2e0c4b00000000049454e44ae426082"

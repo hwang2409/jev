@@ -23,6 +23,8 @@ from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.types import TextContent, ToolCall
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 async def _drive(loop: AgentLoop, prompt: str, output_format: str) -> tuple[int, str, str]:
     stdout = io.StringIO()

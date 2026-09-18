@@ -31,6 +31,19 @@ def _controlled_terminal_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("COLORTERM", raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _stock_router_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from zeta.server import runtime as runtime_module
+
+    original_resolve = runtime_module.resolve_settings
+
+    def resolve_with_stock_router(settings: object, **kwargs: object) -> object:
+        kwargs["cli_router"] = False
+        return original_resolve(settings, **kwargs)
+
+    monkeypatch.setattr(runtime_module, "resolve_settings", resolve_with_stock_router)
+
+
 def _socket_path(tmp_path: Path) -> Path:
     # macOS limits Unix socket paths to 104 bytes; pytest's tmp_path is longer.
     return Path("/tmp") / f"zeta-{tmp_path.name}.sock"

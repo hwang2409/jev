@@ -20,6 +20,8 @@ from zeta.types import (
     ToolUseContent,
 )
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 async def _status(loop: AgentLoop, handle: str | None = None) -> dict[str, object]:
     arguments = {} if handle is None else {"handle": handle}

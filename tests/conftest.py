@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Generator
 from contextlib import ExitStack
 from dataclasses import dataclass
+from functools import wraps
 from hashlib import sha256
 from pathlib import Path
 from runpy import run_path
@@ -416,3 +417,21 @@ def block_real_http_connections(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(httpx.HTTPTransport, "handle_request", blocked_sync)
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", blocked_async)
+
+
+@pytest.fixture
+def stock_router_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep legacy AgentLoop tests on stock full-toolset behavior."""
+
+    from zeta.loop import AgentLoop
+
+    original_init = AgentLoop.__init__
+
+    @wraps(original_init)
+    def init_with_stock_router_mode(
+        self: AgentLoop, *args: object, **kwargs: object
+    ) -> None:
+        kwargs.setdefault("router_mode", False)
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(AgentLoop, "__init__", init_with_stock_router_mode)

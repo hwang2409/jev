@@ -41,6 +41,8 @@ from zeta.types import (
     ToolUseContent,
 )
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 def _args(*values: str):
     return build_parser().parse_args([*values, "--provider", "fake"])

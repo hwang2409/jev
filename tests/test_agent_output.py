@@ -23,6 +23,8 @@ from zeta.types import (
     ToolUseContent,
 )
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 async def _collect(events):
     return [event async for event in events]

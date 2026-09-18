@@ -166,6 +166,7 @@ def test_resolve_falls_back_to_defaults_when_nothing_configured(tmp_path: Path) 
     )
     assert config.provider == "fake"
     assert config.model is None
+    assert config.router is True
     assert config.yolo is False
     assert config.token_budget is None
     assert config.approval_allow == ()

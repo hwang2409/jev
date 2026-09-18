@@ -33,6 +33,8 @@ from zeta.types import (
     ToolUseContent,
 )
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 def anthropic_request_bytes(
     messages: Sequence[Message], tool_schemas: Sequence[ToolSchema]

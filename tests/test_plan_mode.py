@@ -30,7 +30,9 @@ def schema_names(schemas: list[dict]) -> set[str]:
     return {schema["name"] for schema in schemas}
 
 
-def build_loop(tmp_path: Path, turns: list[ScriptedTurn]) -> AgentLoop:
+def build_loop(
+    tmp_path: Path, turns: list[ScriptedTurn], *, router_mode: bool = False
+) -> AgentLoop:
     backend = FakeBackend(turns)
     store = ConversationStore(tmp_path, cwd=str(tmp_path))
     return AgentLoop(
@@ -40,6 +42,7 @@ def build_loop(tmp_path: Path, turns: list[ScriptedTurn]) -> AgentLoop:
             store=store, default=ApprovalDecision.ALLOW, always_ask=()
         ),
         skip_mcp_mount=True,
+        router_mode=router_mode,
 skill_catalog=SkillCatalog.empty(),
     )
 
@@ -59,11 +62,12 @@ def build_app(tmp_path: Path, turns: list[ScriptedTurn]):
 
 
 async def test_plan_mode_has_no_exit_tool(tmp_path: Path) -> None:
-    loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("ok")])])
+    loop = build_loop(
+        tmp_path, [ScriptedTurn(content=[TextContent("ok")])], router_mode=True
+    )
     await collect(loop.run_turn("hi"))
     _, schemas = loop.backend.calls[0]
-    assert "exit_plan_mode" not in schema_names(schemas)
-    assert "bash" in schema_names(schemas)
+    assert schema_names(schemas) == {"route"}
 
 
 async def test_plan_mode_narrows_the_schemas_the_provider_sees(
@@ -288,7 +292,8 @@ async def test_allowed_sub_agents_complete_a_turn_in_plan_mode(
         approval_policy=ApprovalPolicy(
             store=store, default=ApprovalDecision.ALLOW
         ),
-skill_catalog=SkillCatalog.empty(),
+        router_mode=False,
+    skill_catalog=SkillCatalog.empty(),
     )
     loop.set_plan_mode(True)
 
@@ -326,7 +331,8 @@ async def test_late_mounted_tool_is_rejected_in_plan_mode(
         backend,
         store,
         approval_policy=ApprovalPolicy(store=store, default=approval_default),
-skill_catalog=SkillCatalog.empty(),
+        router_mode=False,
+    skill_catalog=SkillCatalog.empty(),
     )
     loop.set_plan_mode(True)
     loop.tool_registry.register(

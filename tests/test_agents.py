@@ -19,6 +19,8 @@ from zeta.skills.agent_catalog import (
 from zeta.skills.catalog import SkillCatalog
 from zeta.types import TextContent, ToolCall
 
+pytestmark = pytest.mark.usefixtures("stock_router_mode")
+
 
 def _write_agent(path: Path, name: str, description: str, body: str, extra: str = "") -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
