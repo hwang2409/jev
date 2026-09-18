@@ -33,7 +33,9 @@ def build_unattended_loop(
     if router_mode is None:
         project_dir = discover_repo_root(Path(metadata.cwd)) / ".zeta"
         loaded = load_settings(home=home, project_dir=project_dir)
-        router_mode = bool(loaded.settings.router)
+        router_mode = (
+            True if loaded.settings.router is None else loaded.settings.router
+        )
     skill_catalog = SkillCatalog.from_snapshot(session.metadata.skill_catalog)
     # Automation sessions never mount user-defined agents, even if metadata
     # was modified outside the restricted runner.

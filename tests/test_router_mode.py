@@ -49,7 +49,7 @@ def build_loop(
     for name in names:
         registry.register(
             name,
-            lambda _arguments, name=name: name,
+            lambda _arguments, *, name=name: name,
             description=f"{name} first line\nsecond line",
             parameters={"type": "object"},
             requires_approval=False,
@@ -103,6 +103,29 @@ async def test_router_replaces_then_clears_routed_tools(
 
     assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
     assert loop._routed_tools == []
+
+
+@pytest.mark.asyncio
+async def test_routed_tool_executes_before_route_state_is_cleared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(route_module, "route_step", lambda *_args: _route("read"))
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "read"})]),
+            ScriptedTurn(tool_calls=[ToolCall("read-1", "read", {})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+
+    await collect(loop.run_turn("start"))
+
+    result = loop.store.messages()[4].tool_result
+    assert result is not None
+    assert result.is_error is False
+    assert result.content == "read"
+    assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
 
 
 @pytest.mark.asyncio
@@ -274,6 +297,32 @@ async def test_router_failure_fail_open_is_consumed_by_one_turn(
     }
     assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
     assert loop._router_fail_open is False
+
+
+@pytest.mark.asyncio
+async def test_fail_open_tool_executes_before_fail_open_state_is_consumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def fail(*_args):
+        raise JevRouterError("backend unavailable")
+
+    monkeypatch.setattr(route_module, "route_step", fail)
+    loop = build_loop(
+        tmp_path,
+        [
+            ScriptedTurn(tool_calls=[ToolCall("route-1", "route", {"step": "do it"})]),
+            ScriptedTurn(tool_calls=[ToolCall("read-1", "read", {})]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ],
+    )
+
+    await collect(loop.run_turn("start"))
+
+    result = loop.store.messages()[4].tool_result
+    assert result is not None
+    assert result.is_error is False
+    assert result.content == "read"
+    assert {schema["name"] for schema in loop.backend.calls[2][1]} == {"route"}
 
 
 @pytest.mark.asyncio

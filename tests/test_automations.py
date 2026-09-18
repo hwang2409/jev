@@ -416,7 +416,7 @@ async def test_unlisted_tool_denial_is_durable_and_prevents_delivery(
         )
         run = store.runs("brief")[0]
         assert run.status == "failed"
-        assert "allow-list" in run.detail
+        assert "not available this turn" in run.detail
         assert "--yolo" not in run.detail
         assert not sender.sent
         transcript = SessionManager(tmp_path).open(run.session_id).store
@@ -450,6 +450,7 @@ async def test_unattended_runtime_ignores_global_yolo_hooks_and_project_tools(
     )
     assert loop.hooks is None
     assert loop._mcp_mount_attempted
+    assert loop.router_mode is True
     await loop.close()
 
 

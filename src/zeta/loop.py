@@ -387,14 +387,14 @@ class AgentLoop:
         if not self.router_mode:
             return
         self._router_batch_has_route = any(call.name == "route" for call in calls)
-        if not self._router_batch_has_route:
-            self._routed_tools = []
-            self._router_fail_open = False
         self._router_batch_allowed_tools = {
             schema["name"]
             for schema in self._active_tool_schemas()
             if isinstance(schema.get("name"), str)
         }
+        if not self._router_batch_has_route:
+            self._routed_tools = []
+            self._router_fail_open = False
 
     def _router_end_batch(self) -> None:
         self._router_batch_has_route = False
