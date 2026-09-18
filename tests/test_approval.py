@@ -934,6 +934,7 @@ def test_concurrent_approval_resolution_has_one_winner(approval_root: Path) -> N
 ALLOW, DENY, ASK = ApprovalDecision.ALLOW, ApprovalDecision.DENY, ApprovalDecision.ASK
 BUILTIN_SUBJECTS = {
     "bash": "command",
+    "calendar_create": "calendar",
     "exec": "command",
     "run_background": "command",
     "read": "path",
