@@ -67,3 +67,41 @@ def test_subset_names_are_valid_catalog_names():
     for subset in SUBSETS.values():
         assert set(subset) <= set(CATALOG_120)
         assert all(subset[name] == CATALOG_120[name] for name in subset)
+
+
+def test_curve_evalset_has_schema_count_and_subset_coverage():
+    cases = load_evalset("evalset_curve.jsonl")
+    assert len(cases) == 40
+    assert len({case["id"] for case in cases}) == 40
+    counts = Counter(case["expected_tool"] for case in cases)
+    assert set(counts) <= set(SUBSETS[15])
+    assert all(counts[tool] >= 2 for tool in SUBSETS[15])
+    for case in cases:
+        assert set(case) == SCHEMA
+        assert case["expected_needs_tool"] is True
+        assert case["vague"] is False
+        assert isinstance(case["history"], list)
+
+
+def test_full_evalset_has_exact_coverage_and_hard_cases():
+    cases = load_evalset("evalset_full.jsonl")
+    assert len(cases) == 140
+    assert len({case["id"] for case in cases}) == 140
+    for case in cases:
+        assert set(case) == SCHEMA
+        assert case["expected_tool"] in CATALOG_120
+        assert case["expected_needs_tool"] is True
+        assert case["vague"] is False
+        assert isinstance(case["history"], list)
+
+    coverage = [case for case in cases if case["id"].startswith("cov-")]
+    hard = [case for case in cases if case["id"].startswith("hard-")]
+    assert len(coverage) == 120
+    assert Counter(case["expected_tool"] for case in coverage) == Counter(
+        {tool: 1 for tool in CATALOG_120}
+    )
+    assert {case["id"] for case in coverage} == {
+        f"cov-{tool}" for tool in CATALOG_120
+    }
+    assert len(hard) == 20
+    assert {case["id"] for case in hard} == {f"hard-{i}" for i in range(1, 21)}
