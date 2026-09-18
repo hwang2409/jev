@@ -32,6 +32,8 @@ _zeta() {
         '--router-style=[routing style]:style:(tool auto)' \
         '--jev-compaction[triage old tool results through Jev]' \
         '--no-jev-compaction[disable Jev compaction triage]' \
+        '--memory-injection[allow Jev-gated memory excerpts]' \
+        '--no-memory-injection[disable Jev-gated memory excerpts]' \
         '--token-budget=[context token budget]:tokens:' \
         '--memory-config=[Pausanias memory configuration]:file:_files' \
         '--max-turns=[tool-use loop turn cap]:turns:' \
@@ -149,7 +151,7 @@ def bash_script() -> str:
     if (( command_index > 0 && COMP_CWORD > command_index + 1 )); then
         verb="${COMP_WORDS[command_index+1]}"
     fi
-    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --router-style --jev-compaction --no-jev-compaction --token-budget --memory-config --max-turns --print -p --format --system-prompt --append-system-prompt"
+    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --router-style --jev-compaction --no-jev-compaction --memory-injection --no-memory-injection --token-budget --memory-config --max-turns --print -p --format --system-prompt --append-system-prompt"
     local commands="login serve session automation completion"
 
     if (( command_index == 0 )); then

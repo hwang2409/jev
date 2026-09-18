@@ -33,7 +33,7 @@ from .agent_receipt import (
 from .agent_runner import run_agent_tool
 from .core.abort import AbortSignal as ToolAbortSignal
 from .core.approval import ApprovalPolicy
-from .core.context import ContextAssembler, MEMORY_INJECTION_PREFIX
+from .core.context import MEMORY_INJECTION_PREFIX, ContextAssembler
 from .core.hooks import HookManager
 from .core.store import ConversationStore
 from .core.tool_dispatch import dispatch_tool_calls
@@ -737,21 +737,14 @@ class AgentLoop:
     ) -> tuple[list[ToolSchema], dict[str, object]]:
         task, last_assistant, last_results = self._auto_route_inputs(user_text)
         try:
-            if self.memory_injection:
-                result = await auto_route(
-                    task,
-                    last_assistant,
-                    last_results,
-                    self._auto_catalog(),
-                    memory_injection=True,
-                )
-            else:
-                result = await auto_route(
-                    task,
-                    last_assistant,
-                    last_results,
-                    self._auto_catalog(),
-                )
+            route_kwargs = {"memory_injection": True} if self.memory_injection else {}
+            result = await auto_route(
+                task,
+                last_assistant,
+                last_results,
+                self._auto_catalog(),
+                **route_kwargs,
+            )
         except Exception as exc:  # noqa: BLE001 - auto routing fails open
             full_catalog = [
                 schema
