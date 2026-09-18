@@ -60,6 +60,7 @@ async def _run_tool_event(
             store=store, default=ApprovalDecision.ALLOW
         ),
         router_mode=router_mode,
+        router_style="tool",
         skill_catalog=SkillCatalog.empty(),
     )
     stdout = io.StringIO()
@@ -635,6 +636,7 @@ def test_verify_normalized_equals_rejects_extra_output(tmp_path: Path) -> None:
 
 def test_build_command_selects_router_mode() -> None:
     router = build_command("count-and-write", "prompt", 8, "router")
+    auto = build_command("count-and-write", "prompt", 8, "auto")
     stock = build_command("count-and-write", "prompt", 8, "stock")
 
     assert router == [
@@ -650,10 +652,12 @@ def test_build_command_selects_router_mode() -> None:
         "8",
         "--format",
         "json",
-        "--router",
+        "--router-style",
+        "tool",
         "-p",
         "prompt",
     ]
+    assert auto[-4:] == ["--router-style", "auto", "-p", "prompt"]
     assert "--no-router" not in router
     assert stock[-3:] == ["--no-router", "-p", "prompt"]
 

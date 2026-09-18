@@ -74,7 +74,12 @@ def build_command(task_id: str, prompt: str, max_turns: int, mode: str) -> list[
         "--format",
         "json",
     ]
-    command.append("--router" if mode == "router" else "--no-router")
+    if mode == "router":
+        command.extend(["--router-style", "tool"])
+    elif mode == "auto":
+        command.extend(["--router-style", "auto"])
+    else:
+        command.append("--no-router")
     command.extend(["-p", prompt])
     return command
 
@@ -207,6 +212,11 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             if isinstance(usage, Mapping):
                 service = event.get("service", "claude")
                 add_usage(service if service == "jev" else "claude", usage)
+            decision = event.get("routing_decision")
+            if isinstance(decision, Mapping) and isinstance(
+                decision.get("error"), str
+            ):
+                router_errors += 1
         elif event_type == "tool_result":
             name = event.get("name")
             content = event.get("content")
@@ -417,15 +427,16 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
 
 
 def _print_report(records: Sequence[Mapping[str, Any]]) -> None:
-    print("task                 router                    stock")
+    comparison_modes = ("router", "auto", "stock")
+    print("task                 router                    auto                      stock")
     print("-" * 72)
     by_task: dict[str, dict[str, Mapping[str, Any]]] = {}
     for record in records:
         by_task.setdefault(record["task_id"], {})[record["mode"]] = record
-    for task_id, modes in by_task.items():
+    for task_id, task_modes in by_task.items():
         cells = []
-        for mode in ("router", "stock"):
-            record = modes.get(mode)
+        for mode in comparison_modes:
+            record = task_modes.get(mode)
             if record is None:
                 cells.append("-")
                 continue
@@ -439,9 +450,9 @@ def _print_report(records: Sequence[Mapping[str, Any]]) -> None:
                 f"router_errors={record['router_errors']} "
                 f"combined={record['combined_tokens']}"
             )
-        print(f"{task_id:<20} {cells[0]:<25} {cells[1]}")
+        print(f"{task_id:<20} {cells[0]:<25} {cells[1]:<25} {cells[2]}")
     print("\nmode totals")
-    for mode in ("router", "stock"):
+    for mode in comparison_modes:
         mode_records = [record for record in records if record["mode"] == mode]
         completed = sum(record["completed"] for record in mode_records)
         checks = sum(all(record["checks_passed"]) for record in mode_records)
@@ -480,16 +491,18 @@ def run_evals(
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("router", "stock", "both"), default="both")
+    parser.add_argument(
+        "--mode", choices=("router", "auto", "stock", "both"), default="both"
+    )
     parser.add_argument(
         "--tasks", nargs="+", help="task ids, separated by spaces or commas"
     )
     parser.add_argument("--out", help="results JSON path")
     args = parser.parse_args(argv)
-    modes = ("router", "stock") if args.mode == "both" else (args.mode,)
-    if "router" in modes and not os.environ.get("JEV_API_KEY"):
+    modes = ("router", "auto", "stock") if args.mode == "both" else (args.mode,)
+    if {"router", "auto"} & set(modes) and not os.environ.get("JEV_API_KEY"):
         print(
-            "error: JEV_API_KEY is required when router mode is requested",
+            "error: JEV_API_KEY is required when routed mode is requested",
             file=sys.stderr,
         )
         return 2
