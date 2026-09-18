@@ -116,6 +116,7 @@ class ServerRuntime:
         router_mode: bool | None = None,
         router_style: str | None = None,
         jev_compaction: bool | None = None,
+        memory_injection: bool | None = None,
         backend_factory: BackendFactory | None = None,
     ) -> None:
         self.home = Path(home).expanduser().resolve()
@@ -125,6 +126,7 @@ class ServerRuntime:
         self._server_router = router_mode
         self._server_router_style = router_style
         self._server_jev_compaction = jev_compaction
+        self._server_memory_injection = memory_injection
         self._server_provider = self._config(None, None).provider
         self.backend_factory = backend_factory
         self.manager = SessionManager(self.home)
@@ -354,6 +356,7 @@ class ServerRuntime:
             cli_router=self._server_router,
             cli_router_style=self._server_router_style,
             cli_jev_compaction=self._server_jev_compaction,
+            cli_memory_injection=self._server_memory_injection,
         )
 
 

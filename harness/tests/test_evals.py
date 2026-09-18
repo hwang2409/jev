@@ -14,6 +14,7 @@ from evals.run_evals import (
     contains_forbidden_tool,
     contains_ordered_subsequence,
     load_tasks,
+    main,
     parse_events,
     qualified_tool_calls,
     run_evals,
@@ -496,6 +497,32 @@ def test_parse_events_counts_auto_routing_decisions() -> None:
 
     assert result["route_calls"] == 2
     assert result["route_expansions"] == 1
+
+
+def test_parse_events_surfaces_memory_injection_stats() -> None:
+    result = parse_events(
+        [
+            {
+                "type": "usage",
+                "service": "jev",
+                "routing_decision": {
+                    "memory_injection": {
+                        "gate_score": 0.8,
+                        "injected_count": 2,
+                        "chars": 1200,
+                    }
+                },
+            }
+        ]
+    )
+
+    assert result["memory_injection"] == {
+        "decisions": [
+            {"gate_score": 0.8, "injected_count": 2, "chars": 1200}
+        ],
+        "injected_count": 2,
+        "chars": 1200,
+    }
 
 
 @pytest.mark.asyncio
@@ -1185,23 +1212,62 @@ def test_build_command_selects_router_mode() -> None:
         "json",
         "--router-style",
         "tool",
+        "--no-memory-injection",
         "-p",
         "prompt",
     ]
-    assert auto[-4:] == ["--router-style", "auto", "-p", "prompt"]
+    assert auto[-5:] == [
+        "--router-style",
+        "auto",
+        "--no-memory-injection",
+        "-p",
+        "prompt",
+    ]
     assert "--no-router" not in router
-    assert stock[-3:] == ["--no-router", "-p", "prompt"]
+    assert stock[-4:] == [
+        "--no-router",
+        "--no-memory-injection",
+        "-p",
+        "prompt",
+    ]
 
     isolated = build_command(
         "task", "prompt", 1, "stock", memory_config=Path("/tmp/eval.toml")
     )
-    assert isolated[-5:] == [
+    assert isolated[-6:] == [
         "--no-router",
         "--memory-config",
         "/tmp/eval.toml",
+        "--no-memory-injection",
         "-p",
         "prompt",
     ]
+    injected = build_command(
+        "task", "prompt", 1, "stock", memory_injection=True
+    )
+    assert injected[-4:] == [
+        "--no-router",
+        "--memory-injection",
+        "-p",
+        "prompt",
+    ]
+
+
+def test_memory_injection_eval_requires_jev_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+
+    assert main(
+        [
+            "--mode",
+            "stock",
+            "--memory-injection",
+            "--tasks-file",
+            str(tmp_path / "tasks.jsonl"),
+        ]
+    ) == 2
+    assert "JEV_API_KEY is required" in capsys.readouterr().err
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:

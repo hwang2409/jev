@@ -226,6 +226,7 @@ def build_command(
     mode: str,
     *,
     memory_config: Path | None = None,
+    memory_injection: bool = False,
 ) -> list[str]:
     """Build the exact headless command for one task and mode."""
     del task_id
@@ -251,6 +252,9 @@ def build_command(
         command.append("--no-router")
     if memory_config is not None:
         command.extend(["--memory-config", str(memory_config)])
+    command.append(
+        "--memory-injection" if memory_injection else "--no-memory-injection"
+    )
     command.extend(["-p", prompt])
     return command
 
@@ -460,6 +464,7 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     route_expansions = 0
     unrouted_attempts = 0
     router_errors = 0
+    memory_decisions: list[dict[str, Any]] = []
     final_message_present = False
 
     def add_usage(service: str, usage: Mapping[str, Any]) -> None:
@@ -491,6 +496,11 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
                     route_expansions += 1
                 if isinstance(decision.get("error"), str):
                     router_errors += 1
+            memory = event.get("memory_injection")
+            if memory is None and isinstance(decision, Mapping):
+                memory = decision.get("memory_injection")
+            if isinstance(memory, Mapping):
+                memory_decisions.append(dict(memory))
         elif event_type == "tool_result":
             name = event.get("name")
             content = event.get("content")
@@ -548,6 +558,16 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
         "route_expansions": route_expansions,
         "unrouted_attempts": unrouted_attempts,
         "router_errors": router_errors,
+        "memory_injection": {
+            "decisions": memory_decisions,
+            "injected_count": sum(
+                _number(decision.get("injected_count"))
+                for decision in memory_decisions
+            ),
+            "chars": sum(
+                _number(decision.get("chars")) for decision in memory_decisions
+            ),
+        },
         "final_message_present": final_message_present,
     }
 
@@ -760,7 +780,13 @@ def _verify_calendar_created(
     ]
 
 
-def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, Any]:
+def _run_one(
+    task: Mapping[str, Any],
+    mode: str,
+    run_root: Path,
+    *,
+    memory_injection: bool = False,
+) -> dict[str, Any]:
     task_id = task["id"]
     scratch_dir = run_root / f"{task_id}-{mode}"
     scratch_dir.mkdir(parents=True, exist_ok=True)
@@ -777,6 +803,7 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
             task["max_turns"],
             mode,
             memory_config=memory_config,
+            memory_injection=memory_injection,
         )
         _verify_memory_root(command, memory_root)
         started = time.monotonic()
@@ -836,6 +863,7 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
         "route_expansions": summary["route_expansions"],
         "unrouted_attempts": summary["unrouted_attempts"],
         "router_errors": summary["router_errors"],
+        "memory_injection": summary["memory_injection"],
         "wall_seconds": round(wall_seconds, 3),
         "timed_out": process["timed_out"],
         "returncode": process["returncode"],
@@ -889,12 +917,20 @@ def _print_report(records: Sequence[Mapping[str, Any]]) -> None:
 
 
 def run_evals(
-    tasks: Sequence[Mapping[str, Any]], modes: Sequence[str], out: Path
+    tasks: Sequence[Mapping[str, Any]],
+    modes: Sequence[str],
+    out: Path,
+    *,
+    memory_injection: bool = False,
 ) -> list[dict[str, Any]]:
     run_timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     run_root = SCRATCH_ROOT / run_timestamp
     run_root.mkdir(parents=True, exist_ok=True)
-    records = [_run_one(task, mode, run_root) for task in tasks for mode in modes]
+    records = [
+        _run_one(task, mode, run_root, memory_injection=memory_injection)
+        for task in tasks
+        for mode in modes
+    ]
     _print_report(records)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
@@ -912,6 +948,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--mode", choices=("router", "auto", "stock", "both"), default="both"
     )
     parser.add_argument(
+        "--memory-injection",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="enable Jev-gated memory injection for every sweep command",
+    )
+    parser.add_argument(
         "--tasks", nargs="+", help="task ids, separated by spaces or commas"
     )
     parser.add_argument(
@@ -923,6 +965,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", help="results JSON path")
     args = parser.parse_args(argv)
     modes = ("router", "auto", "stock") if args.mode == "both" else (args.mode,)
+    if args.memory_injection and not os.environ.get("JEV_API_KEY"):
+        print(
+            "error: JEV_API_KEY is required when memory injection is requested",
+            file=sys.stderr,
+        )
+        return 2
     if {"router", "auto"} & set(modes) and not os.environ.get("JEV_API_KEY"):
         print(
             "error: JEV_API_KEY is required when routed mode is requested",
@@ -948,7 +996,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 2
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     out = Path(args.out) if args.out else Path("results") / f"{timestamp}.json"
-    run_evals(tasks, modes, out)
+    run_evals(tasks, modes, out, memory_injection=args.memory_injection)
     return 0
 
 

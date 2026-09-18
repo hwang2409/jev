@@ -43,6 +43,7 @@ class ZetaServer:
         router_mode: bool | None = None,
         router_style: str | None = None,
         jev_compaction: bool | None = None,
+        memory_injection: bool | None = None,
         backend_factory: BackendFactory | None = None,
     ) -> None:
         if socket_path is not None and port is not None:
@@ -64,6 +65,7 @@ class ZetaServer:
             router_mode=router_mode,
             router_style=router_style,
             jev_compaction=jev_compaction,
+            memory_injection=memory_injection,
             backend_factory=backend_factory,
         )
         self._server: asyncio.AbstractServer | None = None

@@ -16,7 +16,7 @@ one table entry (``[approval]\\nallow = [...]``) without restating unrelated
 tables, but replacing a list is one atomic swap.
 
 Trust boundary: the project layer may only contribute safe keys — provider,
-model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_config``, ``yolo``, ``[approval]``,
+model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_injection``, ``memory_config``, ``yolo``, ``[approval]``,
 ``theme``, and ``[keybindings]`` from the project file are IGNORED with a
 loud startup warning. Global settings retain full key access. A future
 ``/trust`` mechanism may relax this per-repo, but until then a hostile
@@ -54,6 +54,7 @@ _TOP_KEYS = frozenset(
         "router",
         "router_style",
         "jev_compaction",
+        "memory_injection",
         "yolo",
         "token_budget",
         "theme",
@@ -89,6 +90,7 @@ class Settings:
     router: bool | None = None
     router_style: str | None = None
     jev_compaction: bool | None = None
+    memory_injection: bool | None = None
     yolo: bool | None = None
     token_budget: int | None = None
     theme: str | None = None
@@ -111,6 +113,7 @@ class ResolvedConfig:
     router: bool
     router_style: str
     jev_compaction: bool
+    memory_injection: bool
     yolo: bool
     token_budget: int | None
     theme: str | None
@@ -169,6 +172,7 @@ def resolve(
     cli_router: bool | None = None,
     cli_router_style: str | None = None,
     cli_jev_compaction: bool | None = None,
+    cli_memory_injection: bool | None = None,
     cli_memory_config: str | None = None,
 ) -> ResolvedConfig:
     """Layer CLI flags over the loaded settings; CLI wins where set.
@@ -194,6 +198,15 @@ def resolve(
             else cli_jev_compaction
         )
     )
+    memory_injection = (
+        False
+        if cli_memory_injection is None and settings.memory_injection is None
+        else (
+            settings.memory_injection
+            if cli_memory_injection is None
+            else cli_memory_injection
+        )
+    )
     yolo = bool(settings.yolo) if cli_yolo is None else cli_yolo
     token_budget = (
         cli_token_budget if cli_token_budget is not None else settings.token_budget
@@ -204,6 +217,7 @@ def resolve(
         router=bool(router),
         router_style=router_style,
         jev_compaction=bool(jev_compaction),
+        memory_injection=bool(memory_injection),
         yolo=yolo,
         token_budget=token_budget,
         theme=settings.theme,
@@ -275,8 +289,8 @@ def _strip_unsafe_project_keys(
         return data
     where = _display_path(path) if path is not None else "project settings"
     warnings.append(
-        "settings · project layer cannot grant approvals or remap "
-        "keybindings/theme; "
+        "settings · project layer cannot grant approvals or memory access, or "
+        "remap keybindings/theme; "
         f"ignoring {', '.join(unsafe)} in {where} (see docs)"
     )
     return {key: value for key, value in data.items() if key not in unsafe}
@@ -305,6 +319,7 @@ def _validate(
         data, "router_style", _ROUTER_STYLE_CHOICES, notices
     )
     jev_compaction = _validated_bool(data, "jev_compaction", notices)
+    memory_injection = _validated_bool(data, "memory_injection", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
     token_budget = _validated_positive_int(data, "token_budget", notices)
@@ -326,6 +341,7 @@ def _validate(
         router=router,
         router_style=router_style,
         jev_compaction=jev_compaction,
+        memory_injection=memory_injection,
         yolo=yolo,
         token_budget=token_budget,
         theme=theme,

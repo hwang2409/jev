@@ -535,6 +535,7 @@ async def run_agent_tool(
             router_mode=loop.router_mode,
             router_style=loop.router_style,
             jev_compaction=loop.context_assembler.jev_compaction,
+            memory_injection=loop.memory_injection,
         )
         if loop.plan_mode:
             child_loop.set_plan_mode(True)

@@ -75,6 +75,12 @@ def auto_response() -> Response:
     )
 
 
+def auto_memory_response() -> Response:
+    response = auto_response()
+    response._data["answers"]["memory_help"] = {"noul": 0.75}
+    return response
+
+
 @pytest.mark.asyncio
 async def test_hostile_result_text_stays_in_state_and_criteria_stay_neutral(
     monkeypatch: pytest.MonkeyPatch,
@@ -238,6 +244,51 @@ async def test_auto_route_truncates_state_and_uses_two_questions(
     assert set(Client.requests[0]["json"]["questions"]) == {"tool", "needs_tool"}
     assert result.needs_tool == 0.99
     assert result.call_confidence == pytest.approx(0.9)
+
+
+@pytest.mark.asyncio
+async def test_auto_route_adds_memory_gate_only_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Client.responses = [auto_memory_response()]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    result = await jev.auto_route(
+        "finish the report",
+        "I found the report.",
+        [],
+        {"read": "Read a file"},
+        memory_injection=True,
+    )
+
+    request = Client.requests[0]["json"]
+    assert set(request["questions"]) == {"tool", "needs_tool", "memory_help"}
+    assert request["questions"]["memory_help"]["type"] == "noul"
+    assert result.memory_help == pytest.approx(0.75)
+
+
+@pytest.mark.asyncio
+async def test_memory_gate_uses_mechanical_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    Client.responses = [
+        Response(
+            200,
+            {
+                "answers": {"memory_help": {"noul": 0.8}},
+                "usage": {"input_tokens": 4, "output_tokens": 2},
+            },
+        )
+    ]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    result = await jev.memory_gate("objective\nlatest assistant")
+
+    request = Client.requests[0]["json"]
+    assert request["state"] == {"query": "objective\nlatest assistant"}
+    assert result.score == pytest.approx(0.8)
 
 
 @pytest.mark.asyncio

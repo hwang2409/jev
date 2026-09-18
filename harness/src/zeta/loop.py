@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -33,7 +34,7 @@ from .agent_receipt import (
 from .agent_runner import run_agent_tool
 from .core.abort import AbortSignal as ToolAbortSignal
 from .core.approval import ApprovalPolicy
-from .core.context import ContextAssembler
+from .core.context import MEMORY_INJECTION_PREFIX, ContextAssembler
 from .core.hooks import HookManager
 from .core.store import ConversationStore
 from .core.tool_dispatch import dispatch_tool_calls
@@ -59,7 +60,7 @@ from .mcp.commands import (
 )
 from .mcp.prompt_commands import SlashModelInput
 from .prompts import load_identity
-from .providers.jev import auto_route
+from .providers.jev import auto_route, memory_gate
 from .skills import SkillCatalog
 from .skills.agent_catalog import AgentCatalog
 from .tools import ToolHandler, ToolRegistry, ToolStreamPublisher
@@ -68,6 +69,7 @@ from .tools.agent_presets import (
     compose_system_prompt,
 )
 from .tools.loop_setup import select_tool_registry
+from .tools.memory import _memory_search
 from .tools.plan_mode import (
     PLAN_MODE_PREAMBLE,
     PLAN_MODE_TOOLS,
@@ -102,7 +104,18 @@ MAX_ERROR_MESSAGE = 400
 NEEDS_TOOL_GATE = 0.35
 """Auto-route Noul gate; thresholds do not transfer (Jev jaggedness section 8)."""
 # TODO: calibrate this Noul threshold with needs-tool data.
+MEMORY_INJECTION_GATE = 0.6
+"""Memory injection Noul cutoff; calibrate with injection relevance data."""
+# TODO: calibrate this Noul threshold with memory-help data.
+MEMORY_INJECTION_TOP_K = 2
+MEMORY_INJECTION_EXCERPT_CHARS = 600
+MEMORY_INJECTION_TOTAL_CHARS = 1500
 _logger = logging.getLogger(__name__)
+
+
+def _memory_content_hash(value: str) -> str:
+    normalized = " ".join(value.split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 async def _close_completion(
@@ -221,6 +234,7 @@ class AgentLoop:
         router_mode: bool = True,
         router_style: str = "auto",
         jev_compaction: bool = True,
+        memory_injection: bool = False,
     ) -> None:
         if type(agent_depth) is not int or not 0 <= agent_depth <= MAX_AGENT_DEPTH:
             raise ValueError(f"agent depth must be between 0 and {MAX_AGENT_DEPTH}")
@@ -248,6 +262,7 @@ class AgentLoop:
         if router_style not in {"tool", "auto"}:
             raise ValueError("router style must be 'tool' or 'auto'")
         self.router_style = router_style
+        self.memory_injection = memory_injection
         self._routed_tools: list[str] = []
         self._router_fail_open = False
         self._router_recent_steps: list[str] = []
@@ -558,6 +573,217 @@ class AgentLoop:
         results.reverse()
         return user_text[:500], assistant, results
 
+    def _memory_query(self, user_text: str) -> str:
+        task, last_assistant, _last_results = self._auto_route_inputs(user_text)
+        return "\n".join(part for part in (task, last_assistant) if part)
+
+    @staticmethod
+    def _memory_key(
+        value: Mapping[str, object],
+    ) -> tuple[str, tuple[str, ...], str] | None:
+        path = value.get("path")
+        heading = value.get("heading", [])
+        if not isinstance(path, str):
+            return None
+        if isinstance(heading, str):
+            heading = [heading]
+        if heading is None:
+            heading = []
+        if not isinstance(heading, list) or not all(
+            isinstance(part, str) for part in heading
+        ):
+            return None
+        content_hash = value.get("content_hash")
+        excerpt = value.get("excerpt")
+        if not isinstance(content_hash, str):
+            content_hash = (
+                _memory_content_hash(excerpt) if isinstance(excerpt, str) else ""
+            )
+        return path, tuple(heading), content_hash
+
+    def _known_memory_keys(self) -> set[tuple[str, tuple[str, ...], str]]:
+        keys: set[tuple[str, tuple[str, ...], str]] = set()
+        for message in self.store.messages():
+            injected = message.metadata.get("memory_injection_items")
+            if isinstance(injected, list):
+                for item in injected:
+                    if isinstance(item, Mapping):
+                        key = self._memory_key(item)
+                        if key is not None:
+                            keys.add(key)
+            result = message.tool_result
+            structured = result.structured_content if result is not None else None
+            if not isinstance(structured, Mapping):
+                continue
+            items = structured.get("items")
+            if isinstance(items, list):
+                for item in items:
+                    if isinstance(item, Mapping):
+                        key = self._memory_key(item)
+                        if key is not None:
+                            keys.add(key)
+            key = self._memory_key(structured)
+            if key is not None:
+                keys.add(key)
+        return keys
+
+    async def _inject_memory(
+        self, query: str, gate_score: float | None
+    ) -> dict[str, object]:
+        decision: dict[str, object] = {
+            "gate_score": gate_score,
+            "injected_count": 0,
+            "chars": 0,
+            "reason": None,
+        }
+        if self.tool_registry.memory_config is None:
+            decision["reason"] = "memory_unconfigured"
+            return decision
+        if gate_score is None:
+            decision["reason"] = "jev_error"
+            return decision
+        if gate_score < MEMORY_INJECTION_GATE:
+            decision["reason"] = "gate_below_threshold"
+            return decision
+        try:
+            result = await _memory_search(
+                self.tool_registry,
+                {"query": query},
+                self.tool_registry.abort_signal,
+            )
+            if result.get("isError") is True:
+                _logger.warning("memory injection search failed")
+                decision["reason"] = "memory_error"
+                return decision
+            structured = result.get("structuredContent")
+            items = structured.get("items") if isinstance(structured, Mapping) else None
+            if not isinstance(items, list):
+                decision["reason"] = "memory_error"
+                return decision
+            known = self._known_memory_keys()
+            known_hashes = {key[2] for key in known if key[2]}
+            blocks: list[TextContent] = []
+            injected_items: list[dict[str, object]] = []
+            total_chars = 0
+            deduped = False
+            capped = False
+            for raw in items:
+                if len(blocks) >= MEMORY_INJECTION_TOP_K:
+                    capped = True
+                    break
+                if not isinstance(raw, Mapping):
+                    continue
+                excerpt = raw.get("excerpt")
+                if not isinstance(excerpt, str) or not excerpt:
+                    continue
+                content_hash = _memory_content_hash(excerpt)
+                excerpt = excerpt[:MEMORY_INJECTION_EXCERPT_CHARS]
+                key = self._memory_key(
+                    {**raw, "content_hash": content_hash}
+                )
+                if key is None:
+                    continue
+                if (
+                    key in known
+                    or content_hash in known_hashes
+                ):
+                    deduped = True
+                    continue
+                heading = " > ".join(key[1]) or "(document)"
+                text = (
+                    f"{MEMORY_INJECTION_PREFIX}\n"
+                    f"path: {key[0]}\n"
+                    f"heading: {heading}\n"
+                    f"{excerpt}"
+                )
+                if total_chars + len(text) > MEMORY_INJECTION_TOTAL_CHARS:
+                    capped = True
+                    break
+                blocks.append(TextContent(text))
+                injected_items.append(
+                    {
+                        "path": key[0],
+                        "heading": list(key[1]),
+                        "content_hash": content_hash,
+                    }
+                )
+                known.add(key)
+                known_hashes.add(content_hash)
+                total_chars += len(text)
+            if not blocks:
+                decision["reason"] = (
+                    "capped" if capped else "deduped" if deduped else "memory_error"
+                )
+                return decision
+            if not self._persist_memory_blocks(blocks, injected_items):
+                decision["reason"] = "memory_error"
+                return decision
+            decision["injected_count"] = len(blocks)
+            decision["chars"] = total_chars
+            if capped:
+                decision["reason"] = "capped"
+            return decision
+        except Exception as exc:  # noqa: BLE001 - injection fails open
+            _logger.warning("memory injection failed: %s", exc)
+            decision["reason"] = "memory_error"
+            return decision
+
+    def _persist_memory_blocks(
+        self, blocks: Sequence[TextContent], items: Sequence[Mapping[str, object]]
+    ) -> bool:
+        branch = self.store.replay()
+        target_entry = next(
+            (entry for entry in reversed(branch) if entry.type == "message"),
+            None,
+        )
+        messages = self.store.messages()
+        if target_entry is None or not messages:
+            return False
+        target = messages[-1]
+        metadata = dict(target.metadata)
+        previous = metadata.get("memory_injection_items", [])
+        previous_items = list(previous) if isinstance(previous, list) else []
+        metadata.update(
+            {
+                "memory_injection": True,
+                "compaction_droppable": True,
+                "memory_injection_items": [*previous_items, *items],
+            }
+        )
+        self.store.append_message_revision(
+            target_entry.id,
+            replace(
+                target,
+                content=[*target.content, *blocks],
+                metadata=metadata,
+            ),
+        )
+        return True
+
+    async def _prepare_user_memory(
+        self, user_text: str
+    ) -> tuple[dict[str, object], dict[str, int]]:
+        if self.tool_registry.memory_config is None:
+            return {
+                "gate_score": None,
+                "injected_count": 0,
+                "chars": 0,
+                "reason": "memory_unconfigured",
+            }, {}
+        query = self._memory_query(user_text)
+        try:
+            result = await memory_gate(query)
+        except Exception as exc:  # noqa: BLE001 - gate fails open
+            _logger.warning("memory injection gate failed: %s", exc)
+            return {
+                "gate_score": None,
+                "injected_count": 0,
+                "chars": 0,
+                "reason": "jev_error",
+            }, {}
+        decision = await self._inject_memory(query, result.score)
+        return decision, dict(result.usage)
+
     def _auto_catalog(self) -> dict[str, dict[str, object]]:
         return build_catalog(
             self.tool_registry.schemas,
@@ -569,11 +795,18 @@ class AgentLoop:
     ) -> tuple[list[ToolSchema], dict[str, object]]:
         task, last_assistant, last_results = self._auto_route_inputs(user_text)
         try:
+            route_kwargs = (
+                {"memory_injection": True}
+                if self.memory_injection
+                and self.tool_registry.memory_config is not None
+                else {}
+            )
             result = await auto_route(
                 task,
                 last_assistant,
                 last_results,
                 self._auto_catalog(),
+                **route_kwargs,
             )
         except Exception as exc:  # noqa: BLE001 - auto routing fails open
             full_catalog = [
@@ -628,6 +861,12 @@ class AgentLoop:
         }
         if result.call_confidence is not None:
             routing_decision["call_confidence"] = result.call_confidence
+        if self.memory_injection:
+            memory_decision = await self._inject_memory(
+                "\n".join(part for part in (task, last_assistant) if part),
+                result.memory_help,
+            )
+            routing_decision["memory_injection"] = memory_decision
         return schemas, routing_decision
 
     @staticmethod
@@ -1265,6 +1504,18 @@ class AgentLoop:
             yield StreamEvent(StreamEventType.AGENT_END)
             return
         yield StreamEvent(StreamEventType.AGENT_START)
+        if self.memory_injection and not (
+            self.router_mode and self.router_style == "auto"
+        ):
+            memory_decision, memory_usage = await self._prepare_user_memory(user_text)
+            yield StreamEvent(
+                StreamEventType.USAGE,
+                data={
+                    "service": "jev",
+                    "usage": memory_usage,
+                    "memory_injection": memory_decision,
+                },
+            )
 
         for turn_number in range(1, self.max_turns + 1):
             # Mid-turn steering drains here — after the previous iteration's
