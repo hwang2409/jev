@@ -114,3 +114,52 @@ stock on Claude cost with quality parity, invisible routing, and the
 policy/telemetry surface. The structural blockers (turn tax, cache tax)
 are both resolved; what remains is Jev's own call cost, which scales
 with catalog size and criteria richness.
+
+# Realistic-task eval: memory + calendar surfaces — 2026-09-18
+
+Head `2a48b44`, 8 tasks x 3 modes, isolated corpora + fake calendar.
+Records: `results/realistic-*.json`.
+
+## Raw scoreboard
+
+| Mode | Completed | All-checks | Claude tokens | Jev tokens | Cache reads |
+|---|---|---|---|---|---|
+| auto (v2) | 6/8 | 3/8 | 102.3k | 114.1k | 71.4k |
+| router (v1) | 7/8 | 5/8 | 52.0k | 57.3k | 32.8k |
+| stock | 6/8 | 5/8 | 209.0k | 0 | 197.7k |
+
+## Task-calibration defects found (mode-independent failures)
+
+1. store-then-recall: check hardcodes `memory/launch-review.md` (isolated
+   corpus lives elsewhere) and the sequence demands the literal query term
+   "Tuesday". ALL modes actually stored AND recalled correctly (recall.txt
+   passed everywhere).
+2. free-slot-reasoning: all three modes computed the CORRECT slot; the
+   normalized_equals format string failed them (auto wrote
+   "2026-09-19 10:00-11:00").
+3. create-then-verify (auto only): calendar "Work" vs required "work" —
+   case-sensitive equality; event otherwise exact.
+
+## Adjusted (model-real) picture
+
+- Memory single-shot flows (store, recall, seeded recall) work in every
+  mode. Fused retrieval answered paraphrased questions.
+- Cross-surface (calendar -> memory) passed in ALL modes — the flagship
+  realistic flow works everywhere.
+- Multi-step memory work is the real weakness: two-note synthesis (auto
+  spiraled into bash; router missed one content check; stock passed) and
+  append-then-latest (hard for everyone; router did the work but hit the
+  turn cap; auto and stock genuinely failed).
+- Routing comparison on realistic tasks: v1 router aged surprisingly
+  well (best completion, checks parity with stock, HALF stock's raw
+  Claude tokens). Auto's per-turn Jev calls ballooned on long tasks
+  (114k Jev tokens — structured criteria paid every turn) and it showed
+  the weakest multi-step discipline (bash spiral, calendar-name casing).
+- Stock remains cache-cheapest per effective token; router v1 is now
+  cost-competitive since in-turn caching also covers route round-trips.
+
+## Follow-ups filed
+
+Fix the three task calibrations (corpus-relative check paths, format-
+tolerant slot check or format-specified prompt, case-insensitive calendar
+equality) and rerun before treating the checks column as capability truth.
