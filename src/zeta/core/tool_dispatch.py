@@ -109,10 +109,32 @@ async def dispatch_tool_calls(
     active_task: asyncio.Task[StructuredToolResult] | None = None
     parallel_tasks: dict[asyncio.Task[StructuredToolResult], tuple[int, ToolCall]] = {}
     parallel_results: list[ToolResult | None] = [None] * len(calls)
+    router_start = getattr(loop, "_router_start_batch", None)
+    router_before = getattr(loop, "_router_before_tool_execution", None)
+    router_allows = getattr(loop, "_router_allows_tool", None)
+    router_rejection = getattr(loop, "_router_rejection", None)
+    router_result = getattr(loop, "_router_result", None)
+    router_end = getattr(loop, "_router_end_batch", None)
+    if router_start is not None:
+        router_start(calls)
     try:
         call_index = 0
         while call_index < len(calls):
             tool_call = calls[call_index]
+            if router_before is not None:
+                router_before(tool_call.name)
+            if router_rejection is not None:
+                rejection = router_rejection(tool_call)
+                if rejection is not None:
+                    result = loop._finalize_tool_results([tool_call], [rejection])[0]
+                    completed_tool_indexes.add(call_index)
+                    yield StreamEvent(
+                        StreamEventType.TOOL_EXECUTION_END,
+                        tool_call=tool_call,
+                        tool_result=result,
+                    )
+                    call_index += 1
+                    continue
             if not loop.plan_mode_allows(tool_call.name):
                 result = ToolResult(
                     tool_call.id,
@@ -138,6 +160,8 @@ async def dispatch_tool_calls(
                     while call_index + len(parallel_calls) < len(calls):
                         next_call = calls[call_index + len(parallel_calls)]
                         if not loop.plan_mode_allows(next_call.name):
+                            break
+                        if router_allows is not None and not router_allows(next_call.name):
                             break
                         next_definition = loop.tool_registry.definitions_by_name.get(
                             next_call.name
@@ -201,6 +225,9 @@ async def dispatch_tool_calls(
                     parallel_calls,
                     parallel_results[call_index:batch_end],
                 )
+                if router_result is not None:
+                    for tool_call, result in zip(parallel_calls, results, strict=True):
+                        router_result(tool_call.name, result)
                 parallel_results[call_index:batch_end] = [None] * len(parallel_calls)
                 completed_tool_indexes.update(range(call_index, batch_end))
                 for tool_call, result in zip(parallel_calls, results, strict=True):
@@ -250,6 +277,8 @@ async def dispatch_tool_calls(
             except Exception as exc:
                 result = ToolResult(tool_call.id, str(exc), is_error=True)
             result = validate_result(result, tool_call.id)
+            if router_result is not None:
+                router_result(tool_call.name, result)
             result = loop._finalize_tool_results([tool_call], [result])[0]
             completed_tool_indexes.add(call_index)
             yield StreamEvent(
@@ -286,3 +315,6 @@ async def dispatch_tool_calls(
             [parallel_results[index] for index in pending_indexes],
         )
         raise
+    finally:
+        if router_end is not None:
+            router_end()

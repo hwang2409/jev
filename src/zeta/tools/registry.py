@@ -71,6 +71,7 @@ MAX_STRUCTURED_CONTENT_DEPTH = 32
 _logger = logging.getLogger(__name__)
 ToolHook = Callable[[str, dict[str, Any]], bool | str | Awaitable[bool | str] | None]
 ToolHandlerFactory = Callable[["ToolRegistry"], ToolHandler]
+RouterToolsSink = Callable[[list[str] | None], None]
 
 def _bind_handler(handler: ToolHandler, registry: ToolRegistry) -> ToolHandler:
     return partial(handler, registry)
@@ -462,6 +463,7 @@ class ToolRegistry:
         self._session_store = session_store
         self._todo_store = session_store
         self._agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None = None
+        self.router_tools_sink: RouterToolsSink | None = None
         self.background_tasks = BackgroundTaskRegistry(
             session_dir=session_store.session_dir if session_store is not None else None,
             directory_fd=session_store.directory_fd if session_store is not None else None,
@@ -646,6 +648,9 @@ class ToolRegistry:
         self.pre_execute_hook = hook
         self._approval_gate.hook = hook
 
+    def set_router_tools_sink(self, sink: RouterToolsSink | None) -> None:
+        self.router_tools_sink = sink
+
     def update_bash_cwd(self, cwd: str) -> None:
         if self._session_store is not None:
             self._session_store.set_bash_cwd(cwd)
@@ -771,7 +776,10 @@ class ToolRegistry:
             else None
         )
         execution_context = ToolExecutionContext(
-            tool_call, self._agent_runner, _lifecycle_sink
+            tool_call,
+            self._agent_runner,
+            _lifecycle_sink,
+            self.router_tools_sink,
         )
         handler = bind_execution_context(definition.handler, execution_context)
         execution_arguments = build_execution_arguments(

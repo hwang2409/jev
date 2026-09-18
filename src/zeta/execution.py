@@ -42,6 +42,7 @@ class ToolExecutionContext:
     tool_call: ToolCall
     agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None
     lifecycle_sink: ToolLifecycleSink | None
+    router_tools_sink: Callable[[list[str] | None], None] | None = None
 
 
 @dataclass(slots=True)

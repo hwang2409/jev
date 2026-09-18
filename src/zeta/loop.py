@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import shlex
 import warnings
@@ -95,6 +96,7 @@ from .types import (
 
 TaskResult = TypeVar("TaskResult")
 MAX_ERROR_MESSAGE = 400
+_logger = logging.getLogger(__name__)
 
 
 async def _close_completion(
@@ -210,6 +212,7 @@ class AgentLoop:
         agent_turn_budget: int | None = None,
         agent_tree: AgentTree | None = None,
         background_owner: BackgroundAgentOwner | None = None,
+        router_mode: bool = True,
     ) -> None:
         if type(agent_depth) is not int or not 0 <= agent_depth <= MAX_AGENT_DEPTH:
             raise ValueError(f"agent depth must be between 0 and {MAX_AGENT_DEPTH}")
@@ -233,6 +236,12 @@ class AgentLoop:
         self._background_child_cancellers: dict[str, Callable[[], None]] = {}
         self._background_child_watchers: dict[str, asyncio.Task[Any]] = {}
         self._background_event_sink: Callable[[StreamEvent], None] | None = None
+        self.router_mode = router_mode
+        self._routed_tools: list[str] = []
+        self._router_fail_open = False
+        self._router_batch_has_route = False
+        self._router_batch_allowed_tools: set[str] | None = None
+        self.unrouted_attempts = 0
         self._mcp_notice_sink: Callable[[str], None] | None = None
         self._mcp_prompt_refresh: Callable[[MCPMount], None] | None = None
         self._activated = False
@@ -256,6 +265,7 @@ class AgentLoop:
         self._mcp_schema_names: set[str] = set()
         self._provided_tool_schemas = tool_schemas is not None
         self.tool_registry.bind_session_store(store)
+        self.tool_registry.set_router_tools_sink(self._record_routed_tools)
         self.agent_catalog = self.tool_registry.agent_catalog
         if (
             approval_policy is not None
@@ -327,7 +337,7 @@ class AgentLoop:
     def plan_mode_allows(self, tool_name: str) -> bool:
         """Check the current plan-mode allowlist at dispatch time."""
 
-        return not self._plan_mode or tool_name in PLAN_MODE_TOOLS | {"agent"}
+        return not self._plan_mode or tool_name in PLAN_MODE_TOOLS | {"agent", "route"}
 
     @property
     def background_work_descriptions(self) -> tuple[str, ...]:
@@ -339,14 +349,104 @@ class AgentLoop:
         return self._background_owner.active_descriptions + process_work
 
     def _active_tool_schemas(self) -> list[ToolSchema]:
-        """Return the schemas this turn advertises, honoring plan mode."""
+        """Return the schemas this turn advertises, honoring router and plan modes."""
 
+        if not self.router_mode:
+            active = [
+                schema for schema in self.tool_schemas if schema.get("name") != "route"
+            ]
+        elif self._router_fail_open:
+            active = list(self.tool_schemas)
+        else:
+            allowed_names = {"route", *self._routed_tools}
+            active = [
+                schema
+                for schema in self.tool_schemas
+                if schema.get("name") in allowed_names
+            ]
         if not self._plan_mode:
-            return list(self.tool_schemas)
+            return active
         allowed = PLAN_MODE_TOOLS | {"agent"}
         return [
-            schema for schema in self.tool_schemas if schema.get("name") in allowed
+            schema
+            for schema in active
+            if schema.get("name") in allowed | {"route"}
         ]
+
+    def _record_routed_tools(self, tools: list[str] | None) -> None:
+        if tools is None:
+            self._routed_tools = []
+            self._router_fail_open = True
+            return
+        self._routed_tools = list(dict.fromkeys(tools))
+        self._router_fail_open = False
+
+    def _router_start_batch(self, calls: Sequence[ToolCall]) -> None:
+        if not self.router_mode:
+            return
+        self._router_batch_has_route = any(call.name == "route" for call in calls)
+        self._router_batch_allowed_tools = {
+            schema["name"]
+            for schema in self._active_tool_schemas()
+            if isinstance(schema.get("name"), str)
+        }
+
+    def _router_end_batch(self) -> None:
+        self._router_batch_has_route = False
+        self._router_batch_allowed_tools = None
+
+    def _router_before_tool_execution(self, tool_name: str) -> None:
+        if (
+            self.router_mode
+            and tool_name != "route"
+            and not self._router_batch_has_route
+        ):
+            self._routed_tools = []
+
+    def _router_allows_tool(self, tool_name: str) -> bool:
+        if not self.router_mode:
+            return True
+        if tool_name == "route" or self._router_fail_open:
+            return True
+        allowed = self._router_batch_allowed_tools
+        if allowed is None:
+            allowed = {
+                schema["name"]
+                for schema in self._active_tool_schemas()
+                if isinstance(schema.get("name"), str)
+            }
+        return tool_name in allowed
+
+    def _router_rejection(self, tool_call: ToolCall) -> ToolResult | None:
+        if (
+            not self.router_mode
+            or self._router_allows_tool(tool_call.name)
+            or tool_call.name not in self.tool_registry.registered_names
+        ):
+            return None
+        self.unrouted_attempts += 1
+        _logger.warning("unrouted tool attempt: %s", tool_call.name)
+        message = (
+            "not available this turn — describe your step to route first: "
+            f"{tool_call.name}"
+        )
+        return ToolResult(
+            tool_call.id,
+            message,
+            is_error=True,
+            structured_content={
+                "error": {
+                    "tool": tool_call.name,
+                    "kind": "error",
+                    "hint": "",
+                    "message": message,
+                }
+            },
+        )
+
+    def _router_result(self, tool_name: str, result: ToolResult) -> None:
+        if self.router_mode and tool_name == "route" and result.is_error:
+            self._record_routed_tools(None)
 
     def set_model(self, model: str) -> None:
         """Set the model used by subsequent provider completions."""
