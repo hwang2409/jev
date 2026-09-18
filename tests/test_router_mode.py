@@ -67,6 +67,7 @@ def build_loop(
             store=store, default=ApprovalDecision.ALLOW
         ),
         router_mode=router_mode,
+        router_style="tool",
         skill_catalog=SkillCatalog.empty(),
     )
 
@@ -541,11 +542,13 @@ async def test_child_loop_inherits_jev_compaction_mode(
     import zeta.loop as loop_module
 
     captured: list[bool] = []
+    captured_styles: list[str] = []
     real_agent_loop = loop_module.AgentLoop
 
     class SpyAgentLoop(real_agent_loop):
         def __init__(self, *args, **kwargs):
             captured.append(kwargs["jev_compaction"])
+            captured_styles.append(kwargs["router_style"])
             super().__init__(*args, **kwargs)
 
     monkeypatch.setattr(loop_module, "AgentLoop", SpyAgentLoop)
@@ -553,6 +556,7 @@ async def test_child_loop_inherits_jev_compaction_mode(
     await collect(loop.run_turn("start"))
 
     assert captured == [jev_compaction]
+    assert captured_styles == ["auto"]
 
 
 async def _route(tool: str) -> RouteResult:

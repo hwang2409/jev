@@ -21,6 +21,7 @@ def build_unattended_loop(
     allow: tuple[str, ...],
     backend: CompletionBackend | None = None,
     router_mode: bool | None = None,
+    router_style: str | None = None,
 ) -> AgentLoop:
     metadata, store = session.metadata, session.store
     if backend is None:
@@ -36,6 +37,8 @@ def build_unattended_loop(
         router_mode = (
             True if loaded.settings.router is None else loaded.settings.router
         )
+    if router_style is None:
+        router_style = loaded.settings.router_style or "auto"
     jev_compaction = (
         True
         if loaded.settings.jev_compaction is None
@@ -65,6 +68,7 @@ def build_unattended_loop(
         skip_mcp_mount=True,
         system_prompt=metadata.system_prompt,
         router_mode=router_mode,
+        router_style=router_style,
         jev_compaction=jev_compaction,
         on_completion_success=lambda: SessionManager(home).touch(metadata),
     )

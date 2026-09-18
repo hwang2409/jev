@@ -69,6 +69,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="route tool choices through Jev; --no-router restores the full toolset",
     )
     parser.add_argument(
+        "--router-style",
+        choices=("tool", "auto"),
+        default=None,
+        help="choose visible route-tool or invisible auto routing",
+    )
+    parser.add_argument(
         "--jev-compaction",
         dest="jev_compaction",
         action=argparse.BooleanOptionalAction,
@@ -214,6 +220,7 @@ def main(argv: list[str] | None = None) -> int:
             provider=args.serve_provider or args.provider,
             model=args.serve_model or args.model,
             router_mode=args.router,
+            router_style=args.router_style,
             jev_compaction=args.jev_compaction,
         )
         try:

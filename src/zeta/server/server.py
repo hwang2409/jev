@@ -41,6 +41,7 @@ class ZetaServer:
         provider: str | None = None,
         model: str | None = None,
         router_mode: bool | None = None,
+        router_style: str | None = None,
         jev_compaction: bool | None = None,
         backend_factory: BackendFactory | None = None,
     ) -> None:
@@ -61,6 +62,7 @@ class ZetaServer:
             provider=provider,
             model=model,
             router_mode=router_mode,
+            router_style=router_style,
             jev_compaction=jev_compaction,
             backend_factory=backend_factory,
         )

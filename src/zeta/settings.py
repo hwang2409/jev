@@ -46,11 +46,13 @@ from .core.approval import parse_approval_rule
 
 SETTINGS_FILENAME = "settings.toml"
 _PROVIDER_CHOICES = frozenset({"fake", "claude", "codex"})
+_ROUTER_STYLE_CHOICES = frozenset({"tool", "auto"})
 _TOP_KEYS = frozenset(
     {
         "provider",
         "model",
         "router",
+        "router_style",
         "jev_compaction",
         "yolo",
         "token_budget",
@@ -67,6 +69,7 @@ _PROJECT_SAFE_KEYS = frozenset(
         "provider",
         "model",
         "router",
+        "router_style",
         "jev_compaction",
         "token_budget",
         "workspace_snapshot_cap",
@@ -83,6 +86,7 @@ class Settings:
     provider: str | None = None
     model: str | None = None
     router: bool | None = None
+    router_style: str | None = None
     jev_compaction: bool | None = None
     yolo: bool | None = None
     token_budget: int | None = None
@@ -103,6 +107,7 @@ class ResolvedConfig:
     provider: str
     model: str | None
     router: bool
+    router_style: str
     jev_compaction: bool
     yolo: bool
     token_budget: int | None
@@ -159,6 +164,7 @@ def resolve(
     cli_token_budget: int | None,
     default_provider: str = "fake",
     cli_router: bool | None = None,
+    cli_router_style: str | None = None,
     cli_jev_compaction: bool | None = None,
 ) -> ResolvedConfig:
     """Layer CLI flags over the loaded settings; CLI wins where set.
@@ -172,6 +178,9 @@ def resolve(
     router = True if cli_router is None and settings.router is None else (
         settings.router if cli_router is None else cli_router
     )
+    router_style = (
+        settings.router_style if cli_router_style is None else cli_router_style
+    ) or "auto"
     jev_compaction = (
         True
         if cli_jev_compaction is None and settings.jev_compaction is None
@@ -189,6 +198,7 @@ def resolve(
         provider=provider,
         model=cli_model or settings.model,
         router=bool(router),
+        router_style=router_style,
         jev_compaction=bool(jev_compaction),
         yolo=yolo,
         token_budget=token_budget,
@@ -282,6 +292,9 @@ def _validate(
     provider = _validated_choice(data, "provider", _PROVIDER_CHOICES, notices)
     model = _validated_string(data, "model", notices)
     router = _validated_bool(data, "router", notices)
+    router_style = _validated_choice(
+        data, "router_style", _ROUTER_STYLE_CHOICES, notices
+    )
     jev_compaction = _validated_bool(data, "jev_compaction", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
@@ -301,6 +314,7 @@ def _validate(
         provider=provider,
         model=model,
         router=router,
+        router_style=router_style,
         jev_compaction=jev_compaction,
         yolo=yolo,
         token_budget=token_budget,

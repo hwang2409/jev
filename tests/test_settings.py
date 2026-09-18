@@ -167,9 +167,32 @@ def test_resolve_falls_back_to_defaults_when_nothing_configured(tmp_path: Path) 
     assert config.provider == "fake"
     assert config.model is None
     assert config.router is True
+    assert config.router_style == "auto"
     assert config.yolo is False
     assert config.token_budget is None
     assert config.approval_allow == ()
+
+
+def test_router_style_cli_and_settings_precedence(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    _write(home, 'router_style = "tool"\n')
+    settings = load_settings(home=home, project_dir=None).settings
+
+    assert resolve(
+        settings,
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+    ).router_style == "tool"
+    assert resolve(
+        settings,
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+        cli_router_style="auto",
+    ).router_style == "auto"
 
 
 def test_malformed_toml_fails_open_with_notice(tmp_path: Path) -> None:

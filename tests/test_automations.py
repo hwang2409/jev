@@ -394,6 +394,7 @@ async def test_negative_polls_advance_cursor_and_invalid_checks_preserve_it(
 async def test_unlisted_tool_denial_is_durable_and_prevents_delivery(
     tmp_path: Path,
 ) -> None:
+    (tmp_path / "settings.toml").write_text('router_style = "tool"\n', encoding="utf-8")
     with SQLiteStore(tmp_path) as store:
         _arm(store, _job(tmp_path))
         occurrence = tick(store, DUE)[0]

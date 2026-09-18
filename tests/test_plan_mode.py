@@ -43,7 +43,8 @@ def build_loop(
         ),
         skip_mcp_mount=True,
         router_mode=router_mode,
-skill_catalog=SkillCatalog.empty(),
+        router_style="tool",
+        skill_catalog=SkillCatalog.empty(),
     )
 
 

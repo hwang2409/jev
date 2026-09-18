@@ -533,6 +533,7 @@ async def run_agent_tool(
             agent_tree=agent_tree,
             background_owner=loop._background_owner,
             router_mode=loop.router_mode,
+            router_style=loop.router_style,
             jev_compaction=loop.context_assembler.jev_compaction,
         )
         if loop.plan_mode:

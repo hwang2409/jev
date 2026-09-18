@@ -34,6 +34,11 @@ def test_serve_passes_router_mode_to_server(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["router_mode"] is False
 
 
+def test_parser_accepts_router_style() -> None:
+    args = build_parser().parse_args(["--router-style", "auto"])
+    assert args.router_style == "auto"
+
+
 def test_completion_parser_accepts_both_shells() -> None:
     parser = build_parser()
 

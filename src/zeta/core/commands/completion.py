@@ -29,6 +29,7 @@ _zeta() {
         '--no-yolo[force prompts even when settings enable yolo]' \
         '--router[route tool choices through Jev]' \
         '--no-router[restore the full toolset]' \
+        '--router-style=[routing style]:style:(tool auto)' \
         '--jev-compaction[triage old tool results through Jev]' \
         '--no-jev-compaction[disable Jev compaction triage]' \
         '--token-budget=[context token budget]:tokens:' \
@@ -50,10 +51,10 @@ _zeta() {
             while (( command_index <= $#original_words )); do
                 token=$original_words[command_index]
                 case $token in
-                    --provider|--model|--resume|--token-budget|--max-turns|--format|--system-prompt|--append-system-prompt|--socket|--port|--cwd|-p|--print)
+                    --provider|--model|--resume|--router-style|--token-budget|--max-turns|--format|--system-prompt|--append-system-prompt|--socket|--port|--cwd|-p|--print)
                         (( command_index += 2 ))
                         ;;
-                    --provider=*|--model=*|--resume=*|--token-budget=*|--max-turns=*|--format=*|--system-prompt=*|--append-system-prompt=*|--socket=*|--port=*|--cwd=*|-p*)
+                    --provider=*|--model=*|--resume=*|--router-style=*|--token-budget=*|--max-turns=*|--format=*|--system-prompt=*|--append-system-prompt=*|--socket=*|--port=*|--cwd=*|-p*)
                         (( command_index++ ))
                         ;;
                     --)
@@ -116,14 +117,14 @@ def bash_script() -> str:
     while (( index < COMP_CWORD )); do
         token="${COMP_WORDS[index]}"
         case "$token" in
-            --provider|--model|--resume|--token-budget|--max-turns|--format|--system-prompt|--append-system-prompt|--socket|--port|--cwd|-p|--print)
+            --provider|--model|--resume|--router-style|--token-budget|--max-turns|--format|--system-prompt|--append-system-prompt|--socket|--port|--cwd|-p|--print)
                 if [[ "${COMP_WORDS[index+1]:-}" == "=" ]]; then
                     (( index += 3 ))
                 else
                     (( index += 2 ))
                 fi
                 ;;
-            --provider=*|--model=*|--resume=*|--token-budget=*|--max-turns=*|--format=*|--system-prompt=*|--append-system-prompt=*|--socket=*|--port=*|--cwd=*|-p*)
+            --provider=*|--model=*|--resume=*|--router-style=*|--token-budget=*|--max-turns=*|--format=*|--system-prompt=*|--append-system-prompt=*|--socket=*|--port=*|--cwd=*|-p*)
                 (( index++ ))
                 ;;
             --)
@@ -147,7 +148,7 @@ def bash_script() -> str:
     if (( command_index > 0 && COMP_CWORD > command_index + 1 )); then
         verb="${COMP_WORDS[command_index+1]}"
     fi
-    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --jev-compaction --no-jev-compaction --token-budget --max-turns --print -p --format --system-prompt --append-system-prompt"
+    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --router-style --jev-compaction --no-jev-compaction --token-budget --max-turns --print -p --format --system-prompt --append-system-prompt"
     local commands="login serve session automation completion"
 
     if (( command_index == 0 )); then

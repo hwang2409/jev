@@ -124,6 +124,7 @@ def compose_runtime(
             "on_completion_success": completion_callback,
             "on_plan_mode_change": on_plan_mode_change,
             "router_mode": config.router,
+            "router_style": config.router_style,
             "jev_compaction": config.jev_compaction,
             "system_prompt": project_context.system_prompt,
         }
