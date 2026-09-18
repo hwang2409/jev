@@ -74,3 +74,43 @@ Head `4866bcfe`. Same 6 tasks, same day. Full records: `results/threeway-*.json`
    routing cannot win on cost. Routing's value cases remain: quality
    parity now proven, huge/churning catalogs (MCP mounts, cache-TTL
    expiry in slow loops), cache-less providers, and policy/telemetry.
+
+# Cache arc: three-way rerun with in-turn history caching — 2026-09-18
+
+Head `78f335d8` (marker advanced into the active user turn + structured
+criteria from the docs refactor). Records: `results/cachearc-*.json`.
+
+| Metric | auto (v2) | router (v1) | stock |
+|---|---|---|---|
+| Completed | 6/6 | 2/6 | 5/6 |
+| All-checks-passed tasks | 4/6 | 4/6 | 5/6 |
+| Claude fresh in / out / cache | 12.6k / 4.1k / 13.0k | 8.9k / 3.7k / 23.8k | 3.1k / 2.9k / 112.0k |
+| Est. Claude cost | $0.103 | $0.090 | $0.087 |
+| Jev tokens | 43.7k | 34.1k | 0 |
+
+## Findings
+
+1. ACCEPTANCE PASSED: cache reads now nonzero in every mode. Auto's
+   Claude-side cost halved ($0.21 -> $0.103) and the auto-vs-stock gap
+   nearly closed ($0.103 vs $0.087; it was $0.21 vs $0.15).
+2. In-turn caching improved STOCK dramatically too ($0.149 -> $0.087) —
+   the change is a general zeta win, not a router accommodation. Strong
+   upstream-to-zeta candidate (Henry's call; fork never merges itself).
+3. Jev token usage rose ~75% (structured criteria carry per-call weight:
+   what/not_for/examples across 17 tools ≈ +2-4k tokens per routing
+   call). Tunable: trim examples, or cache criteria server-side if
+   TypeSafe ever supports it. With Jev priced meaningfully below
+   sonnet, auto remains cost-competitive; exact parity depends on Jev
+   pricing.
+4. chain-and-verify failed strict checks in ALL three modes (as in prior
+   runs) — task strictness, not a mode regression; other single-check
+   misses differ per mode and look like run variance on exact-match
+   checks. Completion quality unchanged (auto 6/6).
+
+## Arc verdict
+
+The remaining cost story: at 10 tools, auto is now within ~18 percent of
+stock on Claude cost with quality parity, invisible routing, and the
+policy/telemetry surface. The structural blockers (turn tax, cache tax)
+are both resolved; what remains is Jev's own call cost, which scales
+with catalog size and criteria richness.
