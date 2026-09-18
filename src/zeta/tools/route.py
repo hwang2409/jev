@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TypedDict
+from collections.abc import Iterable, Mapping
+from typing import Any, TypedDict
 
 from ..execution import ToolExecutionContext
 from ..providers.jev import route_step
@@ -14,18 +15,78 @@ class RouteArguments(TypedDict):
     step: str
 
 
-def _catalog(registry: ToolRegistry) -> dict[str, str]:
-    catalog: dict[str, str] = {}
-    for schema in registry.schemas:
+ROUTE_TOPK_CONFIDENCE = 0.8
+"""Choice cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
+# TODO: calibrate this Choice threshold with route confidence data.
+
+LOW_CLARITY_NUDGE = 0.3
+"""Noul cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
+# TODO: calibrate this Noul threshold with step-clarity data.
+
+_BOUNDARIES: dict[str, tuple[str, list[str]]] = {
+    "read": (
+        "Searching file contents by pattern; use grep or the matching search tool.",
+        ["Read src/zeta/loop.py to inspect the routing logic."],
+    ),
+    "write": (
+        "Changing part of an existing file; use edit.",
+        ["Write a new notes.md file with the requested content."],
+    ),
+    "edit": (
+        "Creating or replacing a whole file; use write.",
+        ["Replace one old threshold in src/zeta/loop.py with a new constant."],
+    ),
+    "fetch": (
+        "Searching the web for relevant pages; use websearch.",
+        ["Fetch https://docs.typesafe.ai/primitives/advanced.md."],
+    ),
+    "websearch": (
+        "Opening a known URL; use fetch.",
+        ["Search the web for the latest TypeSafe routing documentation."],
+    ),
+    "bash": (
+        "editing a file in place; use edit",
+        ["Run pytest tests/test_router_auto.py."],
+    ),
+    "exec": (
+        "Running a session shell command with persistent shell state; use bash.",
+        ["Run pytest with a 60 second timeout and bounded output."],
+    ),
+}
+
+
+def build_catalog(
+    schemas: Iterable[Mapping[str, object]],
+    *,
+    excluded_names: set[str] | frozenset[str] = frozenset(),
+) -> dict[str, dict[str, Any]]:
+    catalog: dict[str, dict[str, Any]] = {}
+    for schema in schemas:
         name = schema.get("name")
-        if not isinstance(name, str) or name == "route":
+        if not isinstance(name, str) or name in excluded_names:
             continue
         description = schema.get("description", "")
         if not isinstance(description, str):
             description = ""
         lines = description.splitlines()
-        catalog[name] = (lines[0] if lines else "")[:150]
+        what = (lines[0] if lines else "")[:150]
+        not_for, examples = _BOUNDARIES.get(
+            name,
+            (
+                "Actions outside this tool's description; use the matching tool.",
+                [f"Use {name} for the action described by its tool description."],
+            ),
+        )
+        catalog[name] = {
+            "what": what,
+            "not_for": not_for,
+            "examples": examples,
+        }
     return catalog
+
+
+def _catalog(registry: ToolRegistry) -> dict[str, dict[str, Any]]:
+    return build_catalog(registry.schemas, excluded_names={"route"})
 
 
 def _route_error(message: str) -> StructuredToolResult:
@@ -33,7 +94,7 @@ def _route_error(message: str) -> StructuredToolResult:
 
 
 def _route_text(tool: str, probabilities: dict[str, float], confidence: float) -> str:
-    if confidence >= 0.8:
+    if confidence >= ROUTE_TOPK_CONFIDENCE:
         return f"routed to {tool} (confidence {confidence:.2f})"
     top_tools = sorted(
         probabilities.items(), key=lambda item: item[1], reverse=True
@@ -61,7 +122,7 @@ async def _route(
         )
         routed_tools = (
             [result.tool]
-            if result.confidence >= 0.8
+            if result.confidence >= ROUTE_TOPK_CONFIDENCE
             else [
                 name
                 for name, _probability in sorted(
@@ -80,15 +141,18 @@ async def _route(
             if sink is not None:
                 sink(routed_tools)
         message = _route_text(result.tool, result.probabilities, result.confidence)
-        if result.step_clarity < 0.3:
+        if result.step_clarity < LOW_CLARITY_NUDGE:
             message += "; restate the step more concretely"
-        return _success_result(
-            text_block(message),
-            structured_content={
-                "service": "jev",
-                "usage": dict(result.usage),
-            },
-        )
+        telemetry: dict[str, Any] = {
+            "service": "jev",
+            "usage": dict(result.usage),
+            "confidence": result.confidence,
+            "needs_tool": result.needs_tool,
+            "step_clarity": result.step_clarity,
+        }
+        if result.call_confidence is not None:
+            telemetry["call_confidence"] = result.call_confidence
+        return _success_result(text_block(message), structured_content=telemetry)
     except Exception as exc:  # noqa: BLE001 - routing must fail open
         if execution_context is not None:
             sink = execution_context.router_tools_sink

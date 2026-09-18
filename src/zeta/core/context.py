@@ -62,7 +62,9 @@ class _ContextItem:
 
 IMAGE_TOKEN_ESTIMATE = 1024
 JEV_TRIAGE_SIZE_FLOOR = 200
-JEV_TRIAGE_DROP_THRESHOLD = 0.35
+TRIAGE_KEEP_DROP = 0.35
+"""Triage Noul cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
+# TODO: calibrate this Noul threshold with triage keep/drop data.
 
 
 def _message_token_count(message: Message) -> int:
@@ -690,7 +692,7 @@ class ContextAssembler:
             dropped_ids = {
                 item_id
                 for item_id, probability in result.keep_probabilities.items()
-                if probability < JEV_TRIAGE_DROP_THRESHOLD
+                if probability < TRIAGE_KEEP_DROP
             }
             dropped_items: list[dict[str, Any]] = []
             triaged_messages: list[Message] = []
@@ -724,6 +726,8 @@ class ContextAssembler:
             }
             if result.usage:
                 stats["usage"] = dict(result.usage)
+            if result.call_confidence is not None:
+                stats["call_confidence"] = result.call_confidence
             return triaged_messages, stats
         except Exception:  # noqa: BLE001 - triage must fail open
             return None

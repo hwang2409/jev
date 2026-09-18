@@ -77,6 +77,7 @@ from .tools.registry import (
     _validate_unique_tool_call_ids,
     validate_tool_result,
 )
+from .tools.route import ROUTE_TOPK_CONFIDENCE, build_catalog
 from .types import (
     FAILED_TURN_ERROR,
     FAILED_TURN_MARKER,
@@ -98,6 +99,9 @@ from .types import (
 
 TaskResult = TypeVar("TaskResult")
 MAX_ERROR_MESSAGE = 400
+NEEDS_TOOL_GATE = 0.35
+"""Auto-route Noul gate; thresholds do not transfer (Jev jaggedness section 8)."""
+# TODO: calibrate this Noul threshold with needs-tool data.
 _logger = logging.getLogger(__name__)
 
 
@@ -554,17 +558,11 @@ class AgentLoop:
         results.reverse()
         return user_text[:500], assistant, results
 
-    def _auto_catalog(self) -> dict[str, str]:
-        catalog: dict[str, str] = {}
-        for schema in self.tool_registry.schemas:
-            name = schema.get("name")
-            if not isinstance(name, str) or name in {"route", "invoke"}:
-                continue
-            description = schema.get("description", "")
-            if not isinstance(description, str):
-                description = ""
-            catalog[name] = description.splitlines()[0][:150] if description else ""
-        return catalog
+    def _auto_catalog(self) -> dict[str, dict[str, object]]:
+        return build_catalog(
+            self.tool_registry.schemas,
+            excluded_names={"route", "invoke"},
+        )
 
     async def _prepare_auto_route(
         self, user_text: str
@@ -594,9 +592,9 @@ class AgentLoop:
                 "advertised": sorted(self._router_auto_allowed_tools),
                 "fail_open": True,
             }
-        if result.needs_tool < 0.35:
+        if result.needs_tool < NEEDS_TOOL_GATE:
             names: list[str] = []
-        elif result.confidence >= 0.8:
+        elif result.confidence >= ROUTE_TOPK_CONFIDENCE:
             names = [result.tool]
         else:
             names = [
@@ -620,14 +618,17 @@ class AgentLoop:
             for schema in self.tool_registry.schemas
             if schema.get("name") in names
         ]
-        return schemas, {
+        routing_decision: dict[str, object] = {
             "tool": result.tool,
             "confidence": result.confidence,
             "needs_tool": result.needs_tool,
             "advertised": names,
-            "direct_answer": not names and result.needs_tool < 0.35,
+            "direct_answer": not names and result.needs_tool < NEEDS_TOOL_GATE,
             "usage": dict(result.usage),
         }
+        if result.call_confidence is not None:
+            routing_decision["call_confidence"] = result.call_confidence
+        return schemas, routing_decision
 
     @staticmethod
     def _schema_text(schemas: Sequence[ToolSchema]) -> str:
