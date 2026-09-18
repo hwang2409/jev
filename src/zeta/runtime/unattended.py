@@ -3,9 +3,11 @@
 from pathlib import Path
 
 from ..core.approval import ApprovalDecision, ApprovalPolicy
+from ..core.project_context import discover_repo_root
 from ..core.session import OpenedSession, SessionManager
 from ..loop import AgentLoop
 from ..providers.factory import build_backend
+from ..settings import load_settings
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import discover_packaged_agents
 from ..tools import ToolRegistry
@@ -18,6 +20,7 @@ def build_unattended_loop(
     home: Path,
     allow: tuple[str, ...],
     backend: CompletionBackend | None = None,
+    router_mode: bool | None = None,
 ) -> AgentLoop:
     metadata, store = session.metadata, session.store
     if backend is None:
@@ -27,6 +30,10 @@ def build_unattended_loop(
     )
     if session.metadata.skill_catalog is None:
         raise ValueError("unattended sessions require a skill catalog")
+    if router_mode is None:
+        project_dir = discover_repo_root(Path(metadata.cwd)) / ".zeta"
+        loaded = load_settings(home=home, project_dir=project_dir)
+        router_mode = bool(loaded.settings.router)
     skill_catalog = SkillCatalog.from_snapshot(session.metadata.skill_catalog)
     # Automation sessions never mount user-defined agents, even if metadata
     # was modified outside the restricted runner.
@@ -50,5 +57,6 @@ def build_unattended_loop(
         max_turns=25,
         skip_mcp_mount=True,
         system_prompt=metadata.system_prompt,
+        router_mode=router_mode,
         on_completion_success=lambda: SessionManager(home).touch(metadata),
     )

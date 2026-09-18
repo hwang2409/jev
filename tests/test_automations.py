@@ -453,6 +453,27 @@ async def test_unattended_runtime_ignores_global_yolo_hooks_and_project_tools(
     await loop.close()
 
 
+async def test_unattended_runtime_respects_router_setting(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "settings.toml").write_text("router = false\n", encoding="utf-8")
+    session = SessionManager(home).create(
+        provider="fake",
+        model="fake",
+        cwd=tmp_path,
+        system_prompt="system",
+        skill_catalog=discover_session_skills(home=home),
+    )
+
+    loop = build_unattended_loop(
+        session, home=home, allow=(), backend=FakeBackend([])
+    )
+
+    assert loop.router_mode is False
+    await loop.close()
+    session.store.close()
+
+
 async def test_automation_catalog_excludes_project_skills_from_prompt_and_tool(
     tmp_path: Path,
 ) -> None:

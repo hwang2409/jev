@@ -206,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             port=args.port,
             provider=args.serve_provider or args.provider,
             model=args.serve_model or args.model,
+            router_mode=args.router,
         )
         try:
             asyncio.run(run_server(server))

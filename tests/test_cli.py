@@ -15,6 +15,25 @@ from zeta.cli import build_parser, main
 from zeta.core.commands.completion import completion_script
 
 
+def test_serve_passes_router_mode_to_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeServer:
+        def __init__(self, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    async def run_server(_server: FakeServer) -> None:
+        return None
+
+    import zeta.server
+
+    monkeypatch.setattr(zeta.server, "ZetaServer", FakeServer)
+    monkeypatch.setattr(zeta.server, "run_server", run_server)
+
+    assert main(["--no-router", "serve"]) == 0
+    assert captured["router_mode"] is False
+
+
 def test_completion_parser_accepts_both_shells() -> None:
     parser = build_parser()
 

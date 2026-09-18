@@ -113,12 +113,14 @@ class ServerRuntime:
         cwd: str | Path | None = None,
         provider: str | None = None,
         model: str | None = None,
+        router_mode: bool | None = None,
         backend_factory: BackendFactory | None = None,
     ) -> None:
         self.home = Path(home).expanduser().resolve()
         self.cwd = Path(cwd or Path.cwd()).expanduser().resolve()
         self._server_provider = provider
         self._server_model = model
+        self._server_router = router_mode
         self._server_provider = self._config(None, None).provider
         self.backend_factory = backend_factory
         self.manager = SessionManager(self.home)
@@ -345,6 +347,7 @@ class ServerRuntime:
             cli_model=model if model is not None else self._server_model,
             cli_yolo=None,
             cli_token_budget=None,
+            cli_router=self._server_router,
         )
 
 
