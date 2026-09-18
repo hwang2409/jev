@@ -38,23 +38,47 @@ def routed(
 
 
 def test_catalog_uses_structured_criteria_for_confusable_tools() -> None:
+    names = (
+        "read",
+        "write",
+        "edit",
+        "fetch",
+        "websearch",
+        "bash",
+        "exec",
+        "automation",
+        "skill",
+        "todo",
+        "run_background",
+        "task_output",
+        "task_kill",
+        "agent",
+        "agent_status",
+        "agent_output",
+        "agent_send",
+    )
     catalog = route_module.build_catalog(
-        [
-            {"name": "read", "description": "Read a file"},
-            {"name": "write", "description": "Write a file"},
-            {"name": "edit", "description": "Edit a file"},
-            {"name": "fetch", "description": "Fetch a URL"},
-            {"name": "websearch", "description": "Search the web"},
-            {"name": "bash", "description": "Run a shell command"},
-            {"name": "exec", "description": "Run a shell command"},
-        ]
+        [{"name": name, "description": f"{name} description"} for name in names]
     )
 
     assert catalog["bash"] == {
-        "what": "Run a shell command",
-        "not_for": "editing a file in place; use edit",
-        "examples": ["Run pytest tests/test_router_auto.py."],
+        "what": "bash description",
+        "not_for": "Editing a file in place; use edit. Use exec for fixed-cwd commands with timeout or output limits, and run_background for long-running commands.",
+        "examples": [
+            "Use bash to cd into the reports directory, then list its files in the next shell call.",
+        ],
     }
+    assert "timeout" in catalog["exec"]["examples"][0]
+    assert "task_id" in catalog["run_background"]["examples"][0]
+    assert "cursor" in catalog["task_output"]["examples"][0]
+    assert "transcript" in catalog["agent_output"]["examples"][0]
+    examples = [
+        example
+        for entry in catalog.values()
+        for example in entry["examples"]
+    ]
+    assert len(examples) == len(set(examples))
+    assert catalog["task_output"]["examples"] != catalog["agent_output"]["examples"]
     assert all(
         set(entry) == {"what", "not_for", "examples"}
         and 1 <= len(entry["examples"]) <= 2
