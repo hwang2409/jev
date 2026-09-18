@@ -31,8 +31,12 @@ Claude call. Otherwise stock summarization runs on the smaller range.
      non-candidate tool outcomes>], "items": [{"id", "kind", "tool",
      "excerpt"}...]}`. Each recent action is one line, such as
      `write keyfacts.txt: ok`. Excerpt = first 200 chars of the result text.
-   - questions: per item id, one Noul: "Will the details of item <id> be
-     needed to finish the task, beyond what the excerpt already shows?"
+   - questions: per item id, one Noul: "Are this item's details needed to
+     finish the task and not preserved elsewhere?"
+     Keep an item when its details are needed to finish the task and are not
+     preserved elsewhere. Drop an item only when its details are unnecessary
+     for finishing the task or preserved in durable records, later tool
+     results, or assistant text.
    - Same auth/retry/error conventions as `route_step`.
 4. Drop rule: keep-probability < 0.35 -> tombstone. Tombstone REPLACES the
    tool result's content blocks with one text block:
