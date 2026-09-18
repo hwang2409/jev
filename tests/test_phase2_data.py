@@ -116,9 +116,8 @@ def test_hard_steps_do_not_copy_expected_description_phrases():
         )
         step_words = re.findall(r"[a-z0-9]+", case["step"].lower())
         phrases = {
-            " ".join(description_words[index:index + length])
-            for length in range(4, len(description_words) + 1)
-            for index in range(len(description_words) - length + 1)
+            " ".join(description_words[index:index + 4])
+            for index in range(len(description_words) - 3)
         }
         assert not any(
             " ".join(step_words[index:index + 4]) in phrases
