@@ -936,6 +936,8 @@ BUILTIN_SUBJECTS = {
     "bash": "command",
     "calendar_create": "calendar",
     "exec": "command",
+    "memory_read": "path",
+    "memory_search": "query",
     "run_background": "command",
     "read": "path",
     "write": "path",
