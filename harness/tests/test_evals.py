@@ -127,6 +127,114 @@ def test_tasks_have_required_shape_and_safe_prompts() -> None:
         assert not words & forbidden, task["id"]
 
 
+def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
+    tasks = load_tasks(Path(__file__).parents[1] / "evals" / "tasks_tools.jsonl")
+
+    assert len(tasks) == 8
+    assert {task["id"] for task in tasks} == {
+        "store-then-recall",
+        "seeded-recall",
+        "two-note-synthesis",
+        "append-then-latest",
+        "calendar-window",
+        "free-slot-reasoning",
+        "create-then-verify",
+        "cross-surface",
+    }
+    assert tasks[0]["required_call_sequence"] == [
+        {"tool": "memory_store", "args_contains": "launch-review"},
+        {"tool": "memory_search", "args_contains": "Tuesday"},
+    ]
+    assert tasks[6]["checks_calendar_created"] == [
+        {"title_contains": "Project kickoff", "start": "2026-09-19T16:00:00"}
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("memory_seed", {"../outside.md": "no"}),
+        ("memory_seed", {"note.txt": "wrong suffix"}),
+        ("calendar_seed", [{"title": "missing fields"}]),
+        ("checks_calendar_created", [{"title_contains": "missing start"}]),
+    ],
+)
+def test_load_tasks_rejects_invalid_tool_fixture_fields(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    path = tmp_path / "tasks.jsonl"
+    path.write_text(
+        json.dumps(
+            {
+                "id": "task",
+                "prompt": "prompt",
+                "setup": {},
+                "checks": [],
+                "max_turns": 1,
+                field: value,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=field):
+        load_tasks(path)
+
+
+def test_memory_seed_roundtrip_reindexes_and_cleans_up(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "corpus"
+    root.mkdir()
+    config = tmp_path / "pausanias.toml"
+    config.write_text(
+        f'database = "{tmp_path / "index.sqlite3"}"\n\n'
+        '[[roots]]\n'
+        'id = "fixture"\n'
+        f'path = "{root}"\n'
+        'project = "fixture"\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("JEV_EVAL_MEMORY_ROOT", str(root))
+    monkeypatch.setenv("JEV_EVAL_MEMORY_CONFIG", str(config))
+
+    with eval_runner._prepare_task_environment(
+        {"memory_seed": {"notes/seed.md": "# Seed\n\nA durable fact.\n"}},
+        tmp_path / "scratch",
+    ) as (_environment, memory_root):
+        assert memory_root == root
+        assert (root / "notes/seed.md").read_text(encoding="utf-8").endswith(
+            "A durable fact.\n"
+        )
+    assert not (root / "notes/seed.md").exists()
+
+
+def test_verify_calendar_created_checks_title_and_start(tmp_path: Path) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    (scratch / "calendar-seed.json.out").write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Project kickoff",
+                    "start": "2026-09-19T16:00:00",
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert eval_runner._verify_calendar_created(
+        scratch,
+        [{"title_contains": "kickoff", "start": "2026-09-19T16:00:00"}],
+    ) == [True]
+    assert eval_runner._verify_calendar_created(
+        scratch,
+        [{"title_contains": "kickoff", "start": "2026-09-19T17:00:00"}],
+    ) == [False]
+
+
 def test_parse_events_sums_usage_and_route_stats() -> None:
     events = [
         {"type": "turn_start", "prompt": "do it"},

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -53,6 +54,58 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
                 raise ValueError(
                     "forbidden_tools must be a list of nonempty tool names"
                 )
+            memory_seed = task.get("memory_seed")
+            if memory_seed is not None and (
+                type(memory_seed) is not dict
+                or any(
+                    type(seed_path) is not str
+                    or not seed_path
+                    or Path(seed_path).is_absolute()
+                    or ".." in Path(seed_path).parts
+                    or not seed_path.endswith(".md")
+                    or type(content) is not str
+                    for seed_path, content in memory_seed.items()
+                )
+            ):
+                raise ValueError("memory_seed must map safe markdown paths to strings")
+            calendar_seed = task.get("calendar_seed")
+            raw_events = (
+                calendar_seed.get("events")
+                if isinstance(calendar_seed, dict)
+                else calendar_seed
+            )
+            if calendar_seed is not None and (
+                not isinstance(raw_events, list)
+                or any(
+                    type(event) is not dict
+                    or set(event) != {"title", "start", "end", "calendar", "all_day"}
+                    or any(
+                        type(event[key]) is not str
+                        for key in ("title", "start", "end", "calendar")
+                    )
+                    or type(event["all_day"]) is not bool
+                    for event in raw_events
+                )
+            ):
+                raise ValueError(
+                    "calendar_seed must be an events list with valid event objects"
+                )
+            checks_calendar_created = task.get("checks_calendar_created")
+            if checks_calendar_created is not None and (
+                type(checks_calendar_created) is not list
+                or any(
+                    type(check) is not dict
+                    or set(check) != {"title_contains", "start"}
+                    or type(check["title_contains"]) is not str
+                    or not check["title_contains"]
+                    or type(check["start"]) is not str
+                    or not check["start"]
+                    for check in checks_calendar_created
+                )
+            ):
+                raise ValueError(
+                    "checks_calendar_created must contain title_contains and start"
+                )
             tasks.append(task)
     return tasks
 
@@ -84,11 +137,22 @@ def build_command(task_id: str, prompt: str, max_turns: int, mode: str) -> list[
     return command
 
 
-def verify_checks(scratch_dir: Path, checks: Sequence[Mapping[str, str]]) -> list[bool]:
+def verify_checks(
+    scratch_dir: Path,
+    checks: Sequence[Mapping[str, str]],
+    memory_root: Path | None = None,
+) -> list[bool]:
     """Verify task checks against files in a scratch directory."""
     results: list[bool] = []
     for check in checks:
-        path = scratch_dir / check["path"]
+        relative_path = check["path"]
+        if relative_path.startswith("memory/"):
+            if memory_root is None:
+                results.append(False)
+                continue
+            path = memory_root / relative_path.removeprefix("memory/")
+        else:
+            path = scratch_dir / relative_path
         try:
             content = path.read_text(encoding="utf-8")
         except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError):
@@ -310,18 +374,21 @@ def run_subprocess(
     *,
     timeout: int = RUN_TIMEOUT_SECONDS,
     runner: Callable[..., Any] | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run a command and tee its stdout into the event stream file."""
     if runner is not None:
         try:
-            completed = runner(
-                list(command),
-                cwd=str(cwd),
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
+            runner_args: dict[str, Any] = {
+                "cwd": str(cwd),
+                "capture_output": True,
+                "text": True,
+                "timeout": timeout,
+                "check": False,
+            }
+            if env is not None:
+                runner_args["env"] = dict(env)
+            completed = runner(list(command), **runner_args)
         except subprocess.TimeoutExpired as exc:
             events_path.write_text(_output_text(exc.output), encoding="utf-8")
             return {
@@ -345,6 +412,7 @@ def run_subprocess(
             stdout=events_file,
             stderr=subprocess.PIPE,
             text=True,
+            env=dict(env) if env is not None else None,
         )
         try:
             _, stderr = process.communicate(timeout=timeout)
@@ -373,29 +441,132 @@ def _write_setup(scratch_dir: Path, setup: Mapping[str, str]) -> None:
         path.write_text(content, encoding="utf-8")
 
 
+def _memory_config_path() -> Path:
+    for name in ("JEV_EVAL_MEMORY_CONFIG", "PAUSANIAS_CONFIG"):
+        configured = os.environ.get(name)
+        if configured:
+            return Path(configured)
+    raise ValueError(
+        "memory_seed requires JEV_EVAL_MEMORY_CONFIG or PAUSANIAS_CONFIG"
+    )
+
+
+def _safe_memory_path(root: Path, relative: str) -> Path:
+    target = (root / relative).resolve()
+    if root.resolve() not in target.parents:
+        raise ValueError(f"memory seed path escapes memory root: {relative}")
+    return target
+
+
+def _reindex_memory(config: Path) -> None:
+    subprocess.run(
+        [sys.executable, "-m", "pausanias", "--config", str(config), "index"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@contextlib.contextmanager
+def _prepare_task_environment(
+    task: Mapping[str, Any], scratch_dir: Path
+) -> Iterator[tuple[dict[str, str], Path | None]]:
+    """Seed task-only external fixtures and return the child environment."""
+
+    environment = dict(os.environ)
+    memory_root_value = os.environ.get("JEV_EVAL_MEMORY_ROOT")
+    memory_root = Path(memory_root_value) if memory_root_value else None
+    backups: dict[Path, bytes | None] = {}
+    config: Path | None = None
+    try:
+        memory_seed = task.get("memory_seed")
+        if memory_seed:
+            if memory_root is None:
+                raise ValueError("memory_seed requires JEV_EVAL_MEMORY_ROOT")
+            memory_root.mkdir(parents=True, exist_ok=True)
+            config = _memory_config_path()
+            for relative, content in memory_seed.items():
+                target = _safe_memory_path(memory_root, relative)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                backups[target] = target.read_bytes() if target.exists() else None
+                target.write_text(content, encoding="utf-8")
+            _reindex_memory(config)
+
+        calendar_seed = task.get("calendar_seed")
+        if calendar_seed is not None:
+            seed_path = scratch_dir / "calendar-seed.json"
+            seed_path.write_text(
+                json.dumps(calendar_seed, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            environment["ZETA_CALENDAR_ADAPTER"] = f"fake:{seed_path}"
+        yield environment, memory_root
+    finally:
+        if backups:
+            assert memory_root is not None
+            for target, original in backups.items():
+                if original is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.write_bytes(original)
+            if config is not None:
+                _reindex_memory(config)
+
+
+def _verify_calendar_created(
+    scratch_dir: Path,
+    checks: Sequence[Mapping[str, str]],
+) -> list[bool]:
+    seed_path = scratch_dir / "calendar-seed.json"
+    output_path = Path(f"{seed_path}.out")
+    try:
+        created = json.loads(output_path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, IsADirectoryError, UnicodeDecodeError, json.JSONDecodeError):
+        return [False for _ in checks]
+    if not isinstance(created, list):
+        return [False for _ in checks]
+    return [
+        any(
+            isinstance(event, dict)
+            and check["title_contains"] in event.get("title", "")
+            and event.get("start") == check["start"]
+            for event in created
+        )
+        for check in checks
+    ]
+
+
 def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, Any]:
     task_id = task["id"]
     scratch_dir = run_root / f"{task_id}-{mode}"
     scratch_dir.mkdir(parents=True, exist_ok=True)
-    _write_setup(scratch_dir, task["setup"])
+    _write_setup(scratch_dir, task.get("setup", {}))
     command = build_command(task_id, task["prompt"], task["max_turns"], mode)
     events_path = scratch_dir / "events.jsonl"
     started = time.monotonic()
-    process = run_subprocess(command, scratch_dir, events_path)
+    with _prepare_task_environment(task, scratch_dir) as (environment, memory_root):
+        process = run_subprocess(
+            command, scratch_dir, events_path, env=environment
+        )
+        events = read_events(events_path)
+        summary = parse_events(events)
+        checks_passed = verify_checks(scratch_dir, task["checks"], memory_root)
+        checks_calendar_created = task.get("checks_calendar_created")
+        if checks_calendar_created is not None:
+            checks_passed.extend(
+                _verify_calendar_created(scratch_dir, checks_calendar_created)
+            )
+        required_call_sequence = task.get("required_call_sequence")
+        forbidden_tools = task.get("forbidden_tools")
+        if required_call_sequence is not None or forbidden_tools is not None:
+            sequence_passed = required_call_sequence is None or contains_ordered_subsequence(
+                qualified_tool_calls(events), required_call_sequence
+            )
+            forbidden_passed = forbidden_tools is None or not contains_forbidden_tool(
+                events, forbidden_tools
+            )
+            checks_passed.append(sequence_passed and forbidden_passed)
     wall_seconds = time.monotonic() - started
-    events = read_events(events_path)
-    summary = parse_events(events)
-    checks_passed = verify_checks(scratch_dir, task["checks"])
-    required_call_sequence = task.get("required_call_sequence")
-    forbidden_tools = task.get("forbidden_tools")
-    if required_call_sequence is not None or forbidden_tools is not None:
-        sequence_passed = required_call_sequence is None or contains_ordered_subsequence(
-            qualified_tool_calls(events), required_call_sequence
-        )
-        forbidden_passed = forbidden_tools is None or not contains_forbidden_tool(
-            events, forbidden_tools
-        )
-        checks_passed.append(sequence_passed and forbidden_passed)
     completed = process["returncode"] == 0 and summary["final_message_present"]
     return {
         "task_id": task_id,
@@ -500,6 +671,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--tasks", nargs="+", help="task ids, separated by spaces or commas"
     )
+    parser.add_argument(
+        "--tasks-file",
+        type=Path,
+        default=TASKS_PATH,
+        help="task JSONL file",
+    )
     parser.add_argument("--out", help="results JSON path")
     args = parser.parse_args(argv)
     modes = ("router", "auto", "stock") if args.mode == "both" else (args.mode,)
@@ -509,7 +686,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    tasks = load_tasks()
+    tasks = load_tasks(args.tasks_file)
     if args.tasks:
         requested = {
             task_id.strip()
