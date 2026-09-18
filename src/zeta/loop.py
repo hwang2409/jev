@@ -213,6 +213,7 @@ class AgentLoop:
         agent_tree: AgentTree | None = None,
         background_owner: BackgroundAgentOwner | None = None,
         router_mode: bool = True,
+        jev_compaction: bool = True,
     ) -> None:
         if type(agent_depth) is not int or not 0 <= agent_depth <= MAX_AGENT_DEPTH:
             raise ValueError(f"agent depth must be between 0 and {MAX_AGENT_DEPTH}")
@@ -292,6 +293,7 @@ class AgentLoop:
             system_prompt=system_prompt,
             backend=backend,
             on_completion_success=on_completion_success,
+            jev_compaction=jev_compaction,
         )
         self.on_completion_success = on_completion_success
         self._on_plan_mode_change = on_plan_mode_change
@@ -1065,11 +1067,15 @@ class AgentLoop:
                 )
                 context = self.context_assembler.last_context
                 if context is not None and context.compacted:
+                    compaction_data = dict(
+                        self.context_assembler.last_compaction_data
+                    )
                     yield StreamEvent(
                         StreamEventType.COMPACTION_END,
                         data={
                             "turn": turn_number,
                             "token_count": context.token_count,
+                            **compaction_data,
                         },
                     )
                 completion = self.backend.complete(

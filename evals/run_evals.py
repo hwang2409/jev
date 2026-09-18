@@ -207,6 +207,12 @@ def parse_events(events: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
             if isinstance(usage, Mapping):
                 service = event.get("service", "claude")
                 add_usage(service if service == "jev" else "claude", usage)
+        elif event_type == "compaction_end":
+            triage = event.get("jev_triage")
+            if isinstance(triage, Mapping):
+                usage = triage.get("usage")
+                if isinstance(usage, Mapping):
+                    add_usage("jev", usage)
         elif event_type == "tool_result":
             name = event.get("name")
             content = event.get("content")

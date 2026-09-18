@@ -29,6 +29,8 @@ _zeta() {
         '--no-yolo[force prompts even when settings enable yolo]' \
         '--router[route tool choices through Jev]' \
         '--no-router[restore the full toolset]' \
+        '--jev-compaction[triage old tool results through Jev]' \
+        '--no-jev-compaction[disable Jev compaction triage]' \
         '--token-budget=[context token budget]:tokens:' \
         '--max-turns=[tool-use loop turn cap]:turns:' \
         '(-p --print)'{-p,--print}'[run one headless turn]:prompt:' \
@@ -145,7 +147,7 @@ def bash_script() -> str:
     if (( command_index > 0 && COMP_CWORD > command_index + 1 )); then
         verb="${COMP_WORDS[command_index+1]}"
     fi
-    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --token-budget --max-turns --print -p --format --system-prompt --append-system-prompt"
+    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --jev-compaction --no-jev-compaction --token-budget --max-turns --print -p --format --system-prompt --append-system-prompt"
     local commands="login serve session automation completion"
 
     if (( command_index == 0 )); then

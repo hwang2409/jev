@@ -61,7 +61,13 @@ async def drive_turn(
         _emit_jsonl(stdout, {"type": "turn_start", "prompt": prompt})
 
     async for event in loop.run_turn(prompt):
-        if event.type is StreamEventType.MESSAGE_END:
+        if event.type is StreamEventType.COMPACTION_START:
+            if format == "json":
+                _emit_jsonl(stdout, {"type": "compaction_start", **event.data})
+        elif event.type is StreamEventType.COMPACTION_END:
+            if format == "json":
+                _emit_jsonl(stdout, {"type": "compaction_end", **event.data})
+        elif event.type is StreamEventType.MESSAGE_END:
             usage = event.data.get("usage") if isinstance(event.data, dict) else None
             if format == "json" and isinstance(usage, dict) and usage:
                 _emit_jsonl(stdout, {"type": "usage", "usage": dict(usage)})

@@ -196,6 +196,22 @@ def test_parse_events_sums_usage_and_route_stats() -> None:
     assert result["final_message_present"] is True
 
 
+def test_parse_events_sums_jev_compaction_usage() -> None:
+    result = parse_events(
+        [
+            {
+                "type": "compaction_end",
+                "jev_triage": {
+                    "usage": {"input_tokens": 5, "output_tokens": 1}
+                },
+            }
+        ]
+    )
+
+    assert result["jev_input_tokens"] == 5
+    assert result["jev_output_tokens"] == 1
+
+
 @pytest.mark.asyncio
 async def test_parse_events_counts_only_real_unrouted_rejections(
     tmp_path: Path,

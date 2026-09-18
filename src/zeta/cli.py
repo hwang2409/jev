@@ -69,6 +69,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="route tool choices through Jev; --no-router restores the full toolset",
     )
     parser.add_argument(
+        "--jev-compaction",
+        dest="jev_compaction",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="triage old tool results through Jev before compaction",
+    )
+    parser.add_argument(
         "--token-budget",
         type=int,
         default=None,
@@ -207,6 +214,7 @@ def main(argv: list[str] | None = None) -> int:
             provider=args.serve_provider or args.provider,
             model=args.serve_model or args.model,
             router_mode=args.router,
+            jev_compaction=args.jev_compaction,
         )
         try:
             asyncio.run(run_server(server))

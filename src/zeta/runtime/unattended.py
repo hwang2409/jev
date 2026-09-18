@@ -30,12 +30,17 @@ def build_unattended_loop(
     )
     if session.metadata.skill_catalog is None:
         raise ValueError("unattended sessions require a skill catalog")
+    project_dir = discover_repo_root(Path(metadata.cwd)) / ".zeta"
+    loaded = load_settings(home=home, project_dir=project_dir)
     if router_mode is None:
-        project_dir = discover_repo_root(Path(metadata.cwd)) / ".zeta"
-        loaded = load_settings(home=home, project_dir=project_dir)
         router_mode = (
             True if loaded.settings.router is None else loaded.settings.router
         )
+    jev_compaction = (
+        True
+        if loaded.settings.jev_compaction is None
+        else loaded.settings.jev_compaction
+    )
     skill_catalog = SkillCatalog.from_snapshot(session.metadata.skill_catalog)
     # Automation sessions never mount user-defined agents, even if metadata
     # was modified outside the restricted runner.
@@ -60,5 +65,6 @@ def build_unattended_loop(
         skip_mcp_mount=True,
         system_prompt=metadata.system_prompt,
         router_mode=router_mode,
+        jev_compaction=jev_compaction,
         on_completion_success=lambda: SessionManager(home).touch(metadata),
     )
