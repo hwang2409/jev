@@ -794,7 +794,7 @@ class ContextAssembler:
         }
         return Message(
             MessageRole.TOOL_RESULT,
-            [TextContent(text)],
+            [TextContent(text), *message.content[1:]],
             tool_result=type(result)(
                 result.tool_call_id,
                 text,
@@ -849,6 +849,11 @@ class ContextAssembler:
         items: list[_ContextItem] = []
         emitted_marker_ids: set[str] = set()
         failed_tool_call_ids: set[str] = set()
+        revisions = {
+            entry.data["target_id"]: Message.from_dict(entry.data["message"])
+            for entry in entries
+            if entry.type == "message_revision"
+        }
         for entry in entries:
             marker = markers_by_start.get(entry.seq)
             if marker is not None:
@@ -860,7 +865,9 @@ class ContextAssembler:
                 continue
             if entry.type != "message":
                 continue
-            message = Message.from_dict(entry.data["message"])
+            message = revisions.get(
+                entry.id, Message.from_dict(entry.data["message"])
+            )
             if message.metadata.get(FAILED_TURN_MARKER):
                 failed_tool_call_ids.update(
                     block.tool_call.id

@@ -635,6 +635,14 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                 jev_triage = entry.data.get("jev_triage")
                 if jev_triage is not None and type(jev_triage) is not dict:
                     raise ValueError("compaction jev_triage must be an object")
+            elif entry.type == "message_revision":
+                target_id = entry.data.get("target_id")
+                message = entry.data.get("message")
+                if type(target_id) is not str or not target_id:
+                    raise ValueError("message revision target id must be a string")
+                if type(message) is not dict:
+                    raise ValueError("message revision must contain an object")
+                Message.from_dict(message)
             elif entry.type == "warning":
                 if type(entry.data.get("message")) is not str:
                     raise ValueError("warning message must be a string")
@@ -776,6 +784,28 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
 
     def append_message(self, message: Message, *, parent_id: str | None = None) -> ConversationEntry:
         return self._append_row("message", {"message": message.to_dict()}, parent_id)
+
+    def append_message_revision(
+        self, target_id: str, message: Message
+    ) -> ConversationEntry:
+        """Persist a replacement for one active message without rewriting the log."""
+
+        if type(target_id) is not str or not target_id:
+            raise ValueError("message revision target id must be a nonempty string")
+        with self._append_lock():
+            self._load()
+            branch = self.replay()
+            target = next(
+                (entry for entry in branch if entry.id == target_id), None
+            )
+            if target is None or target.type != "message":
+                raise ValueError("message revision target is not an active message")
+            return self._snapshot_entry(
+                self._append_row_unlocked(
+                    "message_revision",
+                    {"target_id": target_id, "message": message.to_dict()},
+                )
+            )
 
     def append_agent_notification(
         self,
@@ -1195,10 +1225,20 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
         )
 
     def messages(self) -> list[Message]:
+        branch = self.replay()
+        revisions = {
+            entry.data["target_id"]: Message.from_dict(entry.data["message"])
+            for entry in branch
+            if entry.type == "message_revision"
+        }
         messages: list[Message] = []
-        for entry in self.replay():
+        for entry in branch:
             if entry.type == "message":
-                messages.append(Message.from_dict(entry.data["message"]))
+                messages.append(
+                    revisions.get(
+                        entry.id, Message.from_dict(entry.data["message"])
+                    )
+                )
         return messages
 
     @property

@@ -382,14 +382,7 @@ class AgentLoop:
                 schema for schema in self.tool_schemas if schema.get("name") != "route"
             ]
         elif self.router_style == "auto":
-            if self._router_auto_fail_open:
-                active = [
-                    schema
-                    for schema in self.tool_schemas
-                    if schema.get("name") not in {"route", "invoke"}
-                ]
-            else:
-                active = self._auto_tool_surface
+            active = self._auto_tool_surface
         elif self._router_fail_open:
             active = list(self.tool_schemas)
         else:
@@ -423,7 +416,16 @@ class AgentLoop:
             return
         if self.router_style == "auto":
             self._router_batch_has_route = False
-            self._router_batch_allowed_tools = set(self._router_auto_allowed_tools)
+            if self._router_auto_fail_open:
+                self._router_batch_allowed_tools = {
+                    name
+                    for name in self.tool_registry.registered_names
+                    if name not in {"route", "invoke"}
+                }
+            else:
+                self._router_batch_allowed_tools = set(
+                    self._router_auto_allowed_tools
+                )
             return
         self._router_batch_has_route = any(call.name == "route" for call in calls)
         self._router_batch_allowed_tools = {
@@ -450,8 +452,11 @@ class AgentLoop:
     def _router_allows_tool(self, tool_name: str) -> bool:
         if not self.router_mode:
             return True
-        if self.router_style == "auto" and self._router_auto_fail_open:
-            return True
+        if self.router_style == "auto":
+            allowed = self._router_batch_allowed_tools
+            if allowed is None:
+                allowed = self._router_auto_allowed_tools
+            return tool_name in allowed
         if tool_name == "route" or self._router_fail_open:
             return True
         allowed = self._router_batch_allowed_tools
@@ -470,6 +475,19 @@ class AgentLoop:
                 "invoke requires a routed tool name and args object",
                 is_error=True,
                 structured_content={"error_kind": "invalid_invoke"},
+            )
+            return self.tool_registry.govern_tool_result(tool_call, result)
+        if self.router_mode and self.router_style == "auto":
+            if self._router_allows_tool(tool_call.name):
+                return None
+            self.unrouted_attempts += 1
+            _logger.warning("unrouted tool attempt: %s", tool_call.name)
+            result = ToolResult(
+                tool_call.id,
+                "not available this turn — state what you need in text for the next turn: "
+                + tool_call.name,
+                is_error=True,
+                structured_content={"error_kind": "unrouted_tool"},
             )
             return self.tool_registry.govern_tool_result(tool_call, result)
         if (
@@ -560,9 +578,22 @@ class AgentLoop:
                 self._auto_catalog(),
             )
         except Exception as exc:  # noqa: BLE001 - auto routing fails open
-            self._router_auto_allowed_tools = set()
+            full_catalog = [
+                schema
+                for schema in self.tool_registry.schemas
+                if schema.get("name") not in {"route", "invoke"}
+            ]
+            self._router_auto_allowed_tools = {
+                name
+                for name in self.tool_registry.registered_names
+                if name not in {"route", "invoke"}
+            }
             self._router_auto_fail_open = True
-            return [], {"error": str(exc), "advertised": []}
+            return full_catalog, {
+                "error": str(exc),
+                "advertised": sorted(self._router_auto_allowed_tools),
+                "fail_open": True,
+            }
         if result.needs_tool < 0.35:
             names: list[str] = []
         elif result.confidence >= 0.8:
@@ -594,6 +625,7 @@ class AgentLoop:
             "confidence": result.confidence,
             "needs_tool": result.needs_tool,
             "advertised": names,
+            "direct_answer": not names and result.needs_tool < 0.35,
             "usage": dict(result.usage),
         }
 
@@ -617,37 +649,33 @@ class AgentLoop:
             )
         return "\n".join(lines)
 
-    def _add_auto_schema_text(
-        self, messages: Sequence[Message], schemas: Sequence[ToolSchema]
-    ) -> list[Message]:
-        if not schemas:
-            return list(messages)
-        target_index = next(
-            (
-                index
-                for index in range(len(messages) - 1, -1, -1)
-                if messages[index].role is MessageRole.TOOL_RESULT
-            ),
-            next(
-                (
-                    index
-                    for index in range(len(messages) - 1, -1, -1)
-                    if messages[index].role is MessageRole.USER
-                ),
-                None,
-            ),
+    def _persist_auto_schema_text(
+        self,
+        schemas: Sequence[ToolSchema],
+        routing_decision: Mapping[str, object],
+    ) -> None:
+        branch = self.store.replay()
+        target_entry = next(
+            (entry for entry in reversed(branch) if entry.type == "message"),
+            None,
         )
-        if target_index is None:
-            return list(messages)
-        target = messages[target_index]
-        updated = replace(
-            target,
-            content=[*target.content, TextContent(self._schema_text(schemas))],
+        if target_entry is None:
+            return
+        target = self.store.messages()[-1]
+        text = (
+            "no tool is needed this turn — answer directly"
+            if routing_decision.get("direct_answer") is True
+            else self._schema_text(schemas)
         )
-        return [
-            updated if index == target_index else message
-            for index, message in enumerate(messages)
-        ]
+        if any(
+            isinstance(block, TextContent) and block.text == text
+            for block in target.content
+        ):
+            return
+        self.store.append_message_revision(
+            target_entry.id,
+            replace(target, content=[*target.content, TextContent(text)]),
+        )
 
     def _expand_auto_invoke(self, call: ToolCall) -> ToolCall:
         if (
@@ -1272,18 +1300,13 @@ class AgentLoop:
             completion_succeeded = False
             provider_error: ErrorInfo | None = None
             try:
-                if self.context_assembler.needs_compaction():
-                    yield StreamEvent(
-                        StreamEventType.COMPACTION_START,
-                        data={"turn": turn_number},
-                    )
-                context_messages = await self.context_assembler.assemble(
-                    backend=self.backend
-                )
                 routing_decision: dict[str, object] = {}
                 if self.router_mode and self.router_style == "auto":
                     routed_schemas, routing_decision = await self._prepare_auto_route(
                         user_text
+                    )
+                    self._persist_auto_schema_text(
+                        routed_schemas, routing_decision
                     )
                     usage = routing_decision.get("usage")
                     yield StreamEvent(
@@ -1294,9 +1317,14 @@ class AgentLoop:
                             "routing_decision": routing_decision,
                         },
                     )
-                    context_messages = self._add_auto_schema_text(
-                        context_messages, routed_schemas
+                if self.context_assembler.needs_compaction():
+                    yield StreamEvent(
+                        StreamEventType.COMPACTION_START,
+                        data={"turn": turn_number},
                     )
+                context_messages = await self.context_assembler.assemble(
+                    backend=self.backend
+                )
                 context = self.context_assembler.last_context
                 if context is not None and context.compacted:
                     compaction_data = dict(
