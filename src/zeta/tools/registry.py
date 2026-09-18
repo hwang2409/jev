@@ -383,6 +383,7 @@ class ToolDefinition:
     parallel_safe: bool = False
     validate_arguments: bool = True
     requires_approval: bool = True
+    approval_denial_is_cancellation: bool = False
     # Argument that ``tool(pattern)`` approval rules match against (ZETA-86).
     approval_subject: str | None = None
 
@@ -523,6 +524,7 @@ class ToolRegistry:
         parallel_safe: bool = False,
         validate_arguments: bool = True,
         requires_approval: bool = True,
+        approval_denial_is_cancellation: bool = False,
         handler_factory: ToolHandlerFactory | None = None,
         approval_subject: str | None = None,
     ) -> ToolDefinition:
@@ -559,6 +561,7 @@ class ToolRegistry:
             parallel_safe=parallel_safe,
             validate_arguments=validate_arguments,
             requires_approval=requires_approval,
+            approval_denial_is_cancellation=approval_denial_is_cancellation,
             approval_subject=approval_subject,
         )
         self._tools[name] = definition
@@ -778,11 +781,14 @@ class ToolRegistry:
             persist_request=_persist_approval,
         )
         if gate_result is not None:
+            denied = gate_result.content == "tool execution denied"
             if (
                 self.enforce_approvals
-                and gate_result.content == "tool execution denied"
+                and denied
             ):
                 self.denied_tools.append(tool_call.name)
+            if definition.approval_denial_is_cancellation and denied:
+                return finalize(_legacy_result(_canceled_result(tool_call.id)))
             return finalize(_legacy_result(gate_result))
         if _scope_signal is not None:
             execution_signal = _scope_signal
@@ -1142,6 +1148,8 @@ def _validate_schema(value: Any, schema: Mapping[str, Any], path: str) -> None:
 
 
 def _matches_type(value: Any, expected: object) -> bool:
+    if type(expected) is list:
+        return any(_matches_type(value, item) for item in expected)
     if expected == "object":
         return isinstance(value, dict)
     if expected == "array":
@@ -1157,6 +1165,16 @@ def _matches_type(value: Any, expected: object) -> bool:
     if expected == "null":
         return value is None
     return False
+
+
+def _valid_schema_types(expected: object) -> bool:
+    if type(expected) is str:
+        return expected in _SCHEMA_TYPES
+    return (
+        type(expected) is list
+        and bool(expected)
+        and all(type(item) is str and item in _SCHEMA_TYPES for item in expected)
+    )
 
 
 def _schema_equal(left: Any, right: Any) -> bool:
@@ -1203,9 +1221,7 @@ def _validate_schema_definition(schema: Mapping[str, Any], path: str) -> None:
         names = ", ".join(sorted(unsupported))
         raise ValueError(f"unsupported schema keywords at {path}: {names}")
     expected_type = schema.get("type")
-    if expected_type is not None and (
-        type(expected_type) is not str or expected_type not in _SCHEMA_TYPES
-    ):
+    if expected_type is not None and not _valid_schema_types(expected_type):
         raise ValueError(f"unsupported schema type at {path}")
     description = schema.get("description")
     if description is not None and type(description) is not str:

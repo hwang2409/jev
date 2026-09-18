@@ -25,6 +25,10 @@ the tool handles these states:
 event reads accept ISO-8601 `start` and `end` values. A window cannot exceed
 92 days. A named calendar uses an exact name match.
 
+naive ISO-8601 inputs use the process local time zone. Inputs with an explicit
+offset keep that offset. All-day events return date-only `start` and `end`
+values. Floating events return naive date-times with `floating` set to `true`.
+
 ## live smoke test
 
 run this command on macOS from the repository root:

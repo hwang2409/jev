@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from datetime import datetime
+import os
+import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,63 @@ def structured(result: dict[str, object]) -> dict[str, object]:
     return value
 
 
+class FakeNSDate:
+    @staticmethod
+    def dateWithTimeIntervalSince1970_(timestamp: float) -> FakeNSDate:
+        return FakeNSDate(timestamp)
+
+    def __init__(self, timestamp: float) -> None:
+        self.timestamp = timestamp
+
+    def timeIntervalSince1970(self) -> float:
+        return self.timestamp
+
+
+class FakeEventKitEvent:
+    def __init__(
+        self,
+        *,
+        title: str,
+        start: datetime,
+        end: datetime,
+        calendar: str,
+        notes: str | None,
+        timezone_value: object | None,
+        all_day: bool = False,
+    ) -> None:
+        self._title = title
+        self._start = FakeNSDate(start.timestamp())
+        self._end = FakeNSDate(end.timestamp())
+        self._calendar = calendar
+        self._notes = notes
+        self._timezone = timezone_value
+        self._all_day = all_day
+
+    def title(self) -> str:
+        return self._title
+
+    def startDate(self) -> FakeNSDate:
+        return self._start
+
+    def endDate(self) -> FakeNSDate:
+        return self._end
+
+    def calendar(self) -> object:
+        return type("Calendar", (), {"title": lambda _self: self._calendar})()
+
+    def location(self) -> None:
+        return None
+
+    def notes(self) -> str | None:
+        return self._notes
+
+    def timeZone(self) -> object | None:
+        return self._timezone
+
+    def isAllDay(self) -> bool:
+        return self._all_day
+
+
 @pytest.mark.asyncio
 async def test_events_lists_all_day_cross_midnight_and_named_calendar() -> None:
     adapter = FakeCalendarAdapter(
@@ -132,6 +191,9 @@ async def test_events_lists_all_day_cross_midnight_and_named_calendar() -> None:
             "calendar": "personal",
             "location": "home",
             "all_day": False,
+            "notes": None,
+            "floating": False,
+            "time_zone": None,
         }
     ]
 
@@ -156,6 +218,141 @@ async def test_events_lists_all_day_cross_midnight_and_named_calendar() -> None:
         adapter=adapter,
     )
     assert structured(result)["events"][0]["all_day"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments", "adapter_field"),
+    [
+        (
+            "calendar_events",
+            {
+                "start": "2026-01-01T00:00:00",
+                "end": "2026-01-02T00:00:00",
+                "calendar": None,
+                "extra": True,
+            },
+            "fetched",
+        ),
+        (
+            "calendar_events",
+            {
+                "start": "2026-01-01T00:00:00",
+                "end": "2026-01-02T00:00:00",
+            },
+            "fetched",
+        ),
+        (
+            "calendar_create",
+            {
+                "title": "Planning",
+                "start": "2026-01-01T00:00:00",
+                "end": "2026-01-02T00:00:00",
+                "calendar": None,
+                "notes": 42,
+            },
+            "saved",
+        ),
+    ],
+)
+async def test_registry_rejects_invalid_arguments_before_approval_or_adapter(
+    tmp_path: Path,
+    tool_name: str,
+    arguments: dict[str, object],
+    adapter_field: str,
+) -> None:
+    store = ConversationStore(tmp_path)
+    policy = ApprovalPolicy(store=store, default=ApprovalDecision.ASK)
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        skill_catalog=SkillCatalog.empty(),
+        approval_policy=policy,
+        approval_store=store,
+    )
+    calendar_module.register(registry)
+    adapter = FakeCalendarAdapter()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(calendar_module, "_event_store_adapter", lambda: adapter)
+    try:
+        result = await registry.execute(ToolCall("invalid-1", tool_name, arguments))
+    finally:
+        monkeypatch.undo()
+
+    assert result["isError"] is True
+    assert structured(result)["error"]["kind"] == "invalid_arguments"
+    assert getattr(adapter, adapter_field) is None
+    assert policy.pending_requests() == []
+
+
+def test_eventkit_conversion_preserves_notes_zones_and_floating_dates() -> None:
+    zone = UTC
+    zoned = FakeEventKitEvent(
+        title="zoned",
+        start=datetime(2026, 1, 2, 9, tzinfo=zone),
+        end=datetime(2026, 1, 2, 10, tzinfo=zone),
+        calendar="work",
+        notes="agenda",
+        timezone_value=zone,
+    )
+    floating = FakeEventKitEvent(
+        title="floating",
+        start=datetime(2026, 1, 2, 9),  # noqa: DTZ001 - fake floating EventKit data
+        end=datetime(2026, 1, 2, 10),  # noqa: DTZ001 - fake floating EventKit data
+        calendar="work",
+        notes=None,
+        timezone_value=None,
+    )
+    all_day = FakeEventKitEvent(
+        title="all day",
+        start=datetime(2026, 1, 2, tzinfo=zone),
+        end=datetime(2026, 1, 3, tzinfo=zone),
+        calendar="work",
+        notes="holiday",
+        timezone_value=zone,
+        all_day=True,
+    )
+
+    zoned_event = calendar_module.EventStoreAdapter._event_from_ek(zoned)
+    floating_event = calendar_module.EventStoreAdapter._event_from_ek(floating)
+    all_day_event = calendar_module.EventStoreAdapter._event_from_ek(all_day)
+
+    assert zoned_event.notes == "agenda"
+    assert zoned_event.start.tzinfo is zone
+    assert zoned_event.floating is False
+    assert zoned_event.time_zone == "UTC"
+    assert floating_event.start.tzinfo is None
+    assert floating_event.floating is True
+    assert all_day_event.all_day is True
+    assert all_day_event.start.tzinfo is None
+    assert calendar_module._event_dict(all_day_event)["start"] == "2026-01-02"
+    assert calendar_module._event_dict(all_day_event)["end"] == "2026-01-03"
+
+
+def test_eventkit_date_conversion_uses_process_timezone_for_naive_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = object.__new__(calendar_module.EventStoreAdapter)
+    adapter._nsdate = FakeNSDate
+    original_tz = os.environ.get("TZ")
+    try:
+        for zone, expected in (
+            ("UTC", 1767261600.0),
+            ("America/New_York", 1767279600.0),
+        ):
+            monkeypatch.setenv("TZ", zone)
+            time.tzset()
+            assert adapter._date(datetime(2026, 1, 1, 10)).timestamp == expected  # noqa: DTZ001 - test naive input
+
+        monkeypatch.setenv("TZ", "America/New_York")
+        time.tzset()
+        assert adapter._date(datetime.fromisoformat("2026-01-01T10:00:00+02:00")).timestamp == 1767254400.0
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
 
 
 @pytest.mark.asyncio
@@ -262,6 +459,15 @@ def test_create_is_approval_required_and_catalog_has_neutral_boundaries(
     assert "todo" in catalog["calendar_events"]["not_for"]
     assert "automation" in catalog["calendar_create"]["not_for"]
     assert "memory" in catalog["calendar_events"]["not_for"]
+    assert catalog["calendar_events"]["not_for"] == (
+        "Creating events (use calendar_create), Zeta task lists (use todo), "
+        "scheduled agent actions (use automation), or memory and search tools."
+    )
+    assert catalog["calendar_create"]["not_for"] == (
+        "Reading events (use calendar_events), Zeta task lists (use todo), "
+        "scheduled agent actions (use automation), or memory and search tools."
+    )
+    assert all(len(str(entry["not_for"])) <= 150 for entry in catalog.values())
     assert all("calendar" in example.lower() for entry in catalog.values() for example in entry["examples"])
 
 
@@ -298,5 +504,7 @@ async def test_create_uses_registry_approval_gate(tmp_path: Path) -> None:
         monkeypatch.undo()
 
     assert result["isError"] is True
-    assert "denied" in str(result["content"]).lower()
+    assert result["isCanceled"] is True
+    assert result["content"][0]["text"] == "tool execution canceled"
+    assert structured(result)["error"]["kind"] == "canceled"
     assert adapter.saved is None

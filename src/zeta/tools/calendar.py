@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 from dataclasses import asdict, dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import Any, Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ..types import StructuredToolResult
 from .registry import ToolRegistry, _error_result, _success_result, text_block
@@ -22,6 +24,10 @@ class CalendarError(ValueError):
     """A user-facing Calendar tool error."""
 
 
+class CalendarArgumentError(CalendarError):
+    """A Calendar tool argument does not match its declared schema."""
+
+
 @dataclass(frozen=True, slots=True)
 class CalendarEvent:
     title: str
@@ -30,6 +36,9 @@ class CalendarEvent:
     calendar_name: str
     location: str | None
     all_day: bool
+    notes: str | None = None
+    floating: bool = False
+    time_zone: str | None = None
 
 
 class CalendarAdapter(Protocol):
@@ -153,45 +162,91 @@ class EventStoreAdapter:
         return self._event_from_ek(event)
 
     def _date(self, value: datetime) -> Any:
-        return self._nsdate.dateWithTimeIntervalSince1970_(value.timestamp())
+        """Convert dates; naive ISO-8601 inputs use the process local time zone."""
+
+        if value.tzinfo is None:
+            timestamp = time.mktime(value.timetuple()) + value.microsecond / 1_000_000
+        else:
+            timestamp = value.timestamp()
+        return self._nsdate.dateWithTimeIntervalSince1970_(timestamp)
 
     @staticmethod
     def _event_from_ek(event: Any) -> CalendarEvent:
+        def event_timezone() -> tuple[tzinfo | None, str | None]:
+            timezone_method = getattr(event, "timeZone", None)
+            raw_timezone = timezone_method() if callable(timezone_method) else None
+            if raw_timezone is None:
+                return None, None
+            if isinstance(raw_timezone, tzinfo):
+                return raw_timezone, getattr(raw_timezone, "key", None) or raw_timezone.tzname(None)
+            name_method = getattr(raw_timezone, "name", None)
+            name = name_method() if callable(name_method) else None
+            if isinstance(name, str) and name:
+                try:
+                    return ZoneInfo(name), name
+                except ZoneInfoNotFoundError:
+                    pass
+            seconds_method = getattr(raw_timezone, "secondsFromGMTForDate_", None)
+            if callable(seconds_method):
+                seconds = seconds_method(event.startDate())
+                if isinstance(seconds, int):
+                    offset = timedelta(seconds=seconds)
+                    return timezone(offset), str(raw_timezone)
+            return UTC, str(raw_timezone)
+
+        event_tz, time_zone = event_timezone()
+
         def date_value(value: Any) -> datetime:
-            if isinstance(value, datetime):
-                return value
-            return datetime.fromtimestamp(value.timeIntervalSince1970(), UTC)
+            timestamp = (
+                value.timestamp()
+                if isinstance(value, datetime)
+                else value.timeIntervalSince1970()
+            )
+            if event_tz is None:
+                return datetime.fromtimestamp(timestamp, UTC).replace(tzinfo=None)
+            return datetime.fromtimestamp(timestamp, event_tz)
 
         calendar = event.calendar()
         location = event.location()
+        all_day = bool(event.isAllDay())
+        start = date_value(event.startDate())
+        end = date_value(event.endDate())
+        if all_day:
+            start = start.replace(tzinfo=None)
+            end = end.replace(tzinfo=None)
+        notes_method = getattr(event, "notes", None)
+        notes_value = notes_method() if callable(notes_method) else None
         return CalendarEvent(
             title=str(event.title() or ""),
-            start=date_value(event.startDate()),
-            end=date_value(event.endDate()),
+            start=start,
+            end=end,
             calendar_name=str(calendar.title() if calendar is not None else ""),
             location=str(location) if location else None,
-            all_day=bool(event.isAllDay()),
+            all_day=all_day,
+            notes=str(notes_value) if notes_value is not None else None,
+            floating=event_tz is None and not all_day,
+            time_zone=None if event_tz is None else time_zone,
         )
 
 
 def parse_iso8601(value: str) -> datetime:
     if not isinstance(value, str) or not value:
-        raise CalendarError("calendar dates must be ISO-8601 strings")
+        raise CalendarArgumentError("calendar dates must be ISO-8601 strings")
     try:
         return datetime.fromisoformat(value)
     except ValueError as exc:
-        raise CalendarError(f"invalid ISO-8601 calendar date: {value!r}") from exc
+        raise CalendarArgumentError(f"invalid ISO-8601 calendar date: {value!r}") from exc
 
 
 def _parse_window(start_value: str, end_value: str) -> tuple[datetime, datetime]:
     start = parse_iso8601(start_value)
     end = parse_iso8601(end_value)
     if (start.tzinfo is None) != (end.tzinfo is None):
-        raise CalendarError("start and end must both include a timezone or both omit it")
+        raise CalendarArgumentError("start and end must both include a timezone or both omit it")
     if end <= start:
-        raise CalendarError("calendar end must be after start")
+        raise CalendarArgumentError("calendar end must be after start")
     if end - start > MAX_WINDOW:
-        raise CalendarError("calendar window cannot exceed 92 days")
+        raise CalendarArgumentError("calendar window cannot exceed 92 days")
     return start, end
 
 
@@ -223,14 +278,62 @@ def _ensure_authorized(adapter: CalendarAdapter) -> None:
 
 def _event_dict(event: CalendarEvent) -> dict[str, object]:
     value = asdict(event)
-    value["start"] = event.start.isoformat()
-    value["end"] = event.end.isoformat()
+    if event.all_day:
+        value["start"] = event.start.date().isoformat()
+        value["end"] = event.end.date().isoformat()
+    else:
+        value["start"] = event.start.isoformat()
+        value["end"] = event.end.isoformat()
     value["calendar"] = value.pop("calendar_name")
     return value
 
 
-def _failure(exc: Exception) -> StructuredToolResult:
-    return _error_result(str(exc), kind="error")
+def _failure(exc: Exception, *, kind: str = "error") -> StructuredToolResult:
+    return _error_result(str(exc), kind=kind)
+
+
+def _validate_tool_arguments(
+    arguments: object,
+    *,
+    required: set[str],
+) -> dict[str, object]:
+    if type(arguments) is not dict:
+        raise CalendarArgumentError("arguments must be an object")
+    missing = sorted(required - set(arguments))
+    if missing:
+        raise CalendarArgumentError(f"missing required arguments: {', '.join(missing)}")
+    extra = sorted(set(arguments) - required)
+    if extra:
+        raise CalendarArgumentError(f"unexpected arguments: {', '.join(extra)}")
+    return arguments
+
+
+def _validate_events_arguments(arguments: object) -> dict[str, object]:
+    values = _validate_tool_arguments(
+        arguments,
+        required={"start", "end", "calendar"},
+    )
+    if type(values["start"]) is not str or type(values["end"]) is not str:
+        raise CalendarArgumentError("start and end must be ISO-8601 strings")
+    if values["calendar"] is not None and type(values["calendar"]) is not str:
+        raise CalendarArgumentError("calendar must be a string or null")
+    return values
+
+
+def _validate_create_arguments(arguments: object) -> dict[str, object]:
+    values = _validate_tool_arguments(
+        arguments,
+        required={"title", "start", "end", "calendar", "notes"},
+    )
+    if type(values["title"]) is not str or not values["title"]:
+        raise CalendarArgumentError("title must be a non-empty string")
+    if type(values["start"]) is not str or type(values["end"]) is not str:
+        raise CalendarArgumentError("start and end must be ISO-8601 strings")
+    if values["calendar"] is not None and type(values["calendar"]) is not str:
+        raise CalendarArgumentError("calendar must be a string or null")
+    if values["notes"] is not None and type(values["notes"]) is not str:
+        raise CalendarArgumentError("notes must be a string or null")
+    return values
 
 
 async def _calendar_events(
@@ -240,10 +343,9 @@ async def _calendar_events(
     adapter: CalendarAdapter | None = None,
 ) -> StructuredToolResult:
     try:
-        start, end = _parse_window(arguments["start"], arguments["end"])
-        calendar = arguments.get("calendar")
-        if calendar is not None and not isinstance(calendar, str):
-            raise CalendarError("calendar must be a string or null")
+        values = _validate_events_arguments(arguments)
+        start, end = _parse_window(values["start"], values["end"])
+        calendar = values["calendar"]
         active_adapter = adapter if adapter is not None else _event_store_adapter()
         _ensure_authorized(active_adapter)
         events = [
@@ -258,6 +360,8 @@ async def _calendar_events(
             text_block(json.dumps(payload, sort_keys=True)),
             structured_content=payload,
         )
+    except CalendarArgumentError as exc:
+        return _failure(exc, kind="invalid_arguments")
     except (CalendarError, KeyError, TypeError) as exc:
         return _failure(exc)
 
@@ -269,16 +373,11 @@ async def _calendar_create(
     adapter: CalendarAdapter | None = None,
 ) -> StructuredToolResult:
     try:
-        title = arguments["title"]
-        if not isinstance(title, str) or not title:
-            raise CalendarError("title must be a non-empty string")
-        start, end = _parse_window(arguments["start"], arguments["end"])
-        calendar = arguments.get("calendar")
-        notes = arguments.get("notes")
-        if calendar is not None and not isinstance(calendar, str):
-            raise CalendarError("calendar must be a string or null")
-        if notes is not None and not isinstance(notes, str):
-            raise CalendarError("notes must be a string or null")
+        values = _validate_create_arguments(arguments)
+        title = values["title"]
+        start, end = _parse_window(values["start"], values["end"])
+        calendar = values["calendar"]
+        notes = values["notes"]
         active_adapter = adapter if adapter is not None else _event_store_adapter()
         _ensure_authorized(active_adapter)
         event = active_adapter.save_event(title, start, end, calendar, notes)
@@ -287,6 +386,8 @@ async def _calendar_create(
             text_block(json.dumps(payload, sort_keys=True)),
             structured_content=payload,
         )
+    except CalendarArgumentError as exc:
+        return _failure(exc, kind="invalid_arguments")
     except (CalendarError, KeyError, TypeError) as exc:
         return _failure(exc)
 
@@ -297,7 +398,7 @@ def catalog_criteria() -> dict[str, dict[str, object]]:
     return {
         "calendar_events": {
             "what": "Read Apple Calendar events in a bounded time window.",
-            "not_for": "Zeta task lists (use todo), scheduled agent actions (use automation), or memory and search tools.",
+            "not_for": "Creating events (use calendar_create), Zeta task lists (use todo), scheduled agent actions (use automation), or memory and search tools.",
             "examples": [
                 "List Apple Calendar events for tomorrow.",
                 "Show work calendar events during the next week.",
@@ -305,7 +406,7 @@ def catalog_criteria() -> dict[str, dict[str, object]]:
         },
         "calendar_create": {
             "what": "Create one Apple Calendar event after approval.",
-            "not_for": "Zeta task lists (use todo), scheduled agent actions (use automation), or memory and search tools.",
+            "not_for": "Reading events (use calendar_events), Zeta task lists (use todo), scheduled agent actions (use automation), or memory and search tools.",
             "examples": [
                 "Create an Apple Calendar event for the design review.",
                 "Add a meeting to the work calendar with notes.",
@@ -319,7 +420,7 @@ def register(registry: ToolRegistry) -> None:
         "calendar_events",
         _calendar_events,
         requires_approval=False,
-        validate_arguments=False,
+        validate_arguments=True,
         description=(
             "Read Apple Calendar events in an ISO-8601 time window of at most 92 days. "
             "Optionally filter by an exact calendar name."
@@ -339,7 +440,8 @@ def register(registry: ToolRegistry) -> None:
         "calendar_create",
         _calendar_create,
         approval_subject="calendar",
-        validate_arguments=False,
+        validate_arguments=True,
+        approval_denial_is_cancellation=True,
         description=(
             "Create an Apple Calendar event. This changes external calendar data "
             "and requires approval."
