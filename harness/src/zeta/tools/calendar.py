@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import atexit
 import json
+import os
 import threading
 import time
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
+from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -250,7 +253,102 @@ def _parse_window(start_value: str, end_value: str) -> tuple[datetime, datetime]
     return start, end
 
 
-def _event_store_adapter() -> EventStoreAdapter:
+class FakeCalendarAdapter:
+    """Deterministic calendar adapter used by offline evaluations."""
+
+    def __init__(self, seed_path: Path) -> None:
+        self.seed_path = seed_path
+        try:
+            payload = json.loads(seed_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise CalendarError(f"could not load fake calendar seed: {seed_path}") from exc
+        raw_events = payload.get("events") if isinstance(payload, dict) else payload
+        if not isinstance(raw_events, list):
+            raise CalendarError("fake calendar seed must contain an events list")
+        self.events = [_fake_event(raw_event) for raw_event in raw_events]
+        self.created_log: list[dict[str, object]] = []
+        atexit.register(self._write_created_log)
+
+    def authorization_status(self) -> str:
+        return AUTHORIZED
+
+    def request_access(self) -> bool:
+        return True
+
+    def fetch_events(self, start: datetime, end: datetime) -> list[CalendarEvent]:
+        return list(self.events)
+
+    def save_event(
+        self,
+        title: str,
+        start: datetime,
+        end: datetime,
+        calendar: str | None,
+        notes: str | None,
+    ) -> CalendarEvent:
+        event = CalendarEvent(
+            title=title,
+            start=start,
+            end=end,
+            calendar_name=calendar or "default",
+            location=None,
+            all_day=False,
+            notes=notes,
+        )
+        self.events.append(event)
+        self.created_log.append(_event_dict(event))
+        self._write_created_log()
+        return event
+
+    def _write_created_log(self) -> None:
+        output_path = Path(f"{self.seed_path}.out")
+        output_path.write_text(
+            json.dumps(self.created_log, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+
+def _fake_event(raw_event: object) -> CalendarEvent:
+    if not isinstance(raw_event, dict):
+        raise CalendarError("fake calendar events must be objects")
+    required = {"title", "start", "end", "calendar", "all_day"}
+    if set(raw_event) != required:
+        raise CalendarError(
+            "fake calendar events require title, start, end, calendar, and all_day"
+        )
+    if any(not isinstance(raw_event[key], str) for key in ("title", "start", "end", "calendar")):
+        raise CalendarError("fake calendar event text fields must be strings")
+    if type(raw_event["all_day"]) is not bool:
+        raise CalendarError("fake calendar event all_day must be a boolean")
+    return CalendarEvent(
+        title=raw_event["title"],
+        start=parse_iso8601(raw_event["start"]),
+        end=parse_iso8601(raw_event["end"]),
+        calendar_name=raw_event["calendar"],
+        location=None,
+        all_day=raw_event["all_day"],
+    )
+
+
+_fake_adapters: dict[Path, FakeCalendarAdapter] = {}
+
+
+def _event_store_adapter() -> CalendarAdapter:
+    configured = os.environ.get("ZETA_CALENDAR_ADAPTER")
+    if configured is not None:
+        if not configured.startswith("fake:"):
+            raise CalendarError(
+                "ZETA_CALENDAR_ADAPTER must be unset or use fake:<path.json>"
+            )
+        raw_seed_path = configured.removeprefix("fake:")
+        if not raw_seed_path:
+            raise CalendarError("fake calendar adapter requires a seed file path")
+        seed_path = Path(raw_seed_path)
+        adapter = _fake_adapters.get(seed_path)
+        if adapter is None:
+            adapter = FakeCalendarAdapter(seed_path)
+            _fake_adapters[seed_path] = adapter
+        return adapter
     return EventStoreAdapter()
 
 

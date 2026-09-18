@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import time
 from datetime import UTC, datetime
@@ -587,3 +588,85 @@ async def test_create_uses_registry_approval_gate(tmp_path: Path) -> None:
     assert result["content"][0]["text"] == "tool execution canceled"
     assert structured(result)["error"]["kind"] == "canceled"
     assert adapter.saved is None
+
+
+@pytest.mark.asyncio
+async def test_fake_adapter_loads_seed_appends_events_and_writes_created_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seed = tmp_path / "calendar.json"
+    seed.write_text(
+        json.dumps(
+            [
+                {
+                    "title": "Seeded event",
+                    "start": "2026-09-19T09:00:00",
+                    "end": "2026-09-19T10:00:00",
+                    "calendar": "work",
+                    "all_day": False,
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("ZETA_CALENDAR_ADAPTER", f"fake:{seed}")
+
+    listed = await calendar_module._calendar_events(
+        None,
+        {
+            "start": "2026-09-19T00:00:00",
+            "end": "2026-09-20T00:00:00",
+            "calendar": None,
+        },
+    )
+    assert [item["title"] for item in structured(listed)["events"]] == [
+        "Seeded event"
+    ]
+
+    created = await calendar_module._calendar_create(
+        None,
+        {
+            "title": "Created event",
+            "start": "2026-09-19T11:00:00",
+            "end": "2026-09-19T12:00:00",
+            "calendar": "work",
+            "notes": None,
+        },
+    )
+    assert created["isError"] is False
+    listed_again = await calendar_module._calendar_events(
+        None,
+        {
+            "start": "2026-09-19T00:00:00",
+            "end": "2026-09-20T00:00:00",
+            "calendar": None,
+        },
+    )
+    assert [item["title"] for item in structured(listed_again)["events"]] == [
+        "Seeded event",
+        "Created event",
+    ]
+    assert json.loads(Path(f"{seed}.out").read_text(encoding="utf-8")) == [
+        {
+            "all_day": False,
+            "calendar": "work",
+            "floating": False,
+            "location": None,
+            "notes": None,
+            "start": "2026-09-19T11:00:00",
+            "end": "2026-09-19T12:00:00",
+            "time_zone": None,
+            "title": "Created event",
+        }
+    ]
+
+
+def test_fake_adapter_is_disabled_when_environment_is_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SentinelAdapter:
+        pass
+
+    monkeypatch.delenv("ZETA_CALENDAR_ADAPTER", raising=False)
+    monkeypatch.setattr(calendar_module, "EventStoreAdapter", SentinelAdapter)
+    assert isinstance(calendar_module._event_store_adapter(), SentinelAdapter)
