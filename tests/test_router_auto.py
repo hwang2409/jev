@@ -15,7 +15,7 @@ from zeta.providers.codex_payload import build_responses_payload
 from zeta.providers.jev import AutoRouteResult
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
-from zeta.types import Message, MessageRole, TextContent, ToolCall
+from zeta.types import Message, MessageRole, TextContent, ToolCall, ToolResult
 
 
 async def collect(events):
@@ -375,6 +375,7 @@ def test_tombstoned_tool_result_keeps_durable_schema_block() -> None:
         Message(
             MessageRole.TOOL_RESULT,
             [TextContent("large result"), schema],
+            tool_result=ToolResult("call-1", "large result"),
         ),
         "read",
         20,
