@@ -287,6 +287,124 @@ async def test_reloaded_triage_content_can_be_compacted_again(
 
 
 @pytest.mark.asyncio
+async def test_replayed_marker_persists_retained_suffix_after_restart(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    store.append_message(user("old objective"))
+    for index in range(1, 5):
+        call, result = tool_messages(f"call-{index}", "read", "x" * 400)
+        store.append_message(call)
+        store.append_message(result)
+    store.append_message(user("current objective"))
+
+    async def keep_everything(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        return triage_result({item["id"]: 1.0 for item in items})
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", keep_everything)
+    first = ContextAssembler(
+        store,
+        token_budget=100,
+        retained_tail=1,
+        token_counter=lambda _: 1,
+    )
+    await first.assemble(force=True)
+    session_id = store.session_id
+    store.close()
+
+    reopened = ConversationStore(tmp_path, session_id=session_id, _must_exist=True)
+    reopened.append_message(user("new objective"))
+    second = ContextAssembler(
+        reopened,
+        token_budget=100,
+        retained_tail=4,
+        token_counter=lambda _: 1,
+    )
+    in_memory = await second.assemble(force=True)
+    assert any(
+        message.tool_result is not None
+        and message.tool_result.tool_call_id == "call-4"
+        for message in in_memory
+    )
+
+    reopened.close()
+    reloaded = ConversationStore(tmp_path, session_id=session_id, _must_exist=True)
+    persisted = ContextAssembler(
+        reloaded,
+        token_budget=100,
+        retained_tail=2,
+        token_counter=lambda _: 1,
+    )
+    after_restart = await persisted.assemble()
+
+    assert any(
+        message.tool_result is not None
+        and message.tool_result.tool_call_id == "call-4"
+        for message in after_restart
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_triage_marker_gets_unique_ids_on_reload(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = ConversationStore(tmp_path)
+    legacy_messages = [user("old objective")]
+    for index in range(1, 3):
+        call, result = tool_messages(f"call-{index}", "read", "x" * 400)
+        legacy_messages.extend((call, result))
+    for message in legacy_messages:
+        store.append_message(message)
+    marker = store.append_compaction_marker(
+        "legacy triage",
+        1,
+        5,
+        triage_messages=legacy_messages,
+    )
+    session_id = store.session_id
+    store.close()
+
+    reopened = ConversationStore(tmp_path, session_id=session_id, _must_exist=True)
+    reopened.append_message(user("new objective"))
+    requests: list[list[dict[str, str]]] = []
+
+    async def triage_items(
+        _task: str, items: list[dict[str, str]]
+    ) -> jev.TriageResult:
+        requests.append(items)
+        probabilities = {item["id"]: 1.0 for item in items}
+        probabilities[items[0]["id"]] = 0.1
+        return triage_result(probabilities)
+
+    monkeypatch.setattr("zeta.core.context.jev.triage", triage_items)
+    assembler = ContextAssembler(
+        reopened,
+        token_budget=100,
+        retained_tail=1,
+        token_counter=lambda _: 1,
+    )
+    messages = await assembler.assemble(force=True)
+
+    assert len({item["id"] for item in requests[0]}) == len(requests[0])
+    dropped = [
+        message.tool_result.tool_call_id
+        for message in messages
+        if message.tool_result is not None
+        and message.tool_result.content.startswith("[dropped by jev-compaction:")
+    ]
+    assert dropped == ["call-1"]
+    replacement = next(
+        entry
+        for entry in reopened.replay()
+        if entry.type == "compaction" and entry.id != marker.id
+    )
+    source_ids = replacement.data["triage_source_ids"]
+    assert len(source_ids) == len(set(source_ids))
+
+
+@pytest.mark.asyncio
 async def test_reloaded_triage_items_keep_distinct_ids(
     tmp_path: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

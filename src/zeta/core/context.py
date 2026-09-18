@@ -486,6 +486,29 @@ class ContextAssembler:
                 if triage_token_count <= self.token_budget:
                     if self._branch_id(self.store.replay()) != branch_id:
                         raise StaleBranchError("active branch changed during compaction")
+                    persisted_triage_messages = list(triaged_messages)
+                    persisted_triage_source_ids: list[str] = []
+                    for item in candidates:
+                        source_id = self._source_id(item)
+                        if source_id is None:
+                            raise StaleBranchError(
+                                "triage message has no source id"
+                            )
+                        persisted_triage_source_ids.append(source_id)
+                    for item in items[boundary:]:
+                        if (
+                            item.entry is None
+                            or item.entry.type != "compaction"
+                            or item.entry.id not in replaces
+                        ):
+                            continue
+                        source_id = self._source_id(item)
+                        if source_id is None:
+                            raise StaleBranchError(
+                                "replayed triage message has no source id"
+                            )
+                        persisted_triage_messages.append(item.message)
+                        persisted_triage_source_ids.append(source_id)
                     try:
                         self.store.append_compaction_marker(
                             "jev triage compaction",
@@ -493,12 +516,8 @@ class ContextAssembler:
                             source_end,
                             replaces=replaces,
                             expected_parent_id=branch_id,
-                            triage_messages=triaged_messages,
-                            triage_source_ids=[
-                                self._source_id(item)
-                                for item in candidates
-                                if item.entry is not None
-                            ],
+                            triage_messages=persisted_triage_messages,
+                            triage_source_ids=persisted_triage_source_ids,
                             jev_triage=jev_triage,
                         )
                     except ValueError as exc:
@@ -770,7 +789,9 @@ class ContextAssembler:
         if isinstance(triage_messages, list):
             source_ids = entry.data.get("triage_source_ids")
             if not isinstance(source_ids, list) or len(source_ids) != len(triage_messages):
-                source_ids = [None] * len(triage_messages)
+                source_ids = [
+                    f"{entry.id}:{index}" for index in range(len(triage_messages))
+                ]
             return [
                 _ContextItem(
                     entry,
