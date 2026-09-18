@@ -1,0 +1,60 @@
+from run_eval import evaluate, summarize, top_k
+from router import RouteResult
+
+
+def fake_route_factory(tool, confidence, needs_tool, step_clarity):
+    def fake_route(task, step, history=None):
+        probs = {tool: confidence, "Other": round(1 - confidence, 4)}
+        return RouteResult(
+            tool=tool,
+            probabilities=probs,
+            confidence=confidence,
+            needs_tool=needs_tool,
+            step_clarity=step_clarity,
+            usage={"input_tokens": 100, "output_tokens": 10},
+        )
+    return fake_route
+
+
+def case(id, expected_tool, needs=True, vague=False):
+    return {"id": id, "task": "t", "step": "s", "history": [],
+            "expected_tool": expected_tool, "expected_needs_tool": needs,
+            "vague": vague}
+
+
+def test_top_k():
+    probs = {"A": 0.5, "B": 0.3, "C": 0.2}
+    assert top_k(probs, 2) == ["A", "B"]
+
+
+def test_summarize_metrics():
+    cases_and_routes = [
+        (case("c1", "Read"), fake_route_factory("Read", 0.9, 0.95, 0.9)),
+        (case("c2", "Bash"), fake_route_factory("Grep", 0.4, 0.95, 0.9)),
+        (case("n1", None, needs=False), fake_route_factory("Read", 0.5, 0.1, 0.9)),
+        (case("v1", None, vague=True), fake_route_factory("Bash", 0.3, 0.8, 0.2)),
+    ]
+    results = []
+    for c, fn in cases_and_routes:
+        results.extend(evaluate([c], route_fn=fn))
+    s = summarize(results)
+    assert s["clear_cases"] == 2
+    assert s["top1_accuracy"] == 0.5
+    assert s["mean_confidence_correct"] == 0.9
+    assert s["mean_confidence_incorrect"] == 0.4
+    assert s["confusions"] == [{"id": "c2", "expected": "Bash", "chosen": "Grep"}]
+    assert s["needs_tool_mean_on_tool_cases"] == 0.95
+    assert s["needs_tool_mean_on_no_tool_cases"] == 0.1
+    assert s["clarity_mean_on_clear"] == 0.9
+    assert s["clarity_mean_on_vague"] == 0.2
+    assert s["total_input_tokens"] == 400
+    assert s["total_output_tokens"] == 40
+    assert s["errors"] == 0
+
+
+def test_evaluate_captures_errors():
+    def boom(task, step, history=None):
+        raise RuntimeError("api down")
+    results = evaluate([case("c1", "Read")], route_fn=boom)
+    assert results[0]["error"] == "api down"
+    assert summarize(results)["errors"] == 1
