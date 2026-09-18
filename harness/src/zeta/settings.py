@@ -169,6 +169,7 @@ def resolve(
     cli_router: bool | None = None,
     cli_router_style: str | None = None,
     cli_jev_compaction: bool | None = None,
+    cli_memory_config: str | None = None,
 ) -> ResolvedConfig:
     """Layer CLI flags over the loaded settings; CLI wins where set.
 
@@ -213,7 +214,11 @@ def resolve(
         stream_stall_seconds=settings.stream_stall_seconds,
         stream_stall_retries=settings.stream_stall_retries,
         workspace_snapshot_cap=settings.workspace_snapshot_cap,
-        memory_config=settings.memory_config,
+        memory_config=(
+            cli_memory_config
+            if cli_memory_config is not None
+            else settings.memory_config
+        ),
     )
 
 

@@ -88,6 +88,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="override the compaction/context token budget for this run",
     )
     parser.add_argument(
+        "--memory-config",
+        default=None,
+        help="override the Pausanias memory configuration for this run",
+    )
+    parser.add_argument(
         "--max-turns",
         type=int,
         default=None,

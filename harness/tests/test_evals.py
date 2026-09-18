@@ -146,8 +146,21 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
         {"tool": "memory_search", "args_contains": "Tuesday"},
     ]
     assert tasks[6]["checks_calendar_created"] == [
-        {"title_contains": "Project kickoff", "start": "2026-09-19T16:00:00"}
+        {
+            "title": "Project kickoff",
+            "start": "2026-09-19T16:00:00",
+            "end": "2026-09-19T17:00:00",
+            "calendar": "work",
+        }
     ]
+    assert tasks[5]["required_call_sequence"] == [
+        {"tool": "calendar_events", "args_contains": "2026-09-19T09:00:00"}
+    ]
+    assert tasks[6]["required_call_sequence"] == [
+        {"tool": "calendar_create", "args_contains": "Project kickoff"},
+        {"tool": "calendar_events", "args_contains": "2026-09-19T00:00:00"},
+    ]
+    assert "2026-09-19T10:00:00" not in tasks[5]["prompt"]
 
 
 @pytest.mark.parametrize(
@@ -156,7 +169,7 @@ def test_tools_tasks_define_eight_realistic_offline_tasks() -> None:
         ("memory_seed", {"../outside.md": "no"}),
         ("memory_seed", {"note.txt": "wrong suffix"}),
         ("calendar_seed", [{"title": "missing fields"}]),
-        ("checks_calendar_created", [{"title_contains": "missing start"}]),
+        ("checks_calendar_created", [{"title": "missing fields"}]),
     ],
 )
 def test_load_tasks_rejects_invalid_tool_fixture_fields(
@@ -182,35 +195,51 @@ def test_load_tasks_rejects_invalid_tool_fixture_fields(
         load_tasks(path)
 
 
-def test_memory_seed_roundtrip_reindexes_and_cleans_up(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "corpus"
-    root.mkdir()
-    config = tmp_path / "pausanias.toml"
-    config.write_text(
-        f'database = "{tmp_path / "index.sqlite3"}"\n\n'
-        '[[roots]]\n'
-        'id = "fixture"\n'
-        f'path = "{root}"\n'
-        'project = "fixture"\n',
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("JEV_EVAL_MEMORY_ROOT", str(root))
-    monkeypatch.setenv("JEV_EVAL_MEMORY_CONFIG", str(config))
-
+def test_memory_seed_roundtrip_reindexes_and_cleans_up(tmp_path: Path) -> None:
     with eval_runner._prepare_task_environment(
         {"memory_seed": {"notes/seed.md": "# Seed\n\nA durable fact.\n"}},
         tmp_path / "scratch",
-    ) as (_environment, memory_root):
-        assert memory_root == root
-        assert (root / "notes/seed.md").read_text(encoding="utf-8").endswith(
+    ) as (environment, memory_root, config):
+        assert environment["ZETA_CALENDAR_ADAPTER"].startswith("fake:")
+        assert (memory_root / "notes/seed.md").read_text(encoding="utf-8").endswith(
             "A durable fact.\n"
         )
-    assert not (root / "notes/seed.md").exists()
+        assert config.parent.exists()
+    assert not config.parent.exists()
 
 
-def test_verify_calendar_created_checks_title_and_start(tmp_path: Path) -> None:
+def test_sequential_memory_task_environments_do_not_share_corpus(
+    tmp_path: Path,
+) -> None:
+    task = {"memory_seed": {}}
+    with eval_runner._prepare_task_environment(task, tmp_path / "first") as (
+        _environment,
+        first_root,
+        _first_config,
+    ):
+        (first_root / "created-by-agent.md").write_text("private\n", encoding="utf-8")
+
+    with eval_runner._prepare_task_environment(task, tmp_path / "second") as (
+        _environment,
+        second_root,
+        _second_config,
+    ):
+        assert not (second_root / "created-by-agent.md").exists()
+
+
+def test_memory_root_probe_fails_closed_for_non_eval_config(tmp_path: Path) -> None:
+    _expected_root, _expected_config = eval_runner._write_memory_config(
+        tmp_path / "expected"
+    )
+    _live_root, live_config = eval_runner._write_memory_config(tmp_path / "live")
+
+    with pytest.raises(ValueError, match="isolated eval corpus"):
+        eval_runner._verify_memory_root(
+            ["zeta", "--memory-config", str(live_config)], _expected_root
+        )
+
+
+def test_verify_calendar_created_checks_exact_event_fields(tmp_path: Path) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
     (scratch / "calendar-seed.json.out").write_text(
@@ -219,6 +248,8 @@ def test_verify_calendar_created_checks_title_and_start(tmp_path: Path) -> None:
                 {
                     "title": "Project kickoff",
                     "start": "2026-09-19T16:00:00",
+                    "end": "2026-09-19T17:00:00",
+                    "calendar": "work",
                 }
             ]
         ),
@@ -227,11 +258,25 @@ def test_verify_calendar_created_checks_title_and_start(tmp_path: Path) -> None:
 
     assert eval_runner._verify_calendar_created(
         scratch,
-        [{"title_contains": "kickoff", "start": "2026-09-19T16:00:00"}],
+        [
+            {
+                "title": "Project kickoff",
+                "start": "2026-09-19T16:00:00",
+                "end": "2026-09-19T17:00:00",
+                "calendar": "work",
+            }
+        ],
     ) == [True]
     assert eval_runner._verify_calendar_created(
         scratch,
-        [{"title_contains": "kickoff", "start": "2026-09-19T17:00:00"}],
+        [
+            {
+                "title": "Project kickoff",
+                "start": "2026-09-19T17:00:00",
+                "end": "2026-09-19T17:00:00",
+                "calendar": "work",
+            }
+        ],
     ) == [False]
 
 
@@ -792,6 +837,17 @@ def test_build_command_selects_router_mode() -> None:
     assert auto[-4:] == ["--router-style", "auto", "-p", "prompt"]
     assert "--no-router" not in router
     assert stock[-3:] == ["--no-router", "-p", "prompt"]
+
+    isolated = build_command(
+        "task", "prompt", 1, "stock", memory_config=Path("/tmp/eval.toml")
+    )
+    assert isolated[-5:] == [
+        "--no-router",
+        "--memory-config",
+        "/tmp/eval.toml",
+        "-p",
+        "prompt",
+    ]
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:

@@ -386,6 +386,20 @@ def test_resolve_returns_resolved_config(tmp_path: Path) -> None:
     assert config.provider == "fake"
 
 
+def test_cli_memory_config_overrides_settings(tmp_path: Path) -> None:
+    settings = load_settings(home=tmp_path, project_dir=None).settings
+    config = resolve(
+        settings,
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+        cli_memory_config="/tmp/eval-memory.toml",
+    )
+
+    assert config.memory_config == "/tmp/eval-memory.toml"
+
+
 def test_project_and_global_pointing_to_same_dir_is_read_once(tmp_path: Path) -> None:
     _write(
         tmp_path,

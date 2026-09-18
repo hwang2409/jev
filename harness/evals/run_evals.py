@@ -6,6 +6,7 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -13,6 +14,8 @@ from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from pausanias.config import ConfigError, load_config
 
 TASKS_PATH = Path(__file__).with_name("tasks.jsonl")
 SCRATCH_ROOT = Path("/tmp/jev-zeta-evals")
@@ -95,22 +98,29 @@ def load_tasks(path: Path = TASKS_PATH) -> list[dict[str, Any]]:
                 type(checks_calendar_created) is not list
                 or any(
                     type(check) is not dict
-                    or set(check) != {"title_contains", "start"}
-                    or type(check["title_contains"]) is not str
-                    or not check["title_contains"]
-                    or type(check["start"]) is not str
-                    or not check["start"]
+                    or set(check) != {"title", "start", "end", "calendar"}
+                    or any(
+                        type(check[key]) is not str or not check[key]
+                        for key in ("title", "start", "end", "calendar")
+                    )
                     for check in checks_calendar_created
                 )
             ):
                 raise ValueError(
-                    "checks_calendar_created must contain title_contains and start"
+                    "checks_calendar_created must contain title, start, end, and calendar"
                 )
             tasks.append(task)
     return tasks
 
 
-def build_command(task_id: str, prompt: str, max_turns: int, mode: str) -> list[str]:
+def build_command(
+    task_id: str,
+    prompt: str,
+    max_turns: int,
+    mode: str,
+    *,
+    memory_config: Path | None = None,
+) -> list[str]:
     """Build the exact headless command for one task and mode."""
     del task_id
     command = [
@@ -133,6 +143,8 @@ def build_command(task_id: str, prompt: str, max_turns: int, mode: str) -> list[
         command.extend(["--router-style", "auto"])
     else:
         command.append("--no-router")
+    if memory_config is not None:
+        command.extend(["--memory-config", str(memory_config)])
     command.extend(["-p", prompt])
     return command
 
@@ -441,16 +453,6 @@ def _write_setup(scratch_dir: Path, setup: Mapping[str, str]) -> None:
         path.write_text(content, encoding="utf-8")
 
 
-def _memory_config_path() -> Path:
-    for name in ("JEV_EVAL_MEMORY_CONFIG", "PAUSANIAS_CONFIG"):
-        configured = os.environ.get(name)
-        if configured:
-            return Path(configured)
-    raise ValueError(
-        "memory_seed requires JEV_EVAL_MEMORY_CONFIG or PAUSANIAS_CONFIG"
-    )
-
-
 def _safe_memory_path(root: Path, relative: str) -> Path:
     target = (root / relative).resolve()
     if root.resolve() not in target.parents:
@@ -467,50 +469,74 @@ def _reindex_memory(config: Path) -> None:
     )
 
 
+def _write_memory_config(workspace: Path) -> tuple[Path, Path]:
+    root = workspace / "corpus"
+    root.mkdir(parents=True)
+    config = workspace / "pausanias.toml"
+    config.write_text(
+        "database = "
+        + json.dumps(str(workspace / "index.sqlite3"))
+        + "\n\n[[roots]]\n"
+        + 'id = "eval"\n'
+        + "path = "
+        + json.dumps(str(root))
+        + '\nproject = "eval"\n',
+        encoding="utf-8",
+    )
+    return root, config
+
+
+def _verify_memory_root(command: Sequence[str], expected_root: Path) -> None:
+    try:
+        config_index = command.index("--memory-config")
+        config_path = Path(command[config_index + 1])
+    except (ValueError, IndexError) as exc:
+        raise ValueError("eval child memory-config override is missing") from exc
+    try:
+        config = load_config(config_path)
+    except (ConfigError, OSError) as exc:
+        raise ValueError(f"eval memory config could not be loaded: {config_path}") from exc
+    roots = tuple(root.path.resolve() for root in config.roots)
+    if roots != (expected_root.resolve(),):
+        raise ValueError(
+            "eval memory config does not point to the isolated eval corpus"
+        )
+
+
 @contextlib.contextmanager
 def _prepare_task_environment(
     task: Mapping[str, Any], scratch_dir: Path
-) -> Iterator[tuple[dict[str, str], Path | None]]:
+) -> Iterator[tuple[dict[str, str], Path, Path]]:
     """Seed task-only external fixtures and return the child environment."""
 
     environment = dict(os.environ)
-    memory_root_value = os.environ.get("JEV_EVAL_MEMORY_ROOT")
-    memory_root = Path(memory_root_value) if memory_root_value else None
-    backups: dict[Path, bytes | None] = {}
-    config: Path | None = None
+    memory_workspace = scratch_dir / "memory-eval"
+    memory_root, config = _write_memory_config(memory_workspace)
+    environment.pop("JEV_EVAL_MEMORY_CONFIG", None)
+    environment.pop("PAUSANIAS_CONFIG", None)
+    environment["JEV_EVAL_MEMORY_ROOT"] = str(memory_root)
     try:
         memory_seed = task.get("memory_seed")
         if memory_seed:
-            if memory_root is None:
-                raise ValueError("memory_seed requires JEV_EVAL_MEMORY_ROOT")
-            memory_root.mkdir(parents=True, exist_ok=True)
-            config = _memory_config_path()
             for relative, content in memory_seed.items():
                 target = _safe_memory_path(memory_root, relative)
                 target.parent.mkdir(parents=True, exist_ok=True)
-                backups[target] = target.read_bytes() if target.exists() else None
                 target.write_text(content, encoding="utf-8")
-            _reindex_memory(config)
+        _reindex_memory(config)
 
         calendar_seed = task.get("calendar_seed")
-        if calendar_seed is not None:
-            seed_path = scratch_dir / "calendar-seed.json"
-            seed_path.write_text(
-                json.dumps(calendar_seed, indent=2, sort_keys=True) + "\n",
-                encoding="utf-8",
-            )
-            environment["ZETA_CALENDAR_ADAPTER"] = f"fake:{seed_path}"
-        yield environment, memory_root
+        if calendar_seed is None:
+            calendar_seed = []
+        seed_path = scratch_dir / "calendar-seed.json"
+        seed_path.write_text(
+            json.dumps(calendar_seed, indent=2, sort_keys=True)
+            + "\n",
+            encoding="utf-8",
+        )
+        environment["ZETA_CALENDAR_ADAPTER"] = f"fake:{seed_path}"
+        yield environment, memory_root, config
     finally:
-        if backups:
-            assert memory_root is not None
-            for target, original in backups.items():
-                if original is None:
-                    target.unlink(missing_ok=True)
-                else:
-                    target.write_bytes(original)
-            if config is not None:
-                _reindex_memory(config)
+        shutil.rmtree(memory_workspace, ignore_errors=True)
 
 
 def _verify_calendar_created(
@@ -528,8 +554,10 @@ def _verify_calendar_created(
     return [
         any(
             isinstance(event, dict)
-            and check["title_contains"] in event.get("title", "")
+            and event.get("title") == check["title"]
             and event.get("start") == check["start"]
+            and event.get("end") == check["end"]
+            and event.get("calendar") == check["calendar"]
             for event in created
         )
         for check in checks
@@ -541,13 +569,25 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
     scratch_dir = run_root / f"{task_id}-{mode}"
     scratch_dir.mkdir(parents=True, exist_ok=True)
     _write_setup(scratch_dir, task.get("setup", {}))
-    command = build_command(task_id, task["prompt"], task["max_turns"], mode)
     events_path = scratch_dir / "events.jsonl"
-    started = time.monotonic()
-    with _prepare_task_environment(task, scratch_dir) as (environment, memory_root):
+    with _prepare_task_environment(task, scratch_dir) as (
+        environment,
+        memory_root,
+        memory_config,
+    ):
+        command = build_command(
+            task_id,
+            task["prompt"],
+            task["max_turns"],
+            mode,
+            memory_config=memory_config,
+        )
+        _verify_memory_root(command, memory_root)
+        started = time.monotonic()
         process = run_subprocess(
             command, scratch_dir, events_path, env=environment
         )
+        wall_seconds = time.monotonic() - started
         events = read_events(events_path)
         summary = parse_events(events)
         checks_passed = verify_checks(scratch_dir, task["checks"], memory_root)
@@ -566,7 +606,6 @@ def _run_one(task: Mapping[str, Any], mode: str, run_root: Path) -> dict[str, An
                 events, forbidden_tools
             )
             checks_passed.append(sequence_passed and forbidden_passed)
-    wall_seconds = time.monotonic() - started
     completed = process["returncode"] == 0 and summary["final_message_present"]
     return {
         "task_id": task_id,

@@ -105,6 +105,7 @@ def _create_app_with_root(
         cli_jev_compaction=getattr(args, "jev_compaction", None),
         cli_yolo=getattr(args, "yolo", None),
         cli_token_budget=getattr(args, "token_budget", None),
+        cli_memory_config=getattr(args, "memory_config", None),
     )
     continue_session = getattr(args, "continue_session", False)
     resume_id = getattr(args, "resume", None)
