@@ -31,7 +31,7 @@ def test_summarize_metrics():
     cases_and_routes = [
         (case("c1", "Read"), fake_route_factory("Read", 0.9, 0.95, 0.9)),
         (case("c2", "Bash"), fake_route_factory("Grep", 0.4, 0.95, 0.9)),
-        (case("n1", None, needs=False), fake_route_factory("Read", 0.5, 0.1, 0.9)),
+        (case("n1", None, needs=False), fake_route_factory("Read", 0.5, 0.1, 0.7)),
         (case("v1", None, vague=True), fake_route_factory("Bash", 0.3, 0.8, 0.2)),
     ]
     results = []
@@ -43,9 +43,9 @@ def test_summarize_metrics():
     assert s["mean_confidence_correct"] == 0.9
     assert s["mean_confidence_incorrect"] == 0.4
     assert s["confusions"] == [{"id": "c2", "expected": "Bash", "chosen": "Grep"}]
-    assert s["needs_tool_mean_on_tool_cases"] == 0.95
+    assert s["needs_tool_mean_on_tool_cases"] == 0.9
     assert s["needs_tool_mean_on_no_tool_cases"] == 0.1
-    assert s["clarity_mean_on_clear"] == 0.9
+    assert s["clarity_mean_on_clear"] == 0.8333
     assert s["clarity_mean_on_vague"] == 0.2
     assert s["total_input_tokens"] == 400
     assert s["total_output_tokens"] == 40
@@ -58,3 +58,21 @@ def test_evaluate_captures_errors():
     results = evaluate([case("c1", "Read")], route_fn=boom)
     assert results[0]["error"] == "api down"
     assert summarize(results)["errors"] == 1
+
+
+def test_summarize_counts_errored_clear_case_as_accuracy_miss():
+    def boom(task, step, history=None):
+        raise RuntimeError("api down")
+
+    results = evaluate(
+        [case("c1", "Read"), case("c2", "Bash")],
+        route_fn=fake_route_factory("Read", 0.9, 0.95, 0.9),
+    )
+    results[1] = evaluate([case("c2", "Bash")], route_fn=boom)[0]
+
+    summary = summarize(results)
+
+    assert summary["clear_cases"] == 2
+    assert summary["top1_accuracy"] == 0.5
+    assert summary["top3_accuracy"] == 0.5
+    assert summary["errors"] == 1

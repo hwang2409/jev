@@ -29,7 +29,7 @@ def build_request(
         "state": {
             "task": task,
             "current_step": step,
-            "recent_steps": list(history),
+            "recent_steps": list(history[-5:]),
         },
         "model": MODEL,
         "questions": {

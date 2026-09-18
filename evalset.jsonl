@@ -13,7 +13,7 @@
 {"id": "bash-2", "task": "Prepare the release", "step": "Create a git commit with the staged changes", "history": [], "expected_tool": "Bash", "expected_needs_tool": true, "vague": false}
 {"id": "bash-3", "task": "Set up the project locally", "step": "Install the Python dependencies with pip", "history": [], "expected_tool": "Bash", "expected_needs_tool": true, "vague": false}
 {"id": "bash-4", "task": "Clean up code style", "step": "Run the ruff linter over the whole repository", "history": [], "expected_tool": "Bash", "expected_needs_tool": true, "vague": false}
-{"id": "grep-1", "task": "Remove a deprecated API", "step": "Find every file that still calls fetch_legacy() across the codebase", "history": [], "expected_tool": "Grep", "expected_needs_tool": true, "vague": false}
+{"id": "grep-1", "task": "Remove a deprecated API", "step": "Search file contents for the string fetch_legacy( across the repo", "history": [], "expected_tool": "Grep", "expected_needs_tool": true, "vague": false}
 {"id": "grep-2", "task": "Audit logging practices", "step": "Search the repo for print( calls used instead of the logger", "history": [], "expected_tool": "Grep", "expected_needs_tool": true, "vague": false}
 {"id": "grep-3", "task": "Trace configuration usage", "step": "Find where the environment variable DATABASE_URL is referenced", "history": [], "expected_tool": "Grep", "expected_needs_tool": true, "vague": false}
 {"id": "grep-4", "task": "Understand the data model", "step": "Find which file contains the text 'class User' in its contents", "history": [], "expected_tool": "Grep", "expected_needs_tool": true, "vague": false}

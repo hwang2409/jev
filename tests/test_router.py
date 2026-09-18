@@ -37,6 +37,16 @@ def test_build_request_shape():
     assert q["step_clarity"]["type"] == "noul"
 
 
+def test_build_request_limits_history_to_last_five_entries():
+    history = [f"step {i}" for i in range(6)]
+
+    body = build_request("fix bug", "read config.py", history, CATALOG_STUB)
+
+    assert body["state"]["recent_steps"] == [
+        "step 1", "step 2", "step 3", "step 4", "step 5"
+    ]
+
+
 def test_parse_response():
     r = parse_response(RESPONSE_STUB)
     assert isinstance(r, RouteResult)
@@ -80,15 +90,18 @@ def test_route_success(monkeypatch):
 
 
 def test_route_retries_on_429_then_succeeds(monkeypatch):
-    monkeypatch.setattr(router.time, "sleep", lambda s: None)
+    delays = []
+    monkeypatch.setattr(router.time, "sleep", delays.append)
     sess = FakeSession([FakeResponse(429), FakeResponse(200, RESPONSE_STUB)])
     r = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
     assert r.tool == "Read"
     assert len(sess.calls) == 2
+    assert delays == [1.0]
 
 
 def test_route_gives_up_after_three_attempts(monkeypatch):
-    monkeypatch.setattr(router.time, "sleep", lambda s: None)
+    delays = []
+    monkeypatch.setattr(router.time, "sleep", delays.append)
     sess = FakeSession([FakeResponse(529)] * 3)
     try:
         route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
@@ -96,6 +109,7 @@ def test_route_gives_up_after_three_attempts(monkeypatch):
     except requests.HTTPError:
         pass
     assert len(sess.calls) == 3
+    assert delays == [1.0, 2.0]
 
 
 def test_route_does_not_retry_client_errors(monkeypatch):

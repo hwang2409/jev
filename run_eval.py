@@ -43,14 +43,18 @@ def _mean(values: list[float]) -> float | None:
 
 def summarize(results: list[dict]) -> dict:
     ok = [r for r in results if "error" not in r]
-    clear = [r for r in ok if not r["vague"] and r["expected_needs_tool"]
+    clear = [r for r in results if not r["vague"] and r["expected_needs_tool"]
              and r["expected_tool"] is not None]
-    correct = [r for r in clear if r["tool"] == r["expected_tool"]]
-    incorrect = [r for r in clear if r["tool"] != r["expected_tool"]]
-    in_top3 = [r for r in clear if r["expected_tool"] in top_k(r["probabilities"], 3)]
+    routed_clear = [r for r in clear if "error" not in r]
+    correct = [r for r in routed_clear if r["tool"] == r["expected_tool"]]
+    incorrect = [r for r in routed_clear if r["tool"] != r["expected_tool"]]
+    in_top3 = [
+        r for r in routed_clear if r["expected_tool"] in top_k(r["probabilities"], 3)
+    ]
     no_tool = [r for r in ok if not r["expected_needs_tool"]]
-    tool_cases = [r for r in ok if r["expected_needs_tool"] and not r["vague"]]
+    tool_cases = [r for r in ok if r["expected_needs_tool"]]
     vague = [r for r in ok if r["vague"]]
+    non_vague = [r for r in ok if not r["vague"]]
     return {
         "cases": len(results),
         "errors": len(results) - len(ok),
@@ -65,7 +69,7 @@ def summarize(results: list[dict]) -> dict:
         "mean_confidence_incorrect": _mean([r["confidence"] for r in incorrect]),
         "needs_tool_mean_on_tool_cases": _mean([r["needs_tool"] for r in tool_cases]),
         "needs_tool_mean_on_no_tool_cases": _mean([r["needs_tool"] for r in no_tool]),
-        "clarity_mean_on_clear": _mean([r["step_clarity"] for r in clear]),
+        "clarity_mean_on_clear": _mean([r["step_clarity"] for r in non_vague]),
         "clarity_mean_on_vague": _mean([r["step_clarity"] for r in vague]),
         "total_input_tokens": sum(r["usage"]["input_tokens"] for r in ok),
         "total_output_tokens": sum(r["usage"]["output_tokens"] for r in ok),
