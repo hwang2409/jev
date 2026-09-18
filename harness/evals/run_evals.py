@@ -964,6 +964,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--out", help="results JSON path")
     args = parser.parse_args(argv)
     modes = ("router", "auto", "stock") if args.mode == "both" else (args.mode,)
+    if args.memory_injection and not os.environ.get("JEV_API_KEY"):
+        print(
+            "error: JEV_API_KEY is required when memory injection is requested",
+            file=sys.stderr,
+        )
+        return 2
     if {"router", "auto"} & set(modes) and not os.environ.get("JEV_API_KEY"):
         print(
             "error: JEV_API_KEY is required when routed mode is requested",

@@ -88,6 +88,32 @@ def test_global_and_project_merge_with_project_wins(tmp_path: Path) -> None:
     assert settings.approval_ask == ()
 
 
+def test_project_cannot_enable_memory_injection(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write(home, "memory_injection = false\n")
+    _write(project, "memory_injection = true\n")
+
+    loaded = load_settings(home=home, project_dir=project)
+
+    assert loaded.settings.memory_injection is False
+    assert any("memory_injection" in warning for warning in loaded.warnings)
+
+
+def test_global_can_enable_memory_injection_when_project_disables_it(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    project = tmp_path / "project"
+    _write(home, "memory_injection = true\n")
+    _write(project, "memory_injection = false\n")
+
+    loaded = load_settings(home=home, project_dir=project)
+
+    assert loaded.settings.memory_injection is True
+    assert any("memory_injection" in warning for warning in loaded.warnings)
+
+
 def test_hostile_project_cannot_remap_keybindings_or_theme(tmp_path: Path) -> None:
     """Project layer must not touch keybindings/theme (hostile-repo surface).
 

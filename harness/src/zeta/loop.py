@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -110,6 +111,11 @@ MEMORY_INJECTION_TOP_K = 2
 MEMORY_INJECTION_EXCERPT_CHARS = 600
 MEMORY_INJECTION_TOTAL_CHARS = 1500
 _logger = logging.getLogger(__name__)
+
+
+def _memory_content_hash(value: str) -> str:
+    normalized = " ".join(value.split())
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
 async def _close_completion(
@@ -572,7 +578,9 @@ class AgentLoop:
         return "\n".join(part for part in (task, last_assistant) if part)
 
     @staticmethod
-    def _memory_key(value: Mapping[str, object]) -> tuple[str, tuple[str, ...]] | None:
+    def _memory_key(
+        value: Mapping[str, object],
+    ) -> tuple[str, tuple[str, ...], str] | None:
         path = value.get("path")
         heading = value.get("heading", [])
         if not isinstance(path, str):
@@ -585,10 +593,16 @@ class AgentLoop:
             isinstance(part, str) for part in heading
         ):
             return None
-        return path, tuple(heading)
+        content_hash = value.get("content_hash")
+        excerpt = value.get("excerpt")
+        if not isinstance(content_hash, str):
+            content_hash = (
+                _memory_content_hash(excerpt) if isinstance(excerpt, str) else ""
+            )
+        return path, tuple(heading), content_hash
 
-    def _known_memory_keys(self) -> set[tuple[str, tuple[str, ...]]]:
-        keys: set[tuple[str, tuple[str, ...]]] = set()
+    def _known_memory_keys(self) -> set[tuple[str, tuple[str, ...], str]]:
+        keys: set[tuple[str, tuple[str, ...], str]] = set()
         for message in self.store.messages():
             injected = message.metadata.get("memory_injection_items")
             if isinstance(injected, list):
@@ -620,12 +634,16 @@ class AgentLoop:
             "gate_score": gate_score,
             "injected_count": 0,
             "chars": 0,
+            "reason": None,
         }
-        if (
-            self.tool_registry.memory_config is None
-            or gate_score is None
-            or gate_score < MEMORY_INJECTION_GATE
-        ):
+        if self.tool_registry.memory_config is None:
+            decision["reason"] = "memory_unconfigured"
+            return decision
+        if gate_score is None:
+            decision["reason"] = "jev_error"
+            return decision
+        if gate_score < MEMORY_INJECTION_GATE:
+            decision["reason"] = "gate_below_threshold"
             return decision
         try:
             result = await _memory_search(
@@ -635,28 +653,44 @@ class AgentLoop:
             )
             if result.get("isError") is True:
                 _logger.warning("memory injection search failed")
+                decision["reason"] = "memory_error"
                 return decision
             structured = result.get("structuredContent")
             items = structured.get("items") if isinstance(structured, Mapping) else None
             if not isinstance(items, list):
+                decision["reason"] = "memory_error"
                 return decision
             known = self._known_memory_keys()
+            known_hashes = {key[2] for key in known if key[2]}
+            known_locations = {(key[0], key[1]) for key in known}
             blocks: list[TextContent] = []
             injected_items: list[dict[str, object]] = []
-            remaining = MEMORY_INJECTION_TOTAL_CHARS
+            total_chars = 0
+            deduped = False
+            capped = False
             for raw in items:
-                if len(blocks) >= MEMORY_INJECTION_TOP_K or remaining <= 0:
+                if len(blocks) >= MEMORY_INJECTION_TOP_K:
+                    capped = True
                     break
                 if not isinstance(raw, Mapping):
                     continue
-                key = self._memory_key(raw)
                 excerpt = raw.get("excerpt")
-                if key is None or not isinstance(excerpt, str) or not excerpt:
+                if not isinstance(excerpt, str) or not excerpt:
                     continue
-                if key in known:
+                content_hash = _memory_content_hash(excerpt)
+                excerpt = excerpt[:MEMORY_INJECTION_EXCERPT_CHARS]
+                key = self._memory_key(
+                    {**raw, "content_hash": content_hash}
+                )
+                if key is None:
                     continue
-                excerpt = excerpt[: min(MEMORY_INJECTION_EXCERPT_CHARS, remaining)]
-                if not excerpt:
+                location = (key[0], key[1])
+                if (
+                    key in known
+                    or location in known_locations
+                    or content_hash in known_hashes
+                ):
+                    deduped = True
                     continue
                 heading = " > ".join(key[1]) or "(document)"
                 text = (
@@ -665,19 +699,37 @@ class AgentLoop:
                     f"heading: {heading}\n"
                     f"{excerpt}"
                 )
+                if total_chars + len(text) > MEMORY_INJECTION_TOTAL_CHARS:
+                    capped = True
+                    break
                 blocks.append(TextContent(text))
-                injected_items.append({"path": key[0], "heading": list(key[1])})
+                injected_items.append(
+                    {
+                        "path": key[0],
+                        "heading": list(key[1]),
+                        "content_hash": content_hash,
+                    }
+                )
                 known.add(key)
-                remaining -= len(excerpt)
+                known_locations.add(location)
+                known_hashes.add(content_hash)
+                total_chars += len(text)
             if not blocks:
+                decision["reason"] = (
+                    "capped" if capped else "deduped" if deduped else "memory_error"
+                )
                 return decision
             if not self._persist_memory_blocks(blocks, injected_items):
+                decision["reason"] = "memory_error"
                 return decision
             decision["injected_count"] = len(blocks)
-            decision["chars"] = MEMORY_INJECTION_TOTAL_CHARS - remaining
+            decision["chars"] = total_chars
+            if capped:
+                decision["reason"] = "capped"
             return decision
         except Exception as exc:  # noqa: BLE001 - injection fails open
             _logger.warning("memory injection failed: %s", exc)
+            decision["reason"] = "memory_error"
             return decision
 
     def _persist_memory_blocks(
@@ -716,13 +768,23 @@ class AgentLoop:
         self, user_text: str
     ) -> tuple[dict[str, object], dict[str, int]]:
         if self.tool_registry.memory_config is None:
-            return {"gate_score": None, "injected_count": 0, "chars": 0}, {}
+            return {
+                "gate_score": None,
+                "injected_count": 0,
+                "chars": 0,
+                "reason": "memory_unconfigured",
+            }, {}
         query = self._memory_query(user_text)
         try:
             result = await memory_gate(query)
         except Exception as exc:  # noqa: BLE001 - gate fails open
             _logger.warning("memory injection gate failed: %s", exc)
-            return {"gate_score": None, "injected_count": 0, "chars": 0}, {}
+            return {
+                "gate_score": None,
+                "injected_count": 0,
+                "chars": 0,
+                "reason": "jev_error",
+            }, {}
         decision = await self._inject_memory(query, result.score)
         return decision, dict(result.usage)
 
@@ -737,7 +799,12 @@ class AgentLoop:
     ) -> tuple[list[ToolSchema], dict[str, object]]:
         task, last_assistant, last_results = self._auto_route_inputs(user_text)
         try:
-            route_kwargs = {"memory_injection": True} if self.memory_injection else {}
+            route_kwargs = (
+                {"memory_injection": True}
+                if self.memory_injection
+                and self.tool_registry.memory_config is not None
+                else {}
+            )
             result = await auto_route(
                 task,
                 last_assistant,

@@ -16,7 +16,7 @@ one table entry (``[approval]\\nallow = [...]``) without restating unrelated
 tables, but replacing a list is one atomic swap.
 
 Trust boundary: the project layer may only contribute safe keys — provider,
-model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_config``, ``yolo``, ``[approval]``,
+model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_injection``, ``memory_config``, ``yolo``, ``[approval]``,
 ``theme``, and ``[keybindings]`` from the project file are IGNORED with a
 loud startup warning. Global settings retain full key access. A future
 ``/trust`` mechanism may relax this per-repo, but until then a hostile
@@ -73,7 +73,6 @@ _PROJECT_SAFE_KEYS = frozenset(
         "router",
         "router_style",
         "jev_compaction",
-        "memory_injection",
         "token_budget",
         "workspace_snapshot_cap",
     }
@@ -290,8 +289,8 @@ def _strip_unsafe_project_keys(
         return data
     where = _display_path(path) if path is not None else "project settings"
     warnings.append(
-        "settings · project layer cannot grant approvals or remap "
-        "keybindings/theme; "
+        "settings · project layer cannot grant approvals or memory access, or "
+        "remap keybindings/theme; "
         f"ignoring {', '.join(unsafe)} in {where} (see docs)"
     )
     return {key: value for key, value in data.items() if key not in unsafe}

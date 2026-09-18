@@ -14,6 +14,7 @@ from evals.run_evals import (
     contains_forbidden_tool,
     contains_ordered_subsequence,
     load_tasks,
+    main,
     parse_events,
     qualified_tool_calls,
     run_evals,
@@ -1232,6 +1233,23 @@ def test_build_command_selects_router_mode() -> None:
         "task", "prompt", 1, "stock", memory_injection=True
     )
     assert "--memory-injection" in injected
+
+
+def test_memory_injection_eval_requires_jev_api_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+
+    assert main(
+        [
+            "--mode",
+            "stock",
+            "--memory-injection",
+            "--tasks-file",
+            str(tmp_path / "tasks.jsonl"),
+        ]
+    ) == 2
+    assert "JEV_API_KEY is required" in capsys.readouterr().err
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:
