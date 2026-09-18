@@ -89,3 +89,13 @@ shows route calls; unrouted_attempts == 0) and the task completes.
 GUI changes, MCP tools in the catalog (keep whatever the registry reports,
 but no special handling), baseline-vs-router token benchmarking (later),
 upstream zeta merges (never).
+
+## Status: live smoke PASSED (2026-09-18)
+
+Headless run at head `b8b9bbb0` (claude provider, subscription OAuth, yolo,
+router default-on): task "read notes.txt, count jev mentions, write count".
+Tool order `route -> read -> route -> write`; first route hit confidence
+0.79 and the top-3 expansion fired (read 0.79 / bash 0.17 / exec 0.04) with
+the agent choosing correctly; second route `write` at 1.00; zero unrouted
+attempts; output correct. Build history: 4 implement lanes (JEV-15..18),
+3 review rounds, findings 6 -> 2 -> 0.
