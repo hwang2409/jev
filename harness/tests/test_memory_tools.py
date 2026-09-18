@@ -4,10 +4,14 @@ import asyncio
 import json
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
+from pausanias.config import load_config
 
+from zeta.core.approval import ApprovalPolicy
+from zeta.core.store import ConversationStore
 from zeta.settings import load_settings
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
@@ -76,12 +80,20 @@ def _multi_project_config(tmp_path: Path) -> Path:
     return path
 
 
-def _registry(tmp_path: Path, config: Path | None = None) -> ToolRegistry:
+def _registry(
+    tmp_path: Path,
+    config: Path | None = None,
+    *,
+    approval_policy: ApprovalPolicy | None = None,
+    enforce_approvals: bool = False,
+) -> ToolRegistry:
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
         skill_catalog=SkillCatalog.empty(),
         memory_config=str(config) if config is not None else None,
+        approval_policy=approval_policy,
+        enforce_approvals=enforce_approvals,
     )
     memory_tools.register(registry)
     return registry
@@ -179,6 +191,51 @@ async def test_memory_store_is_immediately_searchable(tmp_path: Path) -> None:
     assert search["isError"] is False
     assert any(
         item["path"].endswith("release-decision.md")
+        and "Ship the local index with the release notes." in item["excerpt"]
+        for item in search["structuredContent"]["items"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_memory_store_uses_config_directory_for_relative_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_dir = tmp_path / "config"
+    corpus = config_dir / "corpus"
+    config_dir.mkdir()
+    corpus.mkdir()
+    config = config_dir / "pausanias.toml"
+    config.write_text(
+        "database = \"index.sqlite3\"\n\n"
+        "[[roots]]\n"
+        "id = \"fixture\"\n"
+        "path = \"corpus\"\n"
+        "project = \"fixture\"\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    registry = _registry(tmp_path, config)
+
+    stored = await registry.execute(
+        ToolCall(
+            "relative-store",
+            "memory_store",
+            {"topic": "Relative Root", "content": "Stored beside config."},
+        )
+    )
+
+    assert stored["isError"] is False
+    assert load_config(config).roots[0].path == corpus.resolve()
+    assert (corpus / "relative-root.md").exists()
+    assert not (tmp_path / "corpus" / "relative-root.md").exists()
+
+    search = await registry.execute(
+        ToolCall("relative-search", "memory_search", {"query": "beside config"})
+    )
+    assert search["isError"] is False
+    assert any(
+        item["path"].endswith("relative-root.md")
+        and "Stored beside config." in item["excerpt"]
         for item in search["structuredContent"]["items"]
     )
 
@@ -203,15 +260,79 @@ async def test_memory_store_appends_dated_sections_and_searches_both(
         assert result["isError"] is False
 
     stored_text = (corpus / "deployment.md").read_text(encoding="utf-8")
-    assert stored_text.count("## 2026-") == 1
+    headings = [line[3:] for line in stored_text.splitlines() if line.startswith("## ")]
+    assert len(headings) == 1
+    datetime.fromisoformat(headings[0])
     assert "Use the blue deployment path." in stored_text
     assert "Keep the green rollback path." in stored_text
-    for query in ("blue deployment", "green rollback"):
+    for query, excerpt_content in (
+        ("blue deployment", "Use the blue deployment path."),
+        ("green rollback", "Keep the green rollback path."),
+    ):
         result = await registry.execute(
             ToolCall(query, "memory_search", {"query": query})
         )
         assert result["isError"] is False
-        assert any(item["path"].endswith("deployment.md") for item in result["structuredContent"]["items"])
+        assert any(
+            item["path"].endswith("deployment.md")
+            and excerpt_content in item["excerpt"]
+            for item in result["structuredContent"]["items"]
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_store_rejects_symlink_swap_without_writing_outside_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    config = _config(tmp_path, corpus)
+    outside = tmp_path / "outside.md"
+    outside.write_text("keep this file\n", encoding="utf-8")
+    target = corpus / "race.md"
+    original_exists = Path.exists
+
+    def swap_after_validation(path: Path) -> bool:
+        exists = original_exists(path)
+        if path == target and not exists:
+            target.symlink_to(outside)
+        return exists
+
+    monkeypatch.setattr(Path, "exists", swap_after_validation)
+    result = await _registry(tmp_path, config).execute(
+        ToolCall("symlink-swap", "memory_store", {"topic": "Race", "content": "unsafe"})
+    )
+
+    monkeypatch.undo()
+    assert result["isError"] is False
+    assert outside.read_text(encoding="utf-8") == "keep this file\n"
+    assert target.is_file()
+    assert not target.is_symlink()
+    assert "unsafe" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_memory_store_denial_is_canceled_without_creating_file(tmp_path: Path) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    config = _config(tmp_path, corpus)
+    registry = _registry(
+        tmp_path,
+        config,
+        approval_policy=ApprovalPolicy(
+            always_deny={"memory_store"}, store=ConversationStore(tmp_path)
+        ),
+        enforce_approvals=True,
+    )
+
+    result = await registry.execute(
+        ToolCall("denied-store", "memory_store", {"topic": "Denied", "content": "nope"})
+    )
+
+    assert result["isError"] is True
+    assert result["isCanceled"] is True
+    assert _text(result) == "tool execution canceled"
+    assert not (corpus / "denied.md").exists()
 
 
 @pytest.mark.asyncio
