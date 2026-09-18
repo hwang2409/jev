@@ -203,7 +203,7 @@ class EventStoreAdapter:
                 else value.timeIntervalSince1970()
             )
             if event_tz is None:
-                return datetime.fromtimestamp(timestamp, UTC).replace(tzinfo=None)
+                return datetime.fromtimestamp(timestamp)
             return datetime.fromtimestamp(timestamp, event_tz)
 
         calendar = event.calendar()
@@ -288,6 +288,12 @@ def _event_dict(event: CalendarEvent) -> dict[str, object]:
     return value
 
 
+def _local_aware(value: datetime) -> datetime:
+    """Treat naive datetimes as local time and convert all values to local time."""
+
+    return value.astimezone()
+
+
 def _failure(exc: Exception, *, kind: str = "error") -> StructuredToolResult:
     return _error_result(str(exc), kind=kind)
 
@@ -348,11 +354,13 @@ async def _calendar_events(
         calendar = values["calendar"]
         active_adapter = adapter if adapter is not None else _event_store_adapter()
         _ensure_authorized(active_adapter)
+        local_start = _local_aware(start)
+        local_end = _local_aware(end)
         events = [
             event
             for event in active_adapter.fetch_events(start, end)
-            if event.end > start
-            and event.start < end
+            if _local_aware(event.end) > local_start
+            and _local_aware(event.start) < local_end
             and (calendar is None or event.calendar_name == calendar)
         ]
         payload = {"events": [_event_dict(event) for event in events]}

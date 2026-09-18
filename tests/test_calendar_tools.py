@@ -329,6 +329,34 @@ def test_eventkit_conversion_preserves_notes_zones_and_floating_dates() -> None:
     assert calendar_module._event_dict(all_day_event)["end"] == "2026-01-03"
 
 
+def test_eventkit_floating_conversion_preserves_wall_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        floating = FakeEventKitEvent(
+            title="floating",
+            start=datetime(2026, 1, 2, 9),  # noqa: DTZ001 - fake floating EventKit data
+            end=datetime(2026, 1, 2, 10),  # noqa: DTZ001 - fake floating EventKit data
+            calendar="work",
+            notes=None,
+            timezone_value=None,
+        )
+
+        floating_event = calendar_module.EventStoreAdapter._event_from_ek(floating)
+
+        assert floating_event.start == datetime(2026, 1, 2, 9)
+        assert floating_event.end == datetime(2026, 1, 2, 10)
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
+
+
 def test_eventkit_date_conversion_uses_process_timezone_for_naive_values(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -379,6 +407,57 @@ async def test_events_cap_window_and_parse_iso_errors_without_adapter_access() -
     assert invalid["isError"] is True
     assert "ISO-8601" in str(invalid["content"])
     assert adapter.fetched is None
+
+
+@pytest.mark.asyncio
+async def test_events_normalize_naive_and_floating_datetimes_for_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_tz = os.environ.get("TZ")
+    monkeypatch.setenv("TZ", "America/New_York")
+    time.tzset()
+    try:
+        zoned_adapter = FakeCalendarAdapter(
+            [
+                event(
+                    "zoned",
+                    "2026-01-02T14:00:00+00:00",
+                    "2026-01-02T15:00:00+00:00",
+                    "work",
+                )
+            ]
+        )
+        zoned_result = await calendar_module._calendar_events(
+            None,
+            {
+                "start": "2026-01-02T08:00:00",
+                "end": "2026-01-02T10:00:00",
+                "calendar": None,
+            },
+            adapter=zoned_adapter,
+        )
+
+        floating_adapter = FakeCalendarAdapter(
+            [event("floating", "2026-01-02T09:00:00", "2026-01-02T10:00:00", "work")]
+        )
+        floating_result = await calendar_module._calendar_events(
+            None,
+            {
+                "start": "2026-01-02T14:00:00+00:00",
+                "end": "2026-01-02T15:00:00+00:00",
+                "calendar": None,
+            },
+            adapter=floating_adapter,
+        )
+
+        assert len(structured(zoned_result)["events"]) == 1
+        assert len(structured(floating_result)["events"]) == 1
+    finally:
+        if original_tz is None:
+            monkeypatch.delenv("TZ", raising=False)
+        else:
+            monkeypatch.setenv("TZ", original_tz)
+        time.tzset()
 
 
 @pytest.mark.asyncio
