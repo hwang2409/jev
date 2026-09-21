@@ -607,7 +607,12 @@ async def test_memory_injection_is_bounded_and_dedupes_tool_results(
         "auto_route",
         async_result(
             AutoRouteResult(
-                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_relevance={"candidate-0": 0.9}
+                "read",
+                {"read": 1.0},
+                1.0,
+                1.0,
+                {},
+                memory_relevance={"candidate-0": 0.9, "candidate-1": 0.9},
             )
         ),
     )
@@ -918,12 +923,12 @@ async def test_empty_retrieval_skips_candidate_jev_call(
 async def test_stock_memory_relevance_runs_once_per_user_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    gate_calls = 0
+    relevance_calls = 0
     search_calls = 0
 
-    async def gate(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
-        nonlocal gate_calls
-        gate_calls += 1
+    async def relevance(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
+        nonlocal relevance_calls
+        relevance_calls += 1
         return MemoryRelevanceResult({"candidate-0": 0.9}, {"input_tokens": 1})
 
     async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
@@ -937,7 +942,7 @@ async def test_stock_memory_relevance_runs_once_per_user_turn(
             },
         }
 
-    monkeypatch.setattr(loop_module, "memory_relevance", gate)
+    monkeypatch.setattr(loop_module, "memory_relevance", relevance)
     monkeypatch.setattr(loop_module, "_memory_search", search)
     loop = build_loop(
         tmp_path,
@@ -949,7 +954,7 @@ async def test_stock_memory_relevance_runs_once_per_user_turn(
 
     await collect(loop.run_turn("answer this"))
 
-    assert gate_calls == 1
+    assert relevance_calls == 1
     assert search_calls == 1
 
 
@@ -957,10 +962,19 @@ async def test_stock_memory_relevance_runs_once_per_user_turn(
 async def test_memory_injection_relevance_failure_is_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def gate(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
+    async def relevance(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
         raise RuntimeError("jev unavailable")
 
-    monkeypatch.setattr(loop_module, "memory_relevance", gate)
+    monkeypatch.setattr(loop_module, "memory_relevance", relevance)
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "isError": False,
+            "structuredContent": {
+                "items": [memory_result("one.md", ["Fact"], "stored")]
+            },
+        }
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
     loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
     loop.router_mode = False
     loop.memory_injection = True
@@ -1036,6 +1050,25 @@ async def test_memory_injection_skip_reasons(
             return search_result
 
         monkeypatch.setattr(loop_module, "_memory_search", search)
-        decision = await loop._inject_memory(candidates, {"candidate-0": 0.9})
+        candidates, retrieval_reason, retrieval_capped = await loop._retrieve_memory(
+            "remember"
+        )
+        decision = await loop._inject_memory(
+            candidates,
+            {candidate["id"]: 0.9 for candidate in candidates},
+            retrieval_reason=retrieval_reason,
+            retrieval_capped=retrieval_capped,
+        )
+
+    if case == "unconfigured":
+        candidates, retrieval_reason, retrieval_capped = await loop._retrieve_memory(
+            "remember"
+        )
+        decision = await loop._inject_memory(
+            candidates,
+            None,
+            retrieval_reason=retrieval_reason,
+            retrieval_capped=retrieval_capped,
+        )
 
     assert decision["reason"] == expected
