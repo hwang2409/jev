@@ -352,6 +352,7 @@ class ServerRuntime:
             cli_provider=provider if provider is not None else self._server_provider,
             cli_model=model if model is not None else self._server_model,
             cli_yolo=None,
+            cli_safety_tier=None,
             cli_token_budget=None,
             cli_router=self._server_router,
             cli_router_style=self._server_router_style,

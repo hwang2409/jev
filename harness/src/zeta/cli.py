@@ -62,6 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--safety-tier",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="use Jev safety checks before yolo shell commands",
+    )
+    parser.add_argument(
         "--router",
         dest="router",
         action=argparse.BooleanOptionalAction,

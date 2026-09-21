@@ -16,7 +16,7 @@ one table entry (``[approval]\\nallow = [...]``) without restating unrelated
 tables, but replacing a list is one atomic swap.
 
 Trust boundary: the project layer may only contribute safe keys — provider,
-model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_injection``, ``memory_config``, ``yolo``, ``[approval]``,
+model, router, jev_compaction, token_budget, workspace_snapshot_cap. ``memory_injection``, ``memory_config``, ``yolo``, ``safety_tier``, ``[approval]``,
 ``theme``, and ``[keybindings]`` from the project file are IGNORED with a
 loud startup warning. Global settings retain full key access. A future
 ``/trust`` mechanism may relax this per-repo, but until then a hostile
@@ -56,6 +56,7 @@ _TOP_KEYS = frozenset(
         "jev_compaction",
         "memory_injection",
         "yolo",
+        "safety_tier",
         "token_budget",
         "theme",
         "approval",
@@ -92,6 +93,7 @@ class Settings:
     jev_compaction: bool | None = None
     memory_injection: bool | None = None
     yolo: bool | None = None
+    safety_tier: bool | None = None
     token_budget: int | None = None
     theme: str | None = None
     approval_allow: tuple[str, ...] = ()
@@ -115,6 +117,7 @@ class ResolvedConfig:
     jev_compaction: bool
     memory_injection: bool
     yolo: bool
+    safety_tier: bool
     token_budget: int | None
     theme: str | None
     approval_allow: tuple[str, ...]
@@ -167,6 +170,7 @@ def resolve(
     cli_provider: str | None,
     cli_model: str | None,
     cli_yolo: bool | None,
+    cli_safety_tier: bool | None = None,
     cli_token_budget: int | None,
     default_provider: str = "fake",
     cli_router: bool | None = None,
@@ -208,6 +212,11 @@ def resolve(
         )
     )
     yolo = bool(settings.yolo) if cli_yolo is None else cli_yolo
+    safety_tier = (
+        bool(settings.safety_tier)
+        if cli_safety_tier is None
+        else cli_safety_tier
+    )
     token_budget = (
         cli_token_budget if cli_token_budget is not None else settings.token_budget
     )
@@ -219,6 +228,7 @@ def resolve(
         jev_compaction=bool(jev_compaction),
         memory_injection=bool(memory_injection),
         yolo=yolo,
+        safety_tier=safety_tier,
         token_budget=token_budget,
         theme=settings.theme,
         approval_allow=settings.approval_allow,
@@ -322,6 +332,7 @@ def _validate(
     memory_injection = _validated_bool(data, "memory_injection", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
+    safety_tier = _validated_bool(data, "safety_tier", notices)
     token_budget = _validated_positive_int(data, "token_budget", notices)
     stream_stall_seconds = _validated_positive_int(
         data, "stream_stall_seconds", notices
@@ -343,6 +354,7 @@ def _validate(
         jev_compaction=jev_compaction,
         memory_injection=memory_injection,
         yolo=yolo,
+        safety_tier=safety_tier,
         token_budget=token_budget,
         theme=theme,
         approval_allow=allow,

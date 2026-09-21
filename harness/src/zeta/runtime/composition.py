@@ -11,6 +11,7 @@ from typing import Any
 from ..core.approval import ApprovalDecision, ApprovalPolicy
 from ..core.hooks import load_hooks_for_provider
 from ..core.project_context import ProjectContext, discover_repo_root
+from ..core.safety import SafetyTier
 from ..core.session import OpenedSession, SessionManager
 from ..core.slash import resolve_session_budget
 from ..loop import AgentLoop
@@ -134,6 +135,11 @@ def compose_runtime(
         registry = ToolRegistry(
             opened.store.cwd,
             memory_config=config.memory_config,
+            safety_tier=(
+                SafetyTier(cwd=opened.store.cwd)
+                if config.safety_tier and config.yolo
+                else None
+            ),
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
