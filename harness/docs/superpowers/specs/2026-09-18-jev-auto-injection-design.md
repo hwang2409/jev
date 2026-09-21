@@ -97,3 +97,20 @@ state), one-Jev-call-per-turn still holds in auto with candidates present,
 relevance threshold gating, updated skip reasons, off-flag byte-identity
 maintained. Acceptance: rerun the injection-on arms; decision data =
 whether injections now FIRE on the memory tasks and whether they help.
+
+## Amendment 2: stale-version guard (2026-09-21, approved)
+
+The rtj eval exposed stale-version injection: on update-flows, the
+pre-update excerpt (relevance 0.81) anchored the model's "latest" answer.
+Two guards:
+
+1. RECENCY PREFERENCE: when multiple candidates share a topic file, only
+   the most recent section (per the dated H2 convention) is eligible;
+   older sections of the same file are skipped (reason: superseded).
+2. ACTIVE-TOPIC SUPPRESSION: when the session has ALREADY written to a
+   topic via memory_store, suppress all further injection from that
+   topic's file for the rest of the session (reason: actively_modified) —
+   the durable store is being changed under the excerpts' feet; the
+   agent's own writes are the freshest truth and already in context.
+
+Telemetry gains the two new skip reasons. Everything else unchanged.
