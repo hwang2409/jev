@@ -175,3 +175,39 @@ Head `afe4b5e`. Single-run samples; treat small deltas cautiously.
 | stock | 7/8 | 5/8 | 200.6k | 0 |
 
 This is the reference for the memory auto-injection A/B.
+
+# Memory auto-injection A/B — 2026-09-21
+
+Head `62bbe41` (PR #1). Injection-on arms vs the calibrated baseline
+(off-arm valid via the proven byte-identical off-flag). Records:
+`results/injection-*.json`.
+
+## The finding: the gate never opens
+
+Across all 16 injection-on runs, ZERO injections occurred. Every gate
+score fell in 0.13-0.47 against the 0.6 threshold — including tasks where
+recall obviously helps (two-note-synthesis 0.23, seeded-recall 0.19).
+All apparent completion deltas (+1/-1 auto, -2 stock) are run variance:
+nothing was injected, so the arms were functionally identical.
+
+## Diagnosis
+
+The gate asks Jev an unanswerable question: "would stored memories help?"
+judged from task+assistant text alone — Jev cannot see whether relevant
+memories EXIST, and (per its documented literal-reading jaggedness) it
+correctly hedges low on unverifiable claims. Same conservatism pattern as
+compaction triage keep-probabilities. This is a design lesson, not a Jev
+defect: speculative gates on unseen evidence do not open.
+
+## Paths forward (Henry's pick)
+
+1. Retrieve-then-judge redesign (recommended): always run the cheap local
+   pausanias search (~ms), then Jev judges the CANDIDATES' relevance to
+   the next step (the rerank/semantic_find cookbook pattern — a question
+   Jev demonstrably answers well). Gate on candidate relevance, not
+   speculation.
+2. Threshold tuning (weak: scores cluster 0.13-0.47; a 0.3 threshold
+   would fire on noise as often as signal).
+3. Accept the negative and keep memory tool-mediated only.
+
+Costs held: stock's gate ran per-user-turn at 3.1k Jev tokens total.
