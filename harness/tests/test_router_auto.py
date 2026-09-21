@@ -14,7 +14,7 @@ from zeta.core.store import ConversationStore
 from zeta.loop import AgentLoop
 from zeta.providers.anthropic_payload import build_messages_payload
 from zeta.providers.codex_payload import build_responses_payload
-from zeta.providers.jev import AutoRouteResult, MemoryGateResult
+from zeta.providers.jev import AutoRouteResult, MemoryRelevanceResult
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
 from zeta.types import (
@@ -607,7 +607,12 @@ async def test_memory_injection_is_bounded_and_dedupes_tool_results(
         "auto_route",
         async_result(
             AutoRouteResult(
-                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.9
+                "read",
+                {"read": 1.0},
+                1.0,
+                1.0,
+                {},
+                memory_relevance={"candidate-0": 0.9, "candidate-1": 0.9},
             )
         ),
     )
@@ -667,7 +672,13 @@ async def test_memory_injection_caps_framed_blocks_not_only_excerpts(
         }
 
     monkeypatch.setattr(loop_module, "_memory_search", search)
-    decision = await loop._inject_memory("remember", 0.9)
+    candidates, retrieval_reason, capped = await loop._retrieve_memory("remember")
+    decision = await loop._inject_memory(
+        candidates,
+        {candidate["id"]: 0.9 for candidate in candidates},
+        retrieval_reason=retrieval_reason,
+        retrieval_capped=capped,
+    )
 
     injected = [
         block.text
@@ -702,7 +713,13 @@ async def test_memory_injection_dedupes_identical_content_at_different_paths(
         }
 
     monkeypatch.setattr(loop_module, "_memory_search", search)
-    decision = await loop._inject_memory("remember", 0.9)
+    candidates, retrieval_reason, capped = await loop._retrieve_memory("remember")
+    decision = await loop._inject_memory(
+        candidates,
+        {candidate["id"]: 0.9 for candidate in candidates},
+        retrieval_reason=retrieval_reason,
+        retrieval_capped=capped,
+    )
 
     injected = [
         block.text
@@ -727,7 +744,7 @@ async def test_memory_injection_reinjects_changed_prior_memory_search_results(
         "auto_route",
         async_result(
             AutoRouteResult(
-                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.9
+                "read", {"read": 1.0}, 1.0, 1.0, {}, memory_relevance={"candidate-0": 0.9}
             )
         ),
     )
@@ -756,7 +773,13 @@ async def test_memory_injection_reinjects_changed_prior_memory_search_results(
     )
     monkeypatch.setattr(loop_module, "_memory_search", search)
 
-    decision = await loop._inject_memory("remember this", 0.9)
+    candidates, retrieval_reason, capped = await loop._retrieve_memory("remember this")
+    decision = await loop._inject_memory(
+        candidates,
+        {candidate["id"]: 0.9 for candidate in candidates},
+        retrieval_reason=retrieval_reason,
+        retrieval_capped=capped,
+    )
 
     injected = [
         block.text
@@ -795,7 +818,13 @@ async def test_memory_injection_dedupes_same_content_at_same_location(
         }
 
     monkeypatch.setattr(loop_module, "_memory_search", search)
-    decision = await loop._inject_memory("remember this", 0.9)
+    candidates, retrieval_reason, capped = await loop._retrieve_memory("remember this")
+    decision = await loop._inject_memory(
+        candidates,
+        {candidate["id"]: 0.9 for candidate in candidates},
+        retrieval_reason=retrieval_reason,
+        retrieval_capped=capped,
+    )
 
     assert not any(
         isinstance(block, TextContent)
@@ -816,7 +845,7 @@ async def test_auto_injection_does_not_make_a_second_jev_call(
         nonlocal calls
         calls += 1
         return AutoRouteResult(
-            "read", {"read": 1.0}, 1.0, 1.0, {}, memory_help=0.1
+            "read", {"read": 1.0}, 1.0, 1.0, {}, memory_relevance={}
         )
 
     monkeypatch.setattr(loop_module, "auto_route", route)
@@ -830,7 +859,7 @@ async def test_auto_injection_does_not_make_a_second_jev_call(
 
 
 @pytest.mark.asyncio
-async def test_auto_memory_gate_question_requires_memory_config(
+async def test_auto_retrieval_passes_candidates_to_existing_jev_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     seen: list[dict[str, object]] = []
@@ -845,22 +874,62 @@ async def test_auto_memory_gate_question_requires_memory_config(
 
     await loop._prepare_auto_route("answer this")
     loop.tool_registry.memory_config = "fixture.toml"
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "isError": False,
+            "structuredContent": {
+                "items": [memory_result("one.md", ["Fact"], "stored")]
+            },
+        }
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
     await loop._prepare_auto_route("answer this")
 
-    assert seen == [{}, {"memory_injection": True}]
+    assert len(seen) == 2
+    assert seen[0] == {}
+    assert seen[1] == {
+        "memory_candidates": [{
+            "id": "candidate-0",
+            "path": "one.md",
+            "heading": ["Fact"],
+            "excerpt": "stored",
+            "content_hash": loop_module._memory_content_hash("stored"),
+        }]
+    }
 
 
 @pytest.mark.asyncio
-async def test_stock_memory_gate_runs_once_per_user_turn(
+async def test_empty_retrieval_skips_candidate_jev_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    gate_calls = 0
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"isError": False, "structuredContent": {"items": []}}
+
+    async def relevance(*_args: object, **_kwargs: object) -> MemoryRelevanceResult:
+        raise AssertionError("candidate judging should not run")
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
+    monkeypatch.setattr(loop_module, "memory_relevance", relevance)
+    loop = build_loop(tmp_path, [])
+    loop.tool_registry.memory_config = "fixture.toml"
+
+    decision, usage = await loop._prepare_user_memory("remember this")
+
+    assert decision["reason"] == "no_candidates"
+    assert usage == {}
+
+
+@pytest.mark.asyncio
+async def test_stock_memory_relevance_runs_once_per_user_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relevance_calls = 0
     search_calls = 0
 
-    async def gate(_query: str) -> MemoryGateResult:
-        nonlocal gate_calls
-        gate_calls += 1
-        return MemoryGateResult(0.9, {"input_tokens": 1})
+    async def relevance(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
+        nonlocal relevance_calls
+        relevance_calls += 1
+        return MemoryRelevanceResult({"candidate-0": 0.9}, {"input_tokens": 1})
 
     async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
         nonlocal search_calls
@@ -873,7 +942,7 @@ async def test_stock_memory_gate_runs_once_per_user_turn(
             },
         }
 
-    monkeypatch.setattr(loop_module, "memory_gate", gate)
+    monkeypatch.setattr(loop_module, "memory_relevance", relevance)
     monkeypatch.setattr(loop_module, "_memory_search", search)
     loop = build_loop(
         tmp_path,
@@ -885,18 +954,27 @@ async def test_stock_memory_gate_runs_once_per_user_turn(
 
     await collect(loop.run_turn("answer this"))
 
-    assert gate_calls == 1
+    assert relevance_calls == 1
     assert search_calls == 1
 
 
 @pytest.mark.asyncio
-async def test_memory_injection_gate_failure_is_silent(
+async def test_memory_injection_relevance_failure_is_silent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    async def gate(_query: str) -> MemoryGateResult:
+    async def relevance(_query: str, _candidates: list[dict[str, object]]) -> MemoryRelevanceResult:
         raise RuntimeError("jev unavailable")
 
-    monkeypatch.setattr(loop_module, "memory_gate", gate)
+    monkeypatch.setattr(loop_module, "memory_relevance", relevance)
+    async def search(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "isError": False,
+            "structuredContent": {
+                "items": [memory_result("one.md", ["Fact"], "stored")]
+            },
+        }
+
+    monkeypatch.setattr(loop_module, "_memory_search", search)
     loop = build_loop(tmp_path, [ScriptedTurn(content=[TextContent("done")])])
     loop.router_mode = False
     loop.memory_injection = True
@@ -920,7 +998,7 @@ async def test_memory_injection_gate_failure_is_silent(
     ("case", "expected"),
     [
         ("unconfigured", "memory_unconfigured"),
-        ("below_threshold", "gate_below_threshold"),
+        ("below_threshold", "below_relevance"),
         ("memory_error", "memory_error"),
         ("deduped", "deduped"),
         ("capped", "capped"),
@@ -937,8 +1015,9 @@ async def test_memory_injection_skip_reasons(
         loop.tool_registry.memory_config = "fixture.toml"
     loop.store.append_message(Message(MessageRole.USER, [TextContent("remember")]))
 
+    candidates = [{"id": "candidate-0", "path": "same.md", "heading": ["Same"], "excerpt": "stored", "content_hash": loop_module._memory_content_hash("stored")}]
     if case == "below_threshold":
-        decision = await loop._inject_memory("remember", 0.2)
+        decision = await loop._inject_memory(candidates, {"candidate-0": 0.2})
     else:
         if case == "memory_error":
             search_result: dict[str, object] = {"isError": True}
@@ -971,6 +1050,25 @@ async def test_memory_injection_skip_reasons(
             return search_result
 
         monkeypatch.setattr(loop_module, "_memory_search", search)
-        decision = await loop._inject_memory("remember", 0.9)
+        candidates, retrieval_reason, retrieval_capped = await loop._retrieve_memory(
+            "remember"
+        )
+        decision = await loop._inject_memory(
+            candidates,
+            {candidate["id"]: 0.9 for candidate in candidates},
+            retrieval_reason=retrieval_reason,
+            retrieval_capped=retrieval_capped,
+        )
+
+    if case == "unconfigured":
+        candidates, retrieval_reason, retrieval_capped = await loop._retrieve_memory(
+            "remember"
+        )
+        decision = await loop._inject_memory(
+            candidates,
+            None,
+            retrieval_reason=retrieval_reason,
+            retrieval_capped=retrieval_capped,
+        )
 
     assert decision["reason"] == expected

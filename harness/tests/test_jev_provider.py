@@ -77,7 +77,7 @@ def auto_response() -> Response:
 
 def auto_memory_response() -> Response:
     response = auto_response()
-    response._data["answers"]["memory_help"] = {"noul": 0.75}
+    response._data["answers"]["memory_relevance_0"] = {"noul": 0.75}
     return response
 
 
@@ -247,7 +247,7 @@ async def test_auto_route_truncates_state_and_uses_two_questions(
 
 
 @pytest.mark.asyncio
-async def test_auto_route_adds_memory_gate_only_when_enabled(
+async def test_auto_route_adds_candidate_relevance_questions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     Client.responses = [auto_memory_response()]
@@ -260,22 +260,35 @@ async def test_auto_route_adds_memory_gate_only_when_enabled(
         "I found the report.",
         [],
         {"read": "Read a file"},
-        memory_injection=True,
+        memory_candidates=[{"id": "candidate-0", "excerpt": "stored"}],
     )
 
     request = Client.requests[0]["json"]
-    assert set(request["questions"]) == {"tool", "needs_tool", "memory_help"}
-    assert request["questions"]["memory_help"]["type"] == "noul"
-    assert result.memory_help == pytest.approx(0.75)
+    assert set(request["questions"]) == {
+        "tool",
+        "needs_tool",
+        "memory_relevance_0",
+    }
+    question = request["questions"]["memory_relevance_0"]
+    assert question["type"] == "noul"
+    assert question["instructions"]["question"] == (
+        "Is this excerpt relevant to the agent's next step?"
+    )
+    assert request["state"]["memory_candidates"] == [
+        {"id": "candidate-0", "excerpt": '"stored"'}
+    ]
+    assert result.memory_relevance == {"candidate-0": pytest.approx(0.75)}
 
 
 @pytest.mark.asyncio
-async def test_memory_gate_uses_mechanical_query(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_memory_relevance_uses_quoted_candidate_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Client.responses = [
         Response(
             200,
             {
-                "answers": {"memory_help": {"noul": 0.8}},
+                "answers": {"memory_relevance_0": {"noul": 0.8}},
                 "usage": {"input_tokens": 4, "output_tokens": 2},
             },
         )
@@ -284,11 +297,17 @@ async def test_memory_gate_uses_mechanical_query(monkeypatch: pytest.MonkeyPatch
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
     monkeypatch.setenv("JEV_API_KEY", "test-key")
 
-    result = await jev.memory_gate("objective\nlatest assistant")
+    result = await jev.memory_relevance(
+        "objective\nlatest assistant",
+        [{"id": "candidate-0", "excerpt": "stored"}],
+    )
 
     request = Client.requests[0]["json"]
-    assert request["state"] == {"query": "objective\nlatest assistant"}
-    assert result.score == pytest.approx(0.8)
+    assert request["state"] == {
+        "query": "objective\nlatest assistant",
+        "memory_candidates": [{"id": "candidate-0", "excerpt": '"stored"'}],
+    }
+    assert result.scores == {"candidate-0": pytest.approx(0.8)}
 
 
 @pytest.mark.asyncio
