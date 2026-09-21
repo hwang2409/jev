@@ -75,15 +75,11 @@ async def test_registry_validates_arguments_before_running_handler(tmp_path: Pat
     assert not called
 
 
-def test_registry_rejects_unsupported_schema_constructs(tmp_path: Path) -> None:
+def test_registry_rejects_unsupported_schema_keywords_and_non_json_data(
+    tmp_path: Path,
+) -> None:
     registry = ToolRegistry(tmp_path, register_builtin=False, skill_catalog=SkillCatalog.empty())
 
-    with pytest.raises(ValueError, match="unsupported schema type"):
-        registry.register(
-            "union",
-            lambda arguments: "ran",
-            parameters={"type": ["string", "null"]},
-        )
     with pytest.raises(ValueError, match="unsupported schema keywords"):
         registry.register(
             "alternative",
@@ -105,6 +101,37 @@ def test_registry_rejects_unsupported_schema_constructs(tmp_path: Path) -> None:
             lambda arguments: "ran",
             parameters={"type": "object", "properties": {"value": {"enum": [("x",)]}}},
         )
+
+
+@pytest.mark.asyncio
+async def test_registry_validates_union_schema_types(tmp_path: Path) -> None:
+    called: list[dict[str, object]] = []
+
+    def handler(arguments: dict[str, object]) -> str:
+        called.append(arguments)
+        return "ran"
+
+    registry = ToolRegistry(tmp_path, register_builtin=False, skill_catalog=SkillCatalog.empty())
+    registry.register(
+        "union",
+        handler,
+        parameters={
+            "type": "object",
+            "properties": {"value": {"type": ["string", "null"]}},
+            "required": ["value"],
+            "additionalProperties": False,
+        },
+    )
+
+    string_result = await registry.execute(ToolCall("union-string", "union", {"value": "text"}))
+    null_result = await registry.execute(ToolCall("union-null", "union", {"value": None}))
+    invalid_result = await registry.execute(ToolCall("union-invalid", "union", {"value": 1}))
+
+    assert string_result["isError"] is False
+    assert null_result["isError"] is False
+    assert invalid_result["isError"] is True
+    assert "invalid arguments" in invalid_result["content"][0]["text"]
+    assert called == [{"value": "text"}, {"value": None}]
 
 
 @pytest.mark.asyncio
