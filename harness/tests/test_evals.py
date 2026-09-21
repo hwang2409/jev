@@ -507,7 +507,7 @@ def test_parse_events_surfaces_memory_injection_stats() -> None:
                 "service": "jev",
                 "routing_decision": {
                     "memory_injection": {
-                        "gate_score": 0.8,
+                        "candidate_scores": [{"id": "candidate-0", "score": 0.8}],
                         "injected_count": 2,
                         "chars": 1200,
                     }
@@ -518,7 +518,11 @@ def test_parse_events_surfaces_memory_injection_stats() -> None:
 
     assert result["memory_injection"] == {
         "decisions": [
-            {"gate_score": 0.8, "injected_count": 2, "chars": 1200}
+            {
+                "candidate_scores": [{"id": "candidate-0", "score": 0.8}],
+                "injected_count": 2,
+                "chars": 1200,
+            }
         ],
         "injected_count": 2,
         "chars": 1200,
