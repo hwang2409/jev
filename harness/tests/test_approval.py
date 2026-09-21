@@ -17,7 +17,9 @@ from zeta.core.approval import (
 )
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.loop import AgentLoop
+from zeta.core.safety import SafetyTier
 from zeta.core.store import ConversationIntegrityError, ConversationStore
+from zeta.providers import jev
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolAbortSignal, ToolRegistry
 from zeta.types import (
@@ -36,6 +38,47 @@ pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
 async def collect(events: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
     return [event async for event in events]
+
+
+@pytest.mark.asyncio
+async def test_safety_escalation_pending_request_explains_trigger(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    async def score(*_args: object) -> jev.SafetyScoreResult:
+        return jev.SafetyScoreResult(
+            2,
+            {"2": 1.0},
+            0.95,
+            0.1,
+            0.1,
+            {"input_tokens": 1, "output_tokens": 1},
+            0.95,
+        )
+
+    monkeypatch.setattr(jev, "safety_score", score)
+    store = ConversationStore(tmp_path / "sessions", cwd=tmp_path)
+    policy = ApprovalPolicy(store=store, default=ApprovalDecision.ALLOW)
+    registry = ToolRegistry(
+        tmp_path,
+        approval_policy=policy,
+        approval_store=store,
+        safety_tier=SafetyTier(cwd=tmp_path),
+        skill_catalog=SkillCatalog.empty(),
+    )
+    task = asyncio.create_task(
+        registry.execute(ToolCall("safety-pending", "exec", {"command": "rm -rf build"}))
+    )
+
+    await asyncio.sleep(0.06)
+    pending = policy.pending_requests()
+    assert len(pending) == 1
+    assert pending[0].label == (
+        "safety tier: score=2, level=scoped destructive action, trigger=score_exceeds"
+    )
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 def test_abort_generation_registry_is_monotonic_and_sticky() -> None:

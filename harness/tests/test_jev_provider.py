@@ -99,6 +99,30 @@ def safety_response() -> Response:
     )
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"answers": {}},
+        {"answers": {"score": {"choice": "not-a-level"}}},
+        {
+            "answers": {
+                "score": {
+                    "choice": "1",
+                    "probabilities": {"1": 1.0},
+                    "confidence": 0.9,
+                },
+                "touches_outside_cwd": {"noul": 0.1},
+            }
+        },
+    ],
+)
+def test_parse_safety_response_rejects_missing_or_malformed_payload(
+    payload: dict[str, object],
+) -> None:
+    with pytest.raises(jev.JevRouterError, match="invalid Jev safety response"):
+        jev.parse_safety_response(payload)
+
+
 @pytest.mark.asyncio
 async def test_safety_score_uses_neutral_command_state_and_two_nouls(
     monkeypatch: pytest.MonkeyPatch,
