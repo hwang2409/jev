@@ -211,3 +211,45 @@ defect: speculative gates on unseen evidence do not open.
 3. Accept the negative and keep memory tool-mediated only.
 
 Costs held: stock's gate ran per-user-turn at 3.1k Jev tokens total.
+
+# Retrieve-then-judge injection — 2026-09-21
+
+Head `3e32677` (PR #2). Same arms vs the calibrated baseline.
+Records: `results/rtj-*.json`.
+
+## The redesign works: injections fire, and discriminate
+
+10 injections across the arms, relevance scores 0.79-0.97, ALL on memory
+tasks and ZERO on calendar tasks — the evidence-based question gets the
+confident, discriminating answers the speculative gate could not (the
+phase-2 calibration pattern, reproduced in production).
+
+| Arm | Completed | All-checks | Claude tokens | vs baseline |
+|---|---|---|---|---|
+| stock+inject | 8/8 | 6/8 (best ever on this suite) | 129.4k | -35% tokens |
+| auto+inject | 8/8 | 3/8 | 36.9k | -60% tokens |
+| stock baseline | 7/8 | 5/8 | 200.6k | — |
+| auto baseline | 6/8 | 4/8 | 91.6k | — |
+
+## Findings
+
+1. The flagship rescues happened: stock+inject PASSED two-note-synthesis
+   (both notes injected at 0.91/0.94) and seeded-recall (0.97) — the exact
+   multi-step choreography failures that motivated the feature. Injection
+   also collapses tool round-trips: massive token drops in both arms.
+2. New hazard, real and specific: STALE-VERSION injection on update
+   tasks. stock+inject regressed append-then-latest — the pre-update
+   content (0.81) was injected and anchored the "latest" report.
+   Refinement candidates: recency weighting, or suppressing injection for
+   topics the task is actively modifying (memory_store knows).
+3. Auto mode's multi-step flakiness persists independent of injection
+   (two-note regressed there despite perfect 0.92/0.94 injections;
+   cross-surface regressed with zero injections involved). Injection
+   helps most where the base mode is steady: stock.
+
+## Recommendation
+
+stock + retrieve-then-judge injection is the best configuration measured
+on this suite: 8/8 completed, best checks, 35% cheaper than plain stock.
+Default-on is Henry's call; the stale-version hazard is the one caveat
+worth fixing first for daily use.
