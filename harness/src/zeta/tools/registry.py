@@ -73,6 +73,7 @@ _logger = logging.getLogger(__name__)
 ToolHook = Callable[[str, dict[str, Any]], bool | str | Awaitable[bool | str] | None]
 ToolHandlerFactory = Callable[["ToolRegistry"], ToolHandler]
 RouterToolsSink = Callable[[list[str] | None], None]
+MemoryStoreSink = Callable[[str], None]
 
 def _bind_handler(handler: ToolHandler, registry: ToolRegistry) -> ToolHandler:
     return partial(handler, registry)
@@ -469,6 +470,7 @@ class ToolRegistry:
         self._agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None = None
         self.router_tools_sink: RouterToolsSink | None = None
         self.router_recent_steps: list[str] | None = None
+        self.memory_store_sink: MemoryStoreSink | None = None
         self.background_tasks = BackgroundTaskRegistry(
             session_dir=session_store.session_dir if session_store is not None else None,
             directory_fd=session_store.directory_fd if session_store is not None else None,
@@ -661,6 +663,9 @@ class ToolRegistry:
     def set_router_recent_steps(self, steps: list[str] | None) -> None:
         self.router_recent_steps = steps
 
+    def set_memory_store_sink(self, sink: MemoryStoreSink | None) -> None:
+        self.memory_store_sink = sink
+
     def govern_tool_result(self, tool_call: ToolCall, result: ToolResult) -> ToolResult:
         """Apply registry error governance to a legacy tool result."""
 
@@ -807,6 +812,7 @@ class ToolRegistry:
             _lifecycle_sink,
             self.router_tools_sink,
             self.router_recent_steps,
+            self.memory_store_sink,
         )
         handler = bind_execution_context(definition.handler, execution_context)
         execution_arguments = build_execution_arguments(

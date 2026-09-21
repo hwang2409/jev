@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 import zeta.loop as loop_module
+import zeta.tools.memory as memory_tools
 import zeta.tools.route as route_module
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.fake import FakeBackend, ScriptedTurn
@@ -103,6 +104,19 @@ def build_loop(
         router_style="auto",
         skill_catalog=SkillCatalog.empty(),
     )
+
+
+def memory_config(tmp_path: Path, corpus: Path) -> Path:
+    config = tmp_path / "pausanias.toml"
+    config.write_text(
+        f'database = "{tmp_path / "index.sqlite3"}"\n\n'
+        "[[roots]]\n"
+        'id = "fixture"\n'
+        f'path = "{corpus}"\n'
+        'project = "fixture"\n',
+        encoding="utf-8",
+    )
+    return config
 
 
 @pytest.mark.asyncio
@@ -730,6 +744,151 @@ async def test_memory_injection_dedupes_identical_content_at_different_paths(
     ]
     assert len(injected) == 1
     assert decision["reason"] is None
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_uses_newest_dated_section(
+    tmp_path: Path,
+) -> None:
+    loop = build_loop(tmp_path, [])
+    loop.store.append_message(Message(MessageRole.USER, [TextContent("remember")]))
+    candidates = [
+        {
+            "id": "candidate-0",
+            "path": "topic.md",
+            "heading": ["Topic", "2026-09-20T10:00:00+00:00"],
+            "excerpt": "old version",
+            "content_hash": loop_module._memory_content_hash("old version"),
+        },
+        {
+            "id": "candidate-1",
+            "path": "topic.md",
+            "heading": ["Topic", "2026-09-21T10:00:00+00:00"],
+            "excerpt": "new version",
+            "content_hash": loop_module._memory_content_hash("new version"),
+        },
+    ]
+
+    decision = await loop._inject_memory(
+        candidates,
+        {"candidate-0": 0.9, "candidate-1": 0.9},
+    )
+
+    injected = [
+        block.text
+        for message in loop.store.messages()
+        for block in message.content
+        if isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+    ]
+    assert len(injected) == 1
+    assert injected[0].endswith("new version")
+    assert decision["skipped_candidates"] == [
+        {"id": "candidate-0", "reason": "superseded"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_memory_injection_keeps_single_undated_section_eligible(
+    tmp_path: Path,
+) -> None:
+    loop = build_loop(tmp_path, [])
+    loop.store.append_message(Message(MessageRole.USER, [TextContent("remember")]))
+    candidates = [
+        {
+            "id": "candidate-0",
+            "path": "topic.md",
+            "heading": ["Topic"],
+            "excerpt": "first fact",
+            "content_hash": loop_module._memory_content_hash("first fact"),
+        },
+        {
+            "id": "candidate-1",
+            "path": "topic.md",
+            "heading": ["Topic"],
+            "excerpt": "second fact",
+            "content_hash": loop_module._memory_content_hash("second fact"),
+        },
+    ]
+
+    decision = await loop._inject_memory(
+        candidates,
+        {"candidate-0": 0.9, "candidate-1": 0.9},
+    )
+
+    injected = [
+        block.text
+        for message in loop.store.messages()
+        for block in message.content
+        if isinstance(block, TextContent)
+        and block.text.startswith("Recalled reference material")
+    ]
+    assert len(injected) == 2
+    assert decision["skipped_candidates"] == []
+
+
+@pytest.mark.asyncio
+async def test_memory_store_suppresses_real_pausanias_topic_for_session(
+    tmp_path: Path,
+) -> None:
+    corpus = tmp_path / "corpus"
+    corpus.mkdir()
+    config = memory_config(tmp_path, corpus)
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    memory_tools.register(registry)
+    (corpus / "deployment.md").write_text(
+        "# Deployment\n\nUse the seeded deployment policy.\n",
+        encoding="utf-8",
+    )
+    registry.memory_config = str(config)
+    exit_code, _stdout, stderr = await memory_tools._run_pausanias(
+        registry, ["index"]
+    )
+    assert exit_code == 0, stderr
+    loop = AgentLoop(
+        FakeBackend([]),
+        ConversationStore(tmp_path),
+        registry=registry,
+        router_mode=False,
+        memory_injection=True,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    loop.tool_registry.memory_config = str(config)
+
+    stored = await loop.tool_registry.execute(
+        ToolCall(
+            "store-1",
+            "memory_store",
+            {"topic": "Deployment", "content": "Use the new deployment policy."},
+        )
+    )
+    assert stored["isError"] is False
+    assert (corpus / "deployment.md").exists()
+
+    assert "Use the new deployment policy." in (
+        corpus / "deployment.md"
+    ).read_text(encoding="utf-8")
+    candidates, retrieval_reason, retrieval_capped = await loop._retrieve_memory(
+        "deployment policy"
+    )
+    decision = await loop._inject_memory(
+        candidates,
+        None,
+        retrieval_reason=retrieval_reason,
+        retrieval_capped=retrieval_capped,
+    )
+
+    assert candidates == []
+    assert decision["reason"] == "actively_modified"
+    assert decision["skipped_candidates"]
+    assert all(
+        item["reason"] == "actively_modified"
+        for item in decision["skipped_candidates"]
+    )
 
 
 @pytest.mark.asyncio

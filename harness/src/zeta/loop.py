@@ -12,6 +12,8 @@ import warnings
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -110,6 +112,18 @@ MEMORY_INJECTION_TOP_K = 2
 MEMORY_INJECTION_EXCERPT_CHARS = 600
 MEMORY_INJECTION_TOTAL_CHARS = 1500
 _logger = logging.getLogger(__name__)
+
+
+class MemoryInjectionSkipReason(StrEnum):
+    MEMORY_UNCONFIGURED = "memory_unconfigured"
+    MEMORY_ERROR = "memory_error"
+    NO_CANDIDATES = "no_candidates"
+    DEDUPED = "deduped"
+    BELOW_RELEVANCE = "below_relevance"
+    CAPPED = "capped"
+    JEV_ERROR = "jev_error"
+    SUPERSEDED = "superseded"
+    ACTIVELY_MODIFIED = "actively_modified"
 
 
 def _memory_content_hash(value: str) -> str:
@@ -262,6 +276,8 @@ class AgentLoop:
             raise ValueError("router style must be 'tool' or 'auto'")
         self.router_style = router_style
         self.memory_injection = memory_injection
+        self._actively_modified_memory_paths: set[str] = set()
+        self._memory_retrieval_skips: list[dict[str, str]] = []
         self._routed_tools: list[str] = []
         self._router_fail_open = False
         self._router_recent_steps: list[str] = []
@@ -309,6 +325,7 @@ class AgentLoop:
         self.tool_registry.bind_session_store(store)
         self.tool_registry.set_router_tools_sink(self._record_routed_tools)
         self.tool_registry.set_router_recent_steps(self._router_recent_steps)
+        self.tool_registry.set_memory_store_sink(self._record_memory_store)
         self.agent_catalog = self.tool_registry.agent_catalog
         if (
             approval_policy is not None
@@ -577,6 +594,58 @@ class AgentLoop:
         return "\n".join(part for part in (task, last_assistant) if part)
 
     @staticmethod
+    def _memory_path_key(path: str) -> str:
+        return str(Path(path).expanduser().resolve())
+
+    def _record_memory_store(self, path: str) -> None:
+        self._actively_modified_memory_paths.add(self._memory_path_key(path))
+
+    @staticmethod
+    def _memory_section_date(candidate: Mapping[str, object]) -> datetime | None:
+        heading = candidate.get("heading")
+        if not isinstance(heading, list) or len(heading) < 2:
+            return None
+        section = heading[-1]
+        if not isinstance(section, str):
+            return None
+        try:
+            parsed = datetime.fromisoformat(section)
+        except ValueError:
+            return None
+        return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
+
+    def _memory_skip_reasons(
+        self, candidates: Sequence[Mapping[str, object]]
+    ) -> dict[str, str]:
+        by_path: dict[str, list[Mapping[str, object]]] = {}
+        for candidate in candidates:
+            path = candidate.get("path")
+            if isinstance(path, str):
+                by_path.setdefault(self._memory_path_key(path), []).append(candidate)
+
+        skipped: dict[str, str] = {}
+        for path, path_candidates in by_path.items():
+            dated = [
+                date
+                for candidate in path_candidates
+                if (date := self._memory_section_date(candidate)) is not None
+            ]
+            newest = max(dated) if dated else None
+            for candidate in path_candidates:
+                candidate_id = candidate.get("id")
+                if not isinstance(candidate_id, str):
+                    continue
+                if path in self._actively_modified_memory_paths:
+                    skipped[candidate_id] = MemoryInjectionSkipReason.ACTIVELY_MODIFIED.value
+                    continue
+                if newest is None:
+                    continue
+                candidate_date = self._memory_section_date(candidate)
+                if candidate_date is None or candidate_date < newest:
+                    skipped[candidate_id] = MemoryInjectionSkipReason.SUPERSEDED.value
+        return skipped
+
+    @staticmethod
     def _memory_key(
         value: Mapping[str, object],
     ) -> tuple[str, tuple[str, ...], str] | None:
@@ -629,6 +698,7 @@ class AgentLoop:
     async def _retrieve_memory(
         self, query: str
     ) -> tuple[list[dict[str, object]], str | None, bool]:
+        self._memory_retrieval_skips = []
         if self.tool_registry.memory_config is None:
             return [], "memory_unconfigured", False
         try:
@@ -646,13 +716,8 @@ class AgentLoop:
                 return [], "memory_error", False
             known = self._known_memory_keys()
             known_hashes = {key[2] for key in known if key[2]}
-            candidates: list[dict[str, object]] = []
-            deduped = False
-            capped = False
+            raw_candidates: list[dict[str, object]] = []
             for raw in items:
-                if len(candidates) >= MEMORY_INJECTION_TOP_K:
-                    capped = True
-                    break
                 if not isinstance(raw, Mapping):
                     continue
                 excerpt = raw.get("excerpt")
@@ -663,21 +728,50 @@ class AgentLoop:
                 key = self._memory_key({**raw, "content_hash": content_hash})
                 if key is None:
                     continue
+                raw_candidates.append(
+                    {
+                        "id": f"candidate-{len(raw_candidates)}",
+                        "path": key[0],
+                        "heading": list(key[1]),
+                        "excerpt": excerpt,
+                        "content_hash": content_hash,
+                    }
+                )
+            skip_reasons = self._memory_skip_reasons(raw_candidates)
+            self._memory_retrieval_skips = [
+                {"id": candidate_id, "reason": reason}
+                for candidate_id, reason in skip_reasons.items()
+            ]
+            candidates: list[dict[str, object]] = []
+            deduped = False
+            capped = False
+            for candidate in raw_candidates:
+                if len(candidates) >= MEMORY_INJECTION_TOP_K:
+                    capped = True
+                    break
+                candidate_id = candidate["id"]
+                if candidate_id in skip_reasons:
+                    continue
+                content_hash = candidate["content_hash"]
+                key = self._memory_key(candidate)
+                if key is None or not isinstance(content_hash, str):
+                    continue
                 if key in known or content_hash in known_hashes:
                     deduped = True
                     continue
-                candidate = {
-                    "id": f"candidate-{len(candidates)}",
-                    "path": key[0],
-                    "heading": list(key[1]),
-                    "excerpt": excerpt,
-                    "content_hash": content_hash,
-                }
                 candidates.append(candidate)
                 known.add(key)
                 known_hashes.add(content_hash)
             if candidates:
                 return candidates, None, capped
+            if self._memory_retrieval_skips:
+                reasons = {
+                    item["reason"] for item in self._memory_retrieval_skips
+                }
+                if "actively_modified" in reasons:
+                    return [], MemoryInjectionSkipReason.ACTIVELY_MODIFIED.value, capped
+                if "superseded" in reasons:
+                    return [], MemoryInjectionSkipReason.SUPERSEDED.value, capped
             return [], "deduped" if deduped else "no_candidates", capped
         except Exception as exc:  # noqa: BLE001 - retrieval fails open
             _logger.warning("memory injection search failed: %s", exc)
@@ -691,12 +785,31 @@ class AgentLoop:
         retrieval_reason: str | None = None,
         retrieval_capped: bool = False,
     ) -> dict[str, object]:
+        retrieval_skips = list(self._memory_retrieval_skips)
+        self._memory_retrieval_skips = []
         decision: dict[str, object] = {
             "candidate_scores": [],
             "injected_count": 0,
             "chars": 0,
             "reason": retrieval_reason,
+            "skipped_candidates": retrieval_skips,
         }
+        direct_skip_reasons = self._memory_skip_reasons(candidates)
+        if direct_skip_reasons:
+            skipped_ids = {entry["id"] for entry in retrieval_skips}
+            retrieval_skips.extend(
+                {"id": candidate_id, "reason": reason}
+                for candidate_id, reason in direct_skip_reasons.items()
+                if candidate_id not in skipped_ids
+            )
+            decision["skipped_candidates"] = retrieval_skips
+            candidates = [
+                candidate
+                for candidate in candidates
+                if candidate.get("id") not in direct_skip_reasons
+            ]
+            if not candidates and decision["reason"] is None:
+                decision["reason"] = next(iter(direct_skip_reasons.values()))
         if retrieval_reason is not None:
             return decision
         if relevance_scores is None:
