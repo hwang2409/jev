@@ -65,3 +65,35 @@ relevance (manual audit of injected blocks in 3 transcripts).
 
 Default-on decision (Henry's), pausanias precision tuning, memory writes
 from the injector, vault corpus.
+
+## Amendment: retrieve-then-judge (2026-09-21, approved)
+
+The speculative gate never opened (see RESULTS.md A/B: scores 0.13-0.47 vs
+0.6 across 16 runs — Jev cannot affirm the usefulness of memories it cannot
+see). Redesign, replacing Design point 1-2:
+
+1. RETRIEVE FIRST: each turn (auto style; per USER turn in tool/stock),
+   run the local pausanias search with the mechanical query (task +
+   latest-assistant excerpt). Local, ~ms, no Jev cost. No candidates ->
+   skip (reason: no_candidates).
+2. JUDGE CANDIDATES: for the top-k (k=2, post-dedupe) candidates, ask Jev
+   per-candidate relevance Nouls — "is this excerpt relevant to the
+   agent's next step?" with the excerpt IN the question state (an
+   answerable, evidence-based question: the rerank/semantic_find cookbook
+   pattern). In auto style these ride the existing per-turn call; in
+   tool/stock the per-user-turn call carries them. Candidate excerpts are
+   quoted state (neutral-data framing preserved).
+3. INJECT candidates whose relevance exceeds MEMORY_RELEVANCE_GATE (new
+   named tunable, start 0.6; distinct from the removed speculative gate
+   per the per-primitive threshold rule). Everything downstream is
+   UNCHANGED: caps (total 1500 incl. framing), triple-key dedupe, durable
+   blocks, compaction droppability, fail-silence, default-OFF flag,
+   telemetry (skip-reason enum: gate_below_threshold ->
+   below_relevance | no_candidates; per-candidate scores recorded).
+
+Testing deltas: retrieval-runs-locally assertion (no Jev call when zero
+candidates), per-candidate question construction (excerpt quoted as
+state), one-Jev-call-per-turn still holds in auto with candidates present,
+relevance threshold gating, updated skip reasons, off-flag byte-identity
+maintained. Acceptance: rerun the injection-on arms; decision data =
+whether injections now FIRE on the memory tasks and whether they help.
