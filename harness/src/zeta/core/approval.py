@@ -252,8 +252,9 @@ class ApprovalPolicy:
 
     def pending_requests(self) -> list[ApprovalRequest]:
         store = self._require_store()
+        labels = store.approval_labels()
         requests = [
-            ApprovalRequest(request_id, tool_call)
+            ApprovalRequest(request_id, tool_call, label=labels.get(request_id))
             for request_id, tool_call in store.pending_approvals()
         ]
         for (child_id, request_id), (request, delegated_store) in list(
@@ -448,6 +449,7 @@ class ApprovalPolicy:
         *,
         persist_request: bool = True,
         force_ask: bool = False,
+        label: str | None = None,
     ) -> ApprovalDecision | None:
         store = self._require_store()
         state = store.approval_states().get(tool_call.id)
@@ -469,11 +471,11 @@ class ApprovalPolicy:
             if persist_request:
                 store.append_message_with_approval_requests(
                     Message(MessageRole.ASSISTANT, [ToolUseContent(tool_call)]),
-                    [(tool_call.id, tool_call)],
+                    [(tool_call.id, tool_call, label)],
                 )
             else:
                 self._ephemeral[tool_call.id] = (
-                    ApprovalRequest(tool_call.id, tool_call),
+                    ApprovalRequest(tool_call.id, tool_call, label=label),
                     None,
                 )
 
@@ -577,21 +579,28 @@ class ApprovalGate:
         *,
         skip_approval: bool = False,
         persist_request: bool = True,
+        safety_cwd: str | None = None,
     ) -> tuple[ToolResult | None, AbortSignal]:
         execution_signal = signal
-        if self.policy is not None and not skip_approval:
-            force_ask = False
-            if (
-                self.safety_tier is not None
-                and self.policy.durable_decision(tool_call.id) is None
-                and self.policy.decide(tool_call.name, arguments)
-                is ApprovalDecision.ALLOW
-            ):
+        force_ask = False
+        safety_label: str | None = None
+        safety_applies = (
+            self.safety_tier is not None
+            and self.policy is not None
+            and self.safety_tier.applies(tool_call.name)
+        )
+        if (
+            safety_applies
+            and self.policy is not None
+            and self.safety_tier is not None
+            and self.policy.durable_decision(tool_call.id) is None
+            and self.policy.decide(tool_call.name, arguments) is ApprovalDecision.ALLOW
+        ):
                 try:
                     outcome = await self.safety_tier.evaluate(
                         tool_call.name,
                         _shell_command(arguments),
-                        self.safety_tier.command_cwd(arguments),
+                        safety_cwd or self.safety_tier.command_cwd(arguments),
                     )
                 except Exception as exc:  # noqa: BLE001 - safety fails closed
                     outcome = self.safety_tier.fail_closed(exc)
@@ -602,6 +611,9 @@ class ApprovalGate:
                         True,
                     ), execution_signal
                 force_ask = outcome.decision == "ask"
+                if force_ask:
+                    safety_label = self.safety_tier.approval_label(outcome)
+        if self.policy is not None and (not skip_approval or force_ask):
             approval_started = (
                 self.policy.durable_decision(tool_call.id) is None
                 and (force_ask or self.policy.decide(tool_call.name, arguments) is ApprovalDecision.ASK)
@@ -611,7 +623,7 @@ class ApprovalGate:
             try:
                 if persist_request:
                     decision = await self.policy.authorize(
-                        tool_call, signal, force_ask=force_ask
+                        tool_call, signal, force_ask=force_ask, label=safety_label
                     )
                 else:
                     decision = await self.policy.authorize(
@@ -619,6 +631,7 @@ class ApprovalGate:
                         signal,
                         persist_request=False,
                         force_ask=force_ask,
+                        label=safety_label,
                     )
             except Exception as exc:  # noqa: BLE001 - report approval failures
                 return ToolResult(tool_call.id, f"approval failed: {exc}", True), execution_signal

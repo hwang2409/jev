@@ -412,7 +412,7 @@ async def run_inline_shell_batch(
     total_output_limit: int = INLINE_SHELL_TOTAL_OUTPUT_LIMIT,
     batch_timeout: float = INLINE_SHELL_BATCH_TIMEOUT,
 ) -> tuple[str, ...]:
-    """Run inline shell spans with one approval for the complete batch."""
+    """Run inline shell spans with an independent safety gate per command."""
 
     if not commands:
         return ()

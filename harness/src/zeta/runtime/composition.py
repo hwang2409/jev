@@ -20,7 +20,7 @@ from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
 from ..tools._user_discovery import ExternalToolDiscovery, apply_external_tools
 from ..tools.registry import ToolRegistry
-from ..types import CompletionBackend, StreamEvent
+from ..types import CompletionBackend, StreamEvent, StreamEventType
 
 BackendBuilder = Callable[..., tuple[CompletionBackend, str]]
 BackgroundEventSink = Callable[[StreamEvent], None]
@@ -117,6 +117,13 @@ def compose_runtime(
             always_deny=config.approval_deny,
             always_ask=config.approval_ask,
         )
+
+        def safety_telemetry(event: dict[str, object]) -> None:
+            if background_event_sink is not None and "usage" in event:
+                background_event_sink(
+                    StreamEvent(StreamEventType.USAGE, data=dict(event))
+                )
+
         loop_kwargs: dict[str, Any] = {
             "approval_policy": policy,
             "hooks": load_hooks_for_provider(home, provider),
@@ -136,7 +143,14 @@ def compose_runtime(
             opened.store.cwd,
             memory_config=config.memory_config,
             safety_tier=(
-                SafetyTier(cwd=opened.store.cwd)
+                SafetyTier(
+                    cwd=opened.store.cwd,
+                    telemetry=(
+                        safety_telemetry
+                        if background_event_sink is not None
+                        else None
+                    ),
+                )
                 if config.safety_tier and config.yolo
                 else None
             ),

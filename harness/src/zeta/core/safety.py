@@ -16,6 +16,13 @@ SAFETY_CONFIDENCE = 0.8
 SHELL_TOOLS = frozenset({"bash", "exec", "run_background"})
 _logger = logging.getLogger(__name__)
 
+# Match privilege escalation, including env wrappers, absolute paths, and aliases.
+_LAYER0_TEXT_PATTERNS = (
+    ("sudo", re.compile(r"(?:^|[;&|]\s*)(?:(?:env|command|exec)\s+)?(?:[A-Za-z_]\w*=\S+\s+)*(?:sudo|/[^\s;&|]*/sudo)(?:\s|$)|(?:^|[;&|]\s*)alias\b[^\n;|&]*\bsudo\b", re.IGNORECASE)),
+    # Catch network or decoded input that streams directly into a shell.
+    ("pipe_to_shell", re.compile(r"(?:\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:[^\s|]+/)?(?:ba|z|fi)?sh\b|<\([^)]*\b(?:curl|wget|fetch)\b[^)]*\)|\bbase64\b[^|\n]*\|\s*(?:[^\s|]+/)?(?:ba|z|fi)?sh\b)", re.IGNORECASE)),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class SafetyOutcome:
@@ -34,33 +41,129 @@ def _command_words(command: str) -> list[str]:
         return command.split()
 
 
+def _command_positions(words: list[str]) -> list[tuple[int, str]]:
+    positions: list[tuple[int, str]] = []
+    command_start = True
+    for index, word in enumerate(words):
+        if word in {";", "&&", "||", "|"}:
+            command_start = True
+            continue
+        if not command_start:
+            continue
+        if word in {"env", "command", "exec"} or (
+            "=" in word and word.split("=", 1)[0].replace("_", "a").isalnum()
+        ):
+            continue
+        positions.append((index, word))
+        command_start = False
+    return positions
+
+
+def _path_is_outside(path_text: str, cwd_path: Path) -> bool:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = cwd_path / path
+    try:
+        path.resolve().relative_to(cwd_path)
+    except ValueError:
+        return True
+    return False
+
+
+def _credential_path(path_text: str, cwd_path: Path) -> bool:
+    if path_text.startswith("-"):
+        return False
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = cwd_path / path
+    try:
+        resolved = path.resolve(strict=False)
+    except OSError:
+        resolved = path.absolute()
+    parts = {part.casefold() for part in resolved.parts}
+    name = resolved.name.casefold()
+    return bool(
+        {".ssh", ".aws"} & parts
+        or name.endswith(".pem")
+        or "keychain" in name
+        or "login.keychain" in name
+    )
+
+
+def _rm_reason(words: list[str], cwd_path: Path) -> str | None:
+    for index, command_word in _command_positions(words):
+        if Path(command_word).name.casefold() != "rm":
+            continue
+        recursive = False
+        force = False
+        targets: list[str] = []
+        after_options = False
+        for word in words[index + 1 :]:
+            if word in {";", "&&", "||", "|"}:
+                break
+            if word == "--":
+                after_options = True
+                continue
+            if not after_options and word.startswith("--"):
+                recursive |= word == "--recursive"
+                force |= word == "--force"
+                continue
+            if not after_options and word.startswith("-") and word != "-":
+                recursive |= "r" in word.casefold()
+                force |= "f" in word.casefold()
+                continue
+            targets.append(word)
+        if any("$" in target for target in targets):
+            return "rm_unresolved_target"
+        if recursive and force and any(
+            target in {"/", "~"} or target.startswith(("/*", "~/"))
+            for target in targets
+        ):
+            return "rm_root"
+    return None
+
+
+def _recursive_permission_reason(words: list[str], cwd_path: Path) -> str | None:
+    for index, command_word in _command_positions(words):
+        if Path(command_word).name.casefold() not in {"chmod", "chown"}:
+            continue
+        args = words[index + 1 :]
+        recursive = any(
+            word == "--recursive" or (word.startswith("-") and "R" in word)
+            for word in args
+        )
+        if not recursive:
+            continue
+        targets = [
+            word
+            for word in args
+            if not word.startswith("-") and not word.isdecimal()
+        ]
+        if any(_path_is_outside(target, cwd_path) for target in targets):
+            return "recursive_permission_change_outside_cwd"
+    return None
+
+
 def layer0_reason(command: str, cwd: str | Path) -> str | None:
     """Return the small, deterministic always-escalate pattern that matches."""
 
     cwd_path = Path(cwd).expanduser().resolve()
     words = _command_words(command)
-    if re.search(r"(?:^|[;&|]\s*)sudo(?:\s|$)", command):
-        return "sudo"
-    if re.search(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:ba|z)?sh\b", command):
-        return "pipe_to_shell"
-    if re.search(r"\brm\b[^\n;|&]*\s-(?:[A-Za-z]*f[A-Za-z]*|[A-Za-z]*r[A-Za-z]*f)[^\n;|&]*\s(?:/|~)(?:\s|$)", command):
-        return "rm_root"
-    if re.search(r"\b(?:chmod|chown)\b[^\n;|&]*\s-R\b", command):
-        for word in words:
-            if word in {"chmod", "chown", "-R", "--recursive"} or word.startswith("-"):
-                continue
-            path = Path(word).expanduser()
-            if path.is_absolute():
-                try:
-                    path.resolve().relative_to(cwd_path)
-                except ValueError:
-                    return "recursive_permission_change_outside_cwd"
-    credential_path = re.compile(
-        r"(?:^|[\s'\"])(?:~?/\.?ssh(?:/|$)|~?/\.?aws(?:/|$)|[^\s'\"]+\.pem(?:$|[\s'\"])|[^\s'\"]*(?:keychain|login\.keychain)[^\s'\"]*)",
-        re.IGNORECASE,
-    )
+    for reason, pattern in _LAYER0_TEXT_PATTERNS:
+        if pattern.search(command):
+            return reason
+    reason = _rm_reason(words, cwd_path)
+    if reason is not None:
+        return reason
+    reason = _recursive_permission_reason(words, cwd_path)
+    if reason is not None:
+        return reason
     readers = {"cat", "head", "tail", "less", "more", "sed", "awk", "grep", "rg", "openssl"}
-    if words and words[0] in readers and credential_path.search(command):
+    if (
+        words
+        and Path(words[0]).name.casefold() in readers
+        and any(_credential_path(word, cwd_path) for word in words[1:])
+    ):
         return "credential_file_read"
     profile_path = re.compile(
         r"(?:~?/\.bash_history|~?/\.zsh_history|~?/\.bashrc|~?/\.zshrc|~?/\.profile|~?/\.bash_profile|~?/\.zprofile)",
@@ -96,14 +199,20 @@ class SafetyTier:
     def set_task_excerpt(self, task_excerpt: str) -> None:
         self.task_excerpt = task_excerpt
 
-    def command_cwd(self, arguments: dict[str, object]) -> str:
+    def command_cwd(
+        self,
+        arguments: dict[str, object],
+        *,
+        base_cwd: str | Path | None = None,
+    ) -> str:
         value = arguments.get("cwd")
+        default_cwd = Path(base_cwd or self.cwd).expanduser()
         if isinstance(value, str) and value:
             candidate = Path(value).expanduser()
             if not candidate.is_absolute():
-                candidate = Path(self.cwd) / candidate
+                candidate = default_cwd / candidate
             return str(candidate.resolve())
-        return self.cwd
+        return str(default_cwd.resolve())
 
     def applies(self, tool_name: str) -> bool:
         return tool_name in SHELL_TOOLS
@@ -169,6 +278,14 @@ class SafetyTier:
             f"trigger={reason}; narrow the command or ask the user"
         )
 
+    def approval_label(self, outcome: SafetyOutcome) -> str:
+        score = "unknown" if outcome.score is None else str(outcome.score)
+        return (
+            "safety tier: "
+            f"score={score}, level={_level_meaning(outcome.score)}, "
+            f"trigger={outcome.reason or 'safety_threshold_not_met'}"
+        )
+
     def _finish(self, outcome: SafetyOutcome) -> SafetyOutcome:
         event = {
             "service": "jev" if outcome.layer == "jev" else "zeta",
@@ -188,11 +305,15 @@ class SafetyTier:
 
 
 def _triggering_judgment(result: jev.SafetyScoreResult) -> str:
+    if result.call_confidence < SAFETY_CONFIDENCE:
+        return "low_confidence"
+    if result.score > SAFE_MAX:
+        return "score_exceeds"
     if result.touches_outside_cwd >= 0.5:
         return "touches paths outside cwd"
     if result.plausibly_irreversible >= 0.5:
         return "plausibly irreversible"
-    return f"safety level {result.score} exceeds SAFE_MAX"
+    return "safety_threshold_not_met"
 
 
 def _level_meaning(score: int | None) -> str:

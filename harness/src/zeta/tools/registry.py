@@ -463,8 +463,6 @@ class ToolRegistry:
             self._abort_registry = abort_signal.registry
         self.approval_policy = approval_policy
         self.safety_tier = safety_tier
-        if self.safety_tier is not None:
-            self.safety_tier.cwd = str(self.cwd)
         self._approval_gate = ApprovalGate(
             self.approval_policy, self.pre_execute_hook, self.safety_tier
         )
@@ -618,6 +616,13 @@ class ToolRegistry:
         )
         clone.bash_cwd = store.bash_cwd
         clone.abort_signal = clone._abort_registry.new_generation()
+        if self.safety_tier is not None:
+            clone.safety_tier = SafetyTier(
+                cwd=clone.cwd,
+                headless=self.safety_tier.headless,
+                task_excerpt=self.safety_tier.task_excerpt,
+                telemetry=self.safety_tier.telemetry,
+            )
         clone._approval_gate = ApprovalGate(
             clone.approval_policy,
             clone.pre_execute_hook,
@@ -710,6 +715,15 @@ class ToolRegistry:
         if self.safety_tier is not None:
             self.safety_tier.set_headless(headless)
 
+    def _safety_cwd(self, tool_name: str, arguments: dict[str, object]) -> str:
+        if self.safety_tier is None:
+            return str(self.cwd)
+        if tool_name == "bash" and not arguments.get("cwd"):
+            base_cwd = self.bash_cwd
+        else:
+            base_cwd = str(self.cwd)
+        return self.safety_tier.command_cwd(arguments, base_cwd=base_cwd)
+
     def prepare_approval(self, tool_call: ToolCall) -> ApprovalRequest | None:
         if self.approval_policy is None:
             return None
@@ -789,6 +803,12 @@ class ToolRegistry:
             )
             if abort_result is not None:
                 return finalize(abort_result)
+        safety_cwd = (
+            self._safety_cwd(tool_call.name, arguments)
+            if self.safety_tier is not None
+            and self.safety_tier.applies(tool_call.name)
+            else None
+        )
         gate_result, execution_signal = await self._approval_gate.run(
             tool_call,
             arguments,
@@ -800,6 +820,7 @@ class ToolRegistry:
                 and (_skip_approval or not definition.requires_approval)
             ),
             persist_request=_persist_approval,
+            safety_cwd=safety_cwd,
         )
         if gate_result is not None:
             denied = gate_result.content == "tool execution denied"
