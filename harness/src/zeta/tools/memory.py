@@ -16,6 +16,7 @@ from typing import TypedDict
 from pausanias.config import ConfigError, load_config
 
 from ..core.abort import AbortSignal
+from ..execution import ToolExecutionContext
 from ..types import StructuredContentValue, StructuredToolResult
 from ._process import tool_subprocess_env
 from .registry import (
@@ -233,6 +234,8 @@ async def _memory_store(
     registry: ToolRegistry,
     arguments: MemoryStoreArguments,
     _abort_signal: AbortSignal,
+    *,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     if registry.memory_config is None:
         return _config_error()
@@ -245,6 +248,9 @@ async def _memory_store(
         )
     except (OSError, ValueError) as exc:
         return _error_result(f"could not save memory: {exc}")
+
+    if execution_context is not None and execution_context.memory_store_sink is not None:
+        execution_context.memory_store_sink(str(path))
 
     saved = {
         "path": str(path),

@@ -44,6 +44,7 @@ class ToolExecutionContext:
     lifecycle_sink: ToolLifecycleSink | None
     router_tools_sink: Callable[[list[str] | None], None] | None = None
     router_recent_steps: list[str] | None = None
+    memory_store_sink: Callable[[str], None] | None = None
 
 
 @dataclass(slots=True)
