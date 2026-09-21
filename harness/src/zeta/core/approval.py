@@ -12,6 +12,7 @@ from typing import Protocol
 
 from ..types import Message, MessageRole, ToolCall, ToolResult, ToolUseContent
 from .abort import AbortSignal
+from .safety import SafetyTier
 from .store import ConversationStore
 
 
@@ -446,6 +447,7 @@ class ApprovalPolicy:
         abort_signal: _AbortSignal,
         *,
         persist_request: bool = True,
+        force_ask: bool = False,
     ) -> ApprovalDecision | None:
         store = self._require_store()
         state = store.approval_states().get(tool_call.id)
@@ -457,7 +459,11 @@ class ApprovalPolicy:
             if state[1] == ApprovalDecision.DENY.value:
                 return ApprovalDecision.DENY
         else:
-            decision = self.decide(tool_call.name, tool_call.arguments)
+            decision = (
+                ApprovalDecision.ASK
+                if force_ask
+                else self.decide(tool_call.name, tool_call.arguments)
+            )
             if decision is not ApprovalDecision.ASK:
                 return decision
             if persist_request:
@@ -544,6 +550,11 @@ ApprovalHook = Callable[
 AdvanceGeneration = Callable[[AbortSignal], AbortSignal]
 
 
+def _shell_command(arguments: dict[str, object]) -> str:
+    command = arguments.get("command", arguments.get("cmd"))
+    return command if isinstance(command, str) else ""
+
+
 def canceled_result(tool_call_id: str) -> ToolResult:
     return ToolResult(tool_call_id, "tool execution canceled", True, is_canceled=True)
 
@@ -554,6 +565,7 @@ class ApprovalGate:
 
     policy: ApprovalPolicy | None
     hook: ApprovalHook | None
+    safety_tier: SafetyTier | None = None
 
     async def run(
         self,
@@ -568,19 +580,45 @@ class ApprovalGate:
     ) -> tuple[ToolResult | None, AbortSignal]:
         execution_signal = signal
         if self.policy is not None and not skip_approval:
+            force_ask = False
+            if (
+                self.safety_tier is not None
+                and self.policy.durable_decision(tool_call.id) is None
+                and self.policy.decide(tool_call.name, arguments)
+                is ApprovalDecision.ALLOW
+            ):
+                try:
+                    outcome = await self.safety_tier.evaluate(
+                        tool_call.name,
+                        _shell_command(arguments),
+                        self.safety_tier.command_cwd(arguments),
+                    )
+                except Exception as exc:  # noqa: BLE001 - safety fails closed
+                    outcome = self.safety_tier.fail_closed(exc)
+                if outcome.decision == "deny":
+                    return ToolResult(
+                        tool_call.id,
+                        self.safety_tier.teaching_error(outcome),
+                        True,
+                    ), execution_signal
+                force_ask = outcome.decision == "ask"
             approval_started = (
                 self.policy.durable_decision(tool_call.id) is None
-                and self.policy.decide(tool_call.name, arguments)
-                is ApprovalDecision.ASK
+                and (force_ask or self.policy.decide(tool_call.name, arguments) is ApprovalDecision.ASK)
             )
             if approval_started and lifecycle is not None:
                 lifecycle("approval_start")
             try:
                 if persist_request:
-                    decision = await self.policy.authorize(tool_call, signal)
+                    decision = await self.policy.authorize(
+                        tool_call, signal, force_ask=force_ask
+                    )
                 else:
                     decision = await self.policy.authorize(
-                        tool_call, signal, persist_request=False
+                        tool_call,
+                        signal,
+                        persist_request=False,
+                        force_ask=force_ask,
                     )
             except Exception as exc:  # noqa: BLE001 - report approval failures
                 return ToolResult(tool_call.id, f"approval failed: {exc}", True), execution_signal

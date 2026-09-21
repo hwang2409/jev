@@ -1,0 +1,224 @@
+"""The optional Jev safety tier for yolo shell commands."""
+
+from __future__ import annotations
+
+import logging
+import re
+import shlex
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
+
+from ..providers import jev
+
+SAFE_MAX = 1.0
+SAFETY_CONFIDENCE = 0.8
+SHELL_TOOLS = frozenset({"bash", "exec", "run_background"})
+_logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True, slots=True)
+class SafetyOutcome:
+    decision: str
+    layer: str
+    score: int | None = None
+    confidence: float | None = None
+    reason: str | None = None
+    usage: dict[str, int] | None = None
+
+
+def _command_words(command: str) -> list[str]:
+    try:
+        return shlex.split(command)
+    except ValueError:
+        return command.split()
+
+
+def layer0_reason(command: str, cwd: str | Path) -> str | None:
+    """Return the small, deterministic always-escalate pattern that matches."""
+
+    cwd_path = Path(cwd).expanduser().resolve()
+    words = _command_words(command)
+    if re.search(r"(?:^|[;&|]\s*)sudo(?:\s|$)", command):
+        return "sudo"
+    if re.search(r"\b(?:curl|wget)\b[^|\n]*\|\s*(?:ba|z)?sh\b", command):
+        return "pipe_to_shell"
+    if re.search(r"\brm\b[^\n;|&]*\s-(?:[A-Za-z]*f[A-Za-z]*|[A-Za-z]*r[A-Za-z]*f)[^\n;|&]*\s(?:/|~)(?:\s|$)", command):
+        return "rm_root"
+    if re.search(r"\b(?:chmod|chown)\b[^\n;|&]*\s-R\b", command):
+        for word in words:
+            if word in {"chmod", "chown", "-R", "--recursive"} or word.startswith("-"):
+                continue
+            path = Path(word).expanduser()
+            if path.is_absolute():
+                try:
+                    path.resolve().relative_to(cwd_path)
+                except ValueError:
+                    return "recursive_permission_change_outside_cwd"
+    credential_path = re.compile(
+        r"(?:^|[\s'\"])(?:~?/\.?ssh(?:/|$)|~?/\.?aws(?:/|$)|[^\s'\"]+\.pem(?:$|[\s'\"])|[^\s'\"]*(?:keychain|login\.keychain)[^\s'\"]*)",
+        re.IGNORECASE,
+    )
+    readers = {"cat", "head", "tail", "less", "more", "sed", "awk", "grep", "rg", "openssl"}
+    if words and words[0] in readers and credential_path.search(command):
+        return "credential_file_read"
+    profile_path = re.compile(
+        r"(?:~?/\.bash_history|~?/\.zsh_history|~?/\.bashrc|~?/\.zshrc|~?/\.profile|~?/\.bash_profile|~?/\.zprofile)",
+        re.IGNORECASE,
+    )
+    if re.search(r"\bhistory\s+-[wc]\b", command) or (
+        profile_path.search(command)
+        and re.search(r">>{0,1}|\btee\b", command)
+    ):
+        return "history_or_shell_profile_write"
+    return None
+
+
+class SafetyTier:
+    """Evaluate only yolo shell calls and preserve full decision telemetry."""
+
+    def __init__(
+        self,
+        *,
+        cwd: str | Path = ".",
+        headless: bool = False,
+        task_excerpt: str = "",
+        telemetry: Callable[[dict[str, object]], None] | None = None,
+    ) -> None:
+        self.cwd = str(Path(cwd).expanduser().resolve())
+        self.headless = headless
+        self.task_excerpt = task_excerpt
+        self.telemetry = telemetry
+
+    def set_headless(self, headless: bool) -> None:
+        self.headless = headless
+
+    def set_task_excerpt(self, task_excerpt: str) -> None:
+        self.task_excerpt = task_excerpt
+
+    def command_cwd(self, arguments: dict[str, object]) -> str:
+        value = arguments.get("cwd")
+        if isinstance(value, str) and value:
+            candidate = Path(value).expanduser()
+            if not candidate.is_absolute():
+                candidate = Path(self.cwd) / candidate
+            return str(candidate.resolve())
+        return self.cwd
+
+    def applies(self, tool_name: str) -> bool:
+        return tool_name in SHELL_TOOLS
+
+    async def evaluate(self, tool_name: str, command: str, cwd: str) -> SafetyOutcome:
+        if not self.applies(tool_name):
+            return SafetyOutcome("allow", "bypass", reason="tool_out_of_scope")
+        reason = layer0_reason(command, cwd)
+        if reason is not None:
+            return self._finish(
+                SafetyOutcome(
+                    "deny" if self.headless else "ask",
+                    "layer0",
+                    reason=reason,
+                )
+            )
+        try:
+            result = await jev.safety_score(command, cwd, self.task_excerpt)
+        except Exception as exc:  # noqa: BLE001 - safety must fail closed
+            # This polarity is deliberate: unlike a routing failure, a safety
+            # failure must never turn an uncertain command into auto-approval.
+            return self._finish(
+                SafetyOutcome(
+                    "deny" if self.headless else "ask",
+                    "jev_error_failclosed",
+                    reason=str(exc),
+                )
+            )
+        safe = result.score <= SAFE_MAX and result.call_confidence >= SAFETY_CONFIDENCE
+        return self._finish(
+            SafetyOutcome(
+                "allow" if safe else ("deny" if self.headless else "ask"),
+                "jev",
+                score=result.score,
+                confidence=result.call_confidence,
+                reason=(None if safe else _triggering_judgment(result)),
+                usage=result.usage,
+            )
+        )
+
+    def fail_closed(self, error: BaseException) -> SafetyOutcome:
+        """Return the safe side when local safety machinery itself fails."""
+
+        # This polarity is deliberate: every safety error is uncertain, so it
+        # must never become an auto-approval.
+        return self._finish(
+            SafetyOutcome(
+                "deny" if self.headless else "ask",
+                "safety_error_failclosed",
+                reason=str(error),
+            )
+        )
+
+    def teaching_error(self, outcome: SafetyOutcome) -> str:
+        score = "unknown" if outcome.score is None else str(outcome.score)
+        confidence = (
+            "unknown" if outcome.confidence is None else f"{outcome.confidence:.2f}"
+        )
+        reason = outcome.reason or "the command did not meet the safety threshold"
+        return (
+            "safety tier denied this shell command: "
+            f"score={score}, confidence={confidence}, level={_level_meaning(outcome.score)}, "
+            f"trigger={reason}; narrow the command or ask the user"
+        )
+
+    def _finish(self, outcome: SafetyOutcome) -> SafetyOutcome:
+        event = {
+            "service": "jev" if outcome.layer == "jev" else "zeta",
+            "score": outcome.score,
+            "confidence": outcome.confidence,
+            "decision": outcome.decision,
+            "layer": outcome.layer,
+            "skip_reason": _skip_reason(outcome),
+            "trigger": outcome.reason,
+        }
+        if outcome.usage is not None:
+            event["usage"] = {"service": "jev", "usage": dict(outcome.usage)}
+        if self.telemetry is not None:
+            self.telemetry(event)
+        _logger.info("safety tier decision", extra={"safety_tier": event})
+        return outcome
+
+
+def _triggering_judgment(result: jev.SafetyScoreResult) -> str:
+    if result.touches_outside_cwd >= 0.5:
+        return "touches paths outside cwd"
+    if result.plausibly_irreversible >= 0.5:
+        return "plausibly irreversible"
+    return f"safety level {result.score} exceeds SAFE_MAX"
+
+
+def _level_meaning(score: int | None) -> str:
+    return {
+        0: "read-only inspection",
+        1: "reversible workspace write",
+        2: "scoped destructive action",
+        3: "dangerous or out of scope",
+    }.get(score, "unknown")
+
+
+def _skip_reason(outcome: SafetyOutcome) -> str | None:
+    if outcome.layer == "layer0":
+        return "layer0_escalated"
+    if outcome.layer == "jev" and outcome.decision != "allow":
+        return "threshold_not_met"
+    if outcome.layer in {"jev_error_failclosed", "safety_error_failclosed"}:
+        return outcome.layer
+    return outcome.reason if outcome.decision != "allow" else None
+
+
+__all__ = [
+    "SAFETY_CONFIDENCE",
+    "SAFE_MAX",
+    "SHELL_TOOLS",
+    "SafetyOutcome",
+    "SafetyTier",
+    "layer0_reason",
+]
