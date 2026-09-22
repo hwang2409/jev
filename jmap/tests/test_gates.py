@@ -156,6 +156,13 @@ def test_parser_rejects_overdeep_input(source: str) -> None:
         parse_policy(source)
 
 
+def test_parser_rejects_an_overlarge_boolean_chain() -> None:
+    comparisons = ["a.noul >= 0.75"] * (MAX_POLICY_DEPTH + 1)
+
+    with pytest.raises(PolicySyntaxError, match="maximum depth"):
+        parse_policy("any(" + " and ".join(comparisons) + ")")
+
+
 def test_compile_rejects_unknown_fields_cross_type_and_unpinned_thresholds() -> None:
     preset = resolve_preset("diff-risk-heat")
     with pytest.raises(PolicyValidationError, match="unknown question"):

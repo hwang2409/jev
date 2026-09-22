@@ -167,6 +167,7 @@ class _Parser:
         self.source = source
         self.index = 0
         self.depth = 0
+        self.complexity = 0
 
     def parse_expression(self) -> Expression:
         return self.parse_or()
@@ -206,6 +207,7 @@ class _Parser:
         return self.parse_comparison()
 
     def parse_comparison(self) -> Comparison:
+        self._consume_complexity()
         question_id = self._expect_kind("word").value
         self._expect_punct(".")
         answer_field = self._expect_kind("word").value
@@ -282,8 +284,16 @@ class _Parser:
 
     def _enter_depth(self) -> None:
         self.depth += 1
+        self._consume_complexity()
         if self.depth > MAX_POLICY_DEPTH:
             self._error(f"policy nesting exceeds maximum depth {MAX_POLICY_DEPTH}")
+
+    def _consume_complexity(self) -> None:
+        self.complexity += 1
+        if self.complexity > MAX_POLICY_DEPTH:
+            self._error(
+                f"policy expression exceeds maximum depth {MAX_POLICY_DEPTH}"
+            )
 
     def _error(self, message: str, token: _Token | None = None) -> None:
         raise PolicySyntaxError(self._message(message, token))
@@ -308,15 +318,17 @@ def _tokenize(source: str) -> tuple[_Token, ...]:
 
 
 def _validate_expression(expression: Expression, preset: Mapping[str, Any]) -> None:
-    if isinstance(expression, Comparison):
-        _validate_comparison(expression, preset)
-    elif isinstance(expression, Not):
-        _validate_expression(expression.expression, preset)
-    elif isinstance(expression, Boolean):
-        _validate_expression(expression.left, preset)
-        _validate_expression(expression.right, preset)
-    elif isinstance(expression, Aggregate):
-        _validate_expression(expression.expression, preset)
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Comparison):
+            _validate_comparison(current, preset)
+        elif isinstance(current, Not):
+            pending.append(current.expression)
+        elif isinstance(current, Boolean):
+            pending.extend((current.left, current.right))
+        elif isinstance(current, Aggregate):
+            pending.append(current.expression)
 
 
 def _validate_comparison(comparison: Comparison, preset: Mapping[str, Any]) -> None:
@@ -379,22 +391,23 @@ def _validate_policy_shape(expression: Expression) -> None:
 
 
 def _contains_aggregate(expression: Expression) -> bool:
-    if isinstance(expression, Aggregate):
-        return True
-    if isinstance(expression, Not):
-        return _contains_aggregate(expression.expression)
-    if isinstance(expression, Boolean):
-        return _contains_aggregate(expression.left) or _contains_aggregate(
-            expression.right
-        )
+    pending = [expression]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Aggregate):
+            return True
+        if isinstance(current, Not):
+            pending.append(current.expression)
+        elif isinstance(current, Boolean):
+            pending.extend((current.left, current.right))
     return False
 
 
 def _evaluate(expression: Expression, records: Sequence[ResultRecord]) -> bool:
-    if isinstance(expression, Aggregate):
-        values = (_evaluate_one(expression.expression, record) for record in records)
-        return any(values) if expression.operator == "any" else all(values)
-    return any(_evaluate_one(expression, record) for record in records)
+    if not isinstance(expression, Aggregate):
+        raise PolicyError("aggregate must be the outer policy expression")
+    values = (_evaluate_one(expression.expression, record) for record in records)
+    return any(values) if expression.operator == "any" else all(values)
 
 
 def _evaluate_one(expression: Expression, record: ResultRecord) -> bool:
