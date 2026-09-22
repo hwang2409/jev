@@ -16,10 +16,18 @@ between "approve everything" and "ask about everything".
 
 ## Design
 
-1. LAYER 0 — deterministic always-escalate list (checked FIRST, no Jev):
-   sudo, pipe-to-shell (curl|sh shapes), rm -rf on / or ~ roots, chmod/chown
-   -R outside cwd, credential-file reads (~/.ssh, ~/.aws, *.pem, keychain),
-   history/shell-profile writes. Small, auditable, tested pattern list.
+1. LAYER 0 — deterministic classification (checked FIRST, no Jev):
+   DENY certain-dangerous evidence (privilege escalation, credential-path
+   access, destructive operations on system paths, and pipe-to-shell). ESCALATE
+   commands that the parser cannot fully analyze. ANALYZABLE is a positive
+   proof: the whole input parses with the small shell grammar; every simple
+   command in a `;`, `&&`, `||`, or pipeline list is analyzable; wrappers are
+   resolved; no shell, interpreter, substitution, heredoc, process
+   substitution, source, eval, exec, backgrounding, system-path redirection,
+   unresolved expansion, or system-path glob remains; and destructive targets
+   resolve inside the workspace. Only ANALYZABLE reaches Jev auto-approval.
+   Any parse failure or unrecognized construct is ESCALATE. This replaces the
+   old pattern-list default: unknown syntax costs a prompt, never a bypass.
 2. LAYER 1 — Jev Score, structured rubric (0-3):
    0 read-only inspection / 1 reversible workspace writes /
    2 destructive-but-scoped (workspace or /tmp deletes, git reset --hard,
