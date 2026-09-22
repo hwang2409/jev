@@ -158,6 +158,38 @@ _XARGS_OPTION_ARGUMENTS = frozenset(
         "--eof",
     }
 )
+_RUN_OPTION_ARGUMENTS = frozenset(
+    {
+        "--build-constraint",
+        "--config-file",
+        "--constraint",
+        "--default-index",
+        "--directory",
+        "--extra-index-url",
+        "--find-links",
+        "--fork-strategy",
+        "--index",
+        "--index-strategy",
+        "--no-binary",
+        "--only-binary",
+        "--package",
+        "--prerelease",
+        "--project",
+        "--python",
+        "--python-preference",
+        "--refresh-package",
+        "--resolution",
+        "--spec",
+        "--suffix",
+        "--with",
+        "--with-editable",
+        "-C",
+        "-f",
+        "-i",
+        "-p",
+    }
+)
+_RUN_OPTION_FLAGS = frozenset({"--no-cache", "-q", "-v"})
 _CREDENTIAL_NAMES = frozenset(
     {
         ".netrc",
@@ -387,6 +419,26 @@ def _skip_options(segment: tuple[str, ...], index: int, name: str) -> int:
     return index
 
 
+def _skip_run_options(segment: tuple[str, ...], index: int) -> int | None:
+    """Return the wrapped argv index after known runner options."""
+
+    while index < len(segment):
+        word = segment[index]
+        if word == "--":
+            return index + 1
+        if not word.startswith("-") or word == "-":
+            return index
+        if word in _RUN_OPTION_FLAGS or "=" in word:
+            index += 1
+            continue
+        if word not in _RUN_OPTION_ARGUMENTS:
+            return None
+        if index + 1 >= len(segment):
+            return None
+        index += 2
+    return index
+
+
 def _resolved_argv(segment: tuple[str, ...]) -> tuple[int, str] | None:
     index = 0
     while index < len(segment):
@@ -415,7 +467,10 @@ def _resolved_argv(segment: tuple[str, ...]) -> tuple[int, str] | None:
                 index += 1
             if index >= len(segment):
                 return None
-            return _resolved_argv_from(segment, index + 1)
+            run_index = _skip_run_options(segment, index + 1)
+            if run_index is None:
+                return None
+            return _resolved_argv_from(segment, run_index)
         if name in _COMMAND_WRAPPERS - {"xargs"}:
             index = _skip_options(segment, index, name)
             continue
@@ -733,15 +788,22 @@ def _special_shape_reason(parsed: _ParsedShell) -> str | None:
             and "-w" in arguments
         ):
             return "security_password"
-        if name == "ssh" and any(
-            argument.casefold() == "-ostricthostkeychecking=no"
-            for argument in arguments
-        ):
-            return "ssh_host_key_checking"
         if name == "ssh":
-            for argument_index, argument in enumerate(arguments[:-1]):
-                if argument == "-o" and arguments[argument_index + 1].casefold() == (
-                    "stricthostkeychecking=no"
+            for argument_index, argument in enumerate(arguments):
+                option = argument.casefold()
+                if option in {
+                    "-ostricthostkeychecking=no",
+                    "-ouserknownhostsfile=/dev/null",
+                }:
+                    return "ssh_host_key_checking"
+                if (
+                    option == "-o"
+                    and argument_index + 1 < len(arguments)
+                    and arguments[argument_index + 1].casefold()
+                    in {
+                        "stricthostkeychecking=no",
+                        "userknownhostsfile=/dev/null",
+                    }
                 ):
                     return "ssh_host_key_checking"
         if name == "systemctl" and any(
