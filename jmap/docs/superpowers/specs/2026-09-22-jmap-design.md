@@ -254,10 +254,12 @@ non-empty, and `meta.partial` is `true`:
 }
 ```
 
-An API, parse, or stream failure for a formed state or window has `state_ref`,
-no `source_ref`, and `error.kind` of `api_error`, `malformed_answer`, or
-`stream_error`. `http_status` is an integer or `null`; `attempts` is a
-non-negative integer.
+An API, parse, stream, scan-cap, prefilter, or context-limit failure for a
+formed state or window has `state_ref`, no `source_ref`, and `error.kind` of
+`api_error`, `malformed_answer`, `stream_error`, `scan_cap`,
+`prefilter_skip`, or `context_limit`. `http_status` is an integer or `null`;
+`attempts` is a non-negative integer. These error kinds let the runner emit a
+per-state error record when a formed state cannot be visited.
 
 ```json
 {
@@ -273,6 +275,9 @@ type, with `state_ref: null`, a required `source_ref` in the exact locator
 form `<source>:byte=<integer>,line=<integer>`, and `error.kind: "input_error"`.
 Its `meta.cache` is `"not_applicable"`. The runner never uses an ordinal as a
 fallback identity.
+
+The closed `error.kind` enum is `api_error`, `malformed_answer`, `stream_error`,
+`scan_cap`, `prefilter_skip`, `context_limit`, or `input_error`.
 
 ```json
 {
@@ -299,9 +304,9 @@ Every terminal invocation emits exactly one coverage record:
 `coverage` is `complete` or `partial`. The counts contain `discovered`,
 `visited`, `emitted`, `skipped`, and `failed`; `emitted` counts per-state
 records before result filtering. `coverage_reasons` is an array of zero or
-more values from this closed enum: `max_chunks`, `prefilter`, `input_error`,
-`context_limit`, `api_error`, `malformed_answer`, `partial_answer`, or
-`stream_error`. It is empty only for complete coverage.
+more values from this closed enum: `scan_cap`, `prefilter_skip`,
+`input_error`, `context_limit`, `api_error`, `malformed_answer`,
+`partial_answer`, or `stream_error`. It is empty only for complete coverage.
 
 ### 2.6 JSONL output
 
@@ -313,7 +318,8 @@ terminal coverage schema are defined in section 2.5. Coverage is not claimed
 on a per-state record. The runner writes one terminal coverage record after
 the input ends, and a filter never suppresses it.
 
-API and input failures use the canonical `error` record in section 2.5.
+API, input, scan-cap, prefilter, and context-limit failures use the canonical
+`error` record in section 2.5.
 
 An incomplete response uses only the canonical `partial_result` record in
 section 2.5. `answers` preserves each parsed typed API answer.
@@ -342,13 +348,14 @@ execution starts produces no coverage record. A consumer must wait for the
 terminal record before claiming complete coverage.
 
 For finite input, records already written remain valid. The runner writes the
-canonical `error` record for an API, parse, or input failure, or the canonical
-`partial_result` record when the full retry still omits answers. It continues
-independent states when possible, then writes terminal partial coverage and
-exits `2`. For streaming input, the same rule applies to each formed window
-and later windows continue when possible. A stream or input failure before EOF
-also ends with terminal partial coverage. Only normal EOF with every requested
-state complete can emit `coverage: "complete"`.
+canonical `error` record for an API, parse, input, scan-cap, prefilter, or
+context-limit failure, or the canonical `partial_result` record when the full
+retry still omits answers. It continues independent states when possible,
+then writes terminal partial coverage and exits `2`. For streaming input, the
+same rule applies to each formed window and later windows continue when
+possible. A stream or input failure before EOF also ends with terminal partial
+coverage. Only normal EOF with every requested state complete can emit
+`coverage: "complete"`.
 
 ## 3. chunker design
 
@@ -407,18 +414,43 @@ The runner tracks discovered, visited, emitted, skipped, and failed chunks.
 When a cap, prefilter, input error, or context limit prevents a visit, it must:
 
 1. write a warning to stderr;
-2. emit an error or partial-result record when the affected state has a record;
+2. emit the canonical `error` record with `error.kind` `scan_cap`,
+   `prefilter_skip`, `input_error`, or `context_limit` when the affected state
+   has a record; use `state_ref: null` and `source_ref` for an input failure
+   before a state identity exists;
 3. emit a terminal `coverage` record with `coverage: "partial"`;
 4. include the reason in `coverage_reasons` in the terminal record and in the
    stderr process summary; and
 5. use exit code `2` for a gate, or the interactive mode's degraded error
    behavior for a non-gate invocation.
 
+`partial_result` is reserved for a formed state whose API response still omits
+one or more requested answers after the full retry.
+
 Example:
 
 ```text
 jmap: warning: visited 256 of 941 paragraphs; 685 unvisited
 jmap: warning: results are partial; raise --max-chunks or narrow the input
+```
+
+For a formed state skipped by the cap, the JSONL stream also contains an error
+record and a terminal coverage record such as:
+
+```jsonl
+{
+  "record_type": "error",
+  "state_ref": "notes.md:paragraph=257",
+  "error": {"kind": "scan_cap", "message": "scan cap reached before visit", "http_status": null, "attempts": 0},
+  "meta": {"preset": "jgrep", "preset_version": "1", "model": "jev-1.13.0", "chunker": "para", "cache": "not_applicable"}
+}
+{
+  "record_type": "coverage",
+  "coverage": "partial",
+  "coverage_counts": {"discovered": 941, "visited": 256, "emitted": 257, "skipped": 685, "failed": 0},
+  "coverage_reasons": ["scan_cap"],
+  "meta": {"preset": "jgrep", "preset_version": "1", "model": "jev-1.13.0", "chunker": "para", "cache": "not_applicable"}
+}
 ```
 
 The warning is part of the contract. A caller must never infer full coverage
@@ -513,7 +545,8 @@ model: jev-1.13.0
 description: Find chunks that satisfy a natural-language query.
 chunking:
   by: para
-  context_paragraphs: 2
+  # no surrounding paragraphs: cheapest option and matches the focus-only criteria
+  context_paragraphs: 0
   max_chunks: 512
   limits:
     focus_bytes: 16384
@@ -681,12 +714,12 @@ questions:
       - what: A behavior change confined to one function or file, with no callers outside it.
         not_for: A behavior change that crosses files or affects an outside caller.
         examples: ["change a local parser branch with no external caller"]
-      - what: A behavior change crossing files or a public interface used elsewhere.
-        not_for: A change confined to one function or file with no outside callers.
+      - what: A behavior change to an interface used elsewhere within this codebase, excluding shared subsystems, data formats, and interfaces consumed outside this codebase.
+        not_for: A behavior change to a shared subsystem, data format, or interface consumed outside this codebase, or a change confined to one function or file with no in-codebase callers.
         examples: ["change retry behavior in a helper used by another module"]
-      - what: A behavior change to a shared subsystem, data format, or external interface.
-        not_for: A change confined to one function or file, or only crossing files without a shared or external contract.
-        examples: ["change a shared request-routing default"]
+      - what: A behavior change to a shared subsystem, data format, or interface consumed outside this codebase.
+        not_for: A behavior change to an interface used elsewhere only within this codebase, unless it is also a shared subsystem or data format.
+        examples: ["change a shared request-routing default", "change a CLI flag consumed by an external script"]
   likely_breakage:
     type: noul
     instructions:
@@ -964,7 +997,7 @@ object keys and no insignificant whitespace:
   "preset_version": "1",
   "chunking": {
     "by":"para",
-    "context_paragraphs":2,
+    "context_paragraphs":0,
     "limits": {
       "focus_bytes":16384,
       "focus_tokens":4096,
@@ -1133,6 +1166,11 @@ comparison := field (">=" | ">" | "<=" | "<" | "==" | "!=") literal
 field      := question_id "." answer_field
 literal    := number | quoted_string | "true" | "false"
 ```
+
+`not` binds tighter than `and`, and `and` binds tighter than `or`. The binary
+operators are left-associative. Parentheses override these rules. For example,
+with `A=true`, `B=false`, and `C=false`, `A or B and C` evaluates as
+`A or (B and C) = true`; left-to-right grouping `(A or B) and C = false`.
 
 Supported aggregate wrappers are `any(predicate)` and `all(predicate)` over the
 stream. No arithmetic, functions, iteration, date math, or user-defined DSL
@@ -1340,8 +1378,10 @@ This spec was reviewed against the required inputs and constraints before PR:
   and model.
 - stdout has only the four canonical record types; human-facing output goes to
   stderr, and watch windows carry explicit metadata.
+- `jgrep` sends no surrounding paragraphs because its criteria use only `focus`
+  and `context.query`.
 - `change_scope` measures behavior-change reach only; the other battery
-  questions remain separate axes.
+  questions remain separate axes, and its score levels are pairwise disjoint.
 - Missing-answer retries use the full battery and the same cache key; a second
   omission emits one uncached `partial_result` record.
 - Policies are failure conditions: true returns exit `1`; operational errors
