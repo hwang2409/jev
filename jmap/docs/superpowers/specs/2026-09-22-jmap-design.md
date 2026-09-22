@@ -9,7 +9,7 @@
 
 ### goal
 
-`jmap` maps typed Jev questions over a stream of states. It emits calibrated,
+`jmap` maps typed Jev questions over finite input states. It emits calibrated,
 typed result records as JSONL. Their canonical schemas are defined in section
 2.5.
 
@@ -39,15 +39,17 @@ state. The measured four-question call cost was 459 input and 87 output usage un
 
 ### 2.1 command shape
 
-The first implementation exposes one executable and five subcommands:
+The first implementation exposes one executable and this v1 command surface:
 
-```text
-jmap run --preset PATH [OPTIONS]
-jmap watch --preset PATH [OPTIONS]
-jmap gate --preset PATH --policy EXPR [OPTIONS]
-jmap preset {list,show,validate} [NAME|PATH]
-jmap cache export --preset NAME [OPTIONS]
-```
+| Command | Purpose | stdout contract |
+| --- | --- | --- |
+| `jmap run --preset PATH [OPTIONS]` | Judge finite input with a preset. | Judgment JSONL. |
+| `jmap jgrep QUERY [OPTIONS]` | Short form for the `jgrep` preset. | Judgment JSONL. |
+| `jmap jfilter PREDICATE [OPTIONS]` | Short form for the `jfilter` preset. | Judgment JSONL. |
+| `jmap gate --preset PATH --policy EXPR [--require-states N] [OPTIONS]` | Run one finite judgment and apply a failure policy. | Judgment JSONL. |
+| `jmap preset {list,show,validate} [NAME\|PATH]` | Inspect or validate a preset. | Preset metadata, not judgment JSONL. |
+| `jmap cache export --preset NAME [OPTIONS]` | Export cached answer triples. | One JSONL line per cache triple; no coverage record. |
+| `jmap cache clear --preset NAME [OPTIONS]` | Remove matching cache entries. | Status output, not judgment JSONL. |
 
 Presets are the user-facing short form. These commands are equivalent:
 
@@ -56,11 +58,11 @@ jmap run --preset jgrep.yml --query "mentions a migration"
 jmap jgrep "mentions a migration"
 ```
 
-The short form selects the installed `jgrep` preset and passes the remaining
-arguments to `run`. `run` maps one battery over finite input. `watch` maps
-windows over a stream. `gate` runs a preset and applies a policy. `preset`
-validates the reviewable file. `cache export` exports answer records for later
-analysis or a separately approved distillation project.
+The short forms select installed presets and pass their remaining arguments to
+`run`. All three presets and the core primitive read finite input: files, path
+arguments, or stdin to EOF. `gate` runs one finite judgment and applies a
+policy. `preset` validates the reviewable file. `cache export` exports answer
+records for later analysis or a separately approved distillation project.
 
 ### 2.2 input contract
 
@@ -196,14 +198,19 @@ contract.
 
 ### 2.5 record types
 
-stdout contains only one JSON object per line, and every object matches one of
-these four record types. No other stdout record, header, progress message, or
-summary exists. Human-facing run headers, progress, warnings, pretty output,
-and process summaries go to stderr.
+The judgment commands are `run`, `jgrep`, `jfilter`, and `gate`. For those
+commands, stdout contains only one JSON object per line, and every object
+matches one of these four record types. No other stdout record, header,
+progress message, or summary exists. Human-facing run headers, progress,
+warnings, pretty output, and process summaries go to stderr. The non-judgment
+commands have the separate stdout contracts in the command table and section
+6.4.
 
 The four record types are `result`, `partial_result`, `error`, and `coverage`.
-The first three describe one state or one formed watch window. The terminal
-`coverage` record describes the whole invocation.
+The `error` type has a per-state error variant and a skip-summary variant. The
+first three describe one finite state or one operational event. The terminal
+`coverage` record describes the whole invocation. A skip-summary error groups
+many formed states by one reason and boundary.
 
 The common metadata object has these required fields:
 
@@ -219,12 +226,9 @@ The common metadata object has these required fields:
 
 `cache` is one of `hit`, `miss`, or `not_applicable`.
 
-For a watch record, `meta.window` is also required and has exactly these fields:
-`ordinal` (positive integer), `start_ref` (string), `end_ref` (string), and
-`unit_count` (positive integer). It is absent for finite-input records. A
-window `state_ref` is the stable string `window:<start_ref>..<end_ref>`.
+V1 records have no window metadata or `window_ref`.
 
-A complete state or window has this shape:
+A complete state has this shape:
 
 ```json
 {
@@ -254,11 +258,11 @@ non-empty, and `meta.partial` is `true`:
 }
 ```
 
-An API, parse, or stream failure for a judged state or window has `state_ref`,
-no `source_ref`, and `error.kind` of `api_error`, `malformed_answer`, or
-`stream_error`. `http_status` is an integer or `null`; `attempts` is a
-non-negative integer. Scan-cap and context-limit skips use the summary error
-record defined below, not one error record per skipped state.
+An API or parse failure for a judged state has `state_ref`,
+no `source_ref`, and `error.kind` of `api_error` or `malformed_answer`.
+`http_status` is an integer or `null`; `attempts` is a
+non-negative integer. Scan-cap and context-limit skips use the skip-summary
+error variant defined below, not one error record per skipped state.
 
 ```json
 {
@@ -275,8 +279,10 @@ form `<source>:byte=<integer>,line=<integer>`, and `error.kind: "input_error"`.
 Its `meta.cache` is `"not_applicable"`. The runner never uses an ordinal as a
 fallback identity.
 
-The closed `error.kind` enum is `api_error`, `malformed_answer`, `stream_error`,
-`scan_cap`, `context_limit`, or `input_error`.
+The closed `error.kind` enum is `api_error`, `malformed_answer`, `scan_cap`,
+`context_limit`, or `input_error`. `scan_cap` and `context_limit` are the
+skip-summary variant. That variant has `state_ref: null`, `source_ref: null`,
+one per-reason count, a bounded sample of stable refs, and no window fields.
 
 ```json
 {
@@ -288,7 +294,7 @@ The closed `error.kind` enum is `api_error`, `malformed_answer`, `stream_error`,
 }
 ```
 
-Every terminal invocation emits exactly one coverage record:
+Every judgment invocation emits exactly one coverage record:
 
 ```json
 {
@@ -307,34 +313,34 @@ the chunker has parsed one input unit, assigned its stable `state_ref`, and
 materialized its focus and context, before cache or API admission. Judged states
 are discovered states admitted to that path, including states that fail there.
 Skipped states never enter that path. `emitted` counts per-state records for
-judged states before result filtering; summary records for skipped states are
-not per-state records. `failed` is the subset of judged states with an
+judged states before result filtering; skip-summary records are not per-state
+records. `failed` is the subset of judged states with an
 operational error. Input errors before a stable identity exists are not formed
 states and are excluded from these counts. The counts always satisfy
 `discovered = judged + skipped` and
 `skipped = sum(skip_summary.count)` across all skip-summary records.
 `coverage_reasons` is an array of zero or more values from this closed enum:
-`scan_cap`, `input_error`, `context_limit`, `api_error`, `malformed_answer`,
-`partial_answer`, or `stream_error`. It is empty only for complete coverage.
+`scan_cap`, `input_error`, `context_limit`, `api_error`, `malformed_answer`, or
+`partial_answer`. It is empty only for complete coverage.
 
 ### 2.6 JSONL output
 
-The record types in section 2.5 are the only stdout contract for every
-command and preset. Each per-state record has a `record_type`.
+The record types in section 2.5 are the only stdout contract for judgment
+commands. Each judgment record has a `record_type`.
 
 `meta` is required on every per-state record. Its required fields and the
 terminal coverage schema are defined in section 2.5. Coverage is not claimed
 on a per-state record. The runner writes one terminal coverage record after
 the input ends, and a filter never suppresses it.
 
-API and input failures use the canonical `error` record in section 2.5.
-Scan-cap and context-limit skips use its summary `error` record.
+API and input failures use the per-state `error` variant in section 2.5.
+Scan-cap and context-limit skips use its skip-summary variant.
 
 An incomplete response uses only the canonical `partial_result` record in
 section 2.5. `answers` preserves each parsed typed API answer.
 
-When formed states are skipped, the runner emits one summary `error` record
-for each `(error.kind, boundary)` pair. A summary record is not a per-state
+When formed states are skipped, the runner emits one skip-summary `error` record
+for each `(error.kind, boundary)` pair. A skip-summary record is not a per-state
 record and includes a bounded sample of stable refs:
 
 ```jsonl
@@ -358,7 +364,7 @@ record and includes a bounded sample of stable refs:
 ```
 
 The runner caps `sample_refs` at eight refs. A boundary is the deterministic
-admission rule that grouped the skips, such as `max_chunks=256`. Summary
+admission rule that grouped the skips, such as `max_chunks=256`. Skip-summary
 records are included in stdout but excluded from `emitted`.
 
 `--format=jsonl` is the default. `--format=pretty` renders selected result
@@ -368,7 +374,7 @@ coverage records remain on stdout.
 
 ### 2.7 exit codes
 
-All modes use the same small exit-code set:
+All judgment modes use the same small exit-code set:
 
 | Code | Meaning |
 | --- | --- |
@@ -385,14 +391,11 @@ execution starts produces no coverage record. A consumer must wait for the
 terminal record before claiming complete coverage.
 
 For finite input, records already written remain valid. The runner writes the
-canonical `error` record for an API, parse, or input failure, or the canonical
-summary `error` record for scan-cap or context-limit skips. It writes the
+per-state `error` variant for an API, parse, or input failure, or the
+skip-summary `error` variant for scan-cap or context-limit skips. It writes the
 canonical `partial_result` record when the full retry still omits answers. It
-continues independent states when possible,
-then writes terminal partial coverage and exits `2`. For streaming input, the
-same rule applies to each formed window and later windows continue when
-possible. A stream or input failure before EOF also ends with terminal partial
-coverage. Only normal EOF with every requested state complete can emit
+continues independent states when possible, then writes terminal partial
+coverage and exits `2`. Only EOF with every requested state complete can emit
 `coverage: "complete"`.
 
 ## 3. chunker design
@@ -453,7 +456,7 @@ When a cap or context limit prevents a formed state from entering judgment, it
 must:
 
 1. write a warning to stderr;
-2. emit one summary `error` record for each `(reason, boundary)` pair, with
+2. emit one skip-summary `error` record for each `(reason, boundary)` pair, with
    the skip count and at most eight sample refs. Input errors before a stable
    identity exists keep the per-input error record defined in section 2.5;
 3. emit a terminal `coverage` record with `coverage: "partial"`;
@@ -487,7 +490,7 @@ jmap: warning: judged 256 of 941 paragraphs; 685 skipped
 jmap: warning: results are partial; raise --max-chunks or narrow the input
 ```
 
-For formed states skipped by the cap, the JSONL stream contains one summary
+For formed states skipped by the cap, the JSONL output contains one skip-summary
 error record and a terminal coverage record such as:
 
 ```jsonl
@@ -648,8 +651,6 @@ a second model to explain or expand the query.
 
 `jfilter` can select input records whose content satisfies a user predicate
 with its explicit `--filter=keep` modifier. Its unit is a record, not a line.
-In streaming mode, a window is the unit and the semantics change as described
-in section 7.
 
 Invocation:
 
@@ -936,8 +937,10 @@ output:
 The default heat output is one canonical JSONL result record per judged hunk,
 followed by the terminal coverage record. `--format=pretty` is an explicit
 opt-in that renders the tab-separated template to stderr. The launch preset
-does not fail by itself. A CI
-caller must opt into a failure-condition policy such as:
+does not fail by itself. The preset runs one-shot over the finite diff. A CI
+caller runs the gate once for that diff; it does not keep a live input session.
+
+The CI caller must opt into a failure-condition policy such as:
 
 ```text
 any((change_scope.score >= 2 or likely_breakage.noul >= 0.75 or
@@ -947,14 +950,14 @@ any((change_scope.score >= 2 or likely_breakage.noul >= 0.75 or
      compatibility_change.noul >= 0.75))
 ```
 
-The policy is evaluated per hunk and then across the stream. It never compares
+The policy is evaluated per hunk and then across the finite input. It never compares
 a Noul threshold to a Score field. The Score threshold is the pinned `2` in the
 preset; it is an ordinal behavior-scope threshold, not a precise magnitude.
 
 ## 5. jgrep cost control
 
 Jev calls cost request size and have roughly 350–500 ms API latency. A full
-document scan queues calls; it does not stream results at network speed. The
+document scan queues calls; it does not emit results as API calls finish. The
 cost-control choice also controls recall, so it belongs in the design.
 
 ### option a: scan with a cap
@@ -1110,7 +1113,9 @@ is never cached. A failed request never creates a successful cache entry.
 ### 6.4 dataset export
 
 `jmap cache export` writes one training-shaped triple per question answer. It
-does not train or upload anything.
+does not train or upload anything. It is a non-judgment command. Its stdout is
+one JSONL line per cache triple using the shape below. It emits no coverage
+record because exporting the cache has no coverage concept.
 
 ```json
 {
@@ -1155,49 +1160,9 @@ original typed answer and does not turn a Score into a synthetic exact label.
 The export is a future distillation input only. A ToS check and a separate
 design must precede any local-model training.
 
-## 7. watch and CI mode
+## 7. CI gate policy
 
-### 7.1 stream windowing
-
-`watch` reads until EOF and groups arrivals into a configured window. It queues
-windows because Jev latency is much slower than stdin arrival. The v1 options
-are `--window-size`, `--window-time`, and `--step`.
-
-`watch` uses the canonical record types in section 2.5. Each formed window
-emits exactly one per-window record: `result`, `partial_result`, or `error`,
-with the required `meta.window` fields. `partial_result` is the complete
-record for that window, not an additional marker. A window filter never
-suppresses error, partial-result, or coverage records. An input error before a
-window exists emits one `error` record with `state_ref: null` and `source_ref`;
-it does not create a synthetic window or ordinal.
-
-For a stream, `jfilter` changes meaning:
-
-- finite `record` mode asks whether one record satisfies the predicate;
-- windowed mode asks whether the window contains evidence that satisfies the
-  predicate.
-
-The output `state_ref` and `meta.window` identify the window start and end
-references. The window semantics are printed in the stderr run header and
-stored in the canonical record metadata. A caller must not read a window
-result as a line-level match.
-
-`jgrep` watch mode uses the same rule: the focus is a window, and a positive
-answer means the window contains a match. The default window is one paragraph
-for prose and one record for JSONL. A bounded window is required; unbounded
-`tail -f` state would grow until context rot.
-
-### 7.2 incremental re-judgment
-
-Each window or chunk is independently cache-addressed. On the next watch tick,
-unchanged states are cache hits. A changed state creates a new key and only that
-state is re-judged. A deleted state produces no new answer and may be reported
-in the run summary.
-
-The runner must not reuse an old answer for a state whose context changed. This
-includes changed test-path context for `diff-risk-heat`.
-
-### 7.3 minimal gate policy language
+### 7.1 minimal gate policy language
 
 The policy language has only typed field comparisons and boolean combinators:
 
@@ -1218,9 +1183,16 @@ operators are left-associative. Parentheses override these rules. For example,
 with `A=true`, `B=false`, and `C=false`, `A or B and C` evaluates as
 `A or (B and C) = true`; left-to-right grouping `(A or B) and C = false`.
 
-Supported aggregate wrappers are `any(predicate)` and `all(predicate)` over the
-stream. No arithmetic, functions, iteration, date math, or user-defined DSL
-exists in v1.
+Supported aggregate wrappers are `any(predicate)` and `all(predicate)` over
+the finite judged states. No arithmetic, functions, iteration, date math, or
+user-defined DSL exists in v1.
+
+For zero judged states, `any` is false and `all` is true by vacuous truth. A
+failure-condition policy built with `any` therefore passes over zero judged
+states, while one built with `all` fails. CI gates default to
+`--require-states 1`; a run with fewer judged states fails closed with exit `2`
+before the policy result can pass. A caller may set a different non-negative
+required count with `--require-states N`.
 
 Every gate policy is a failure condition. A policy that evaluates true means
 the gate fails with exit `1`; false means no policy failure. Operational errors
@@ -1312,7 +1284,6 @@ jmap/
     gates.py
     presets.py
     runner.py
-    watch.py
     presets/
       jgrep.yml
       jfilter.yml
@@ -1324,7 +1295,6 @@ jmap/
     test_gates.py
     test_presets.py
     test_runner.py
-    test_watch.py
 ```
 
 The package is intentionally small. A module earns a separate file only when
@@ -1358,7 +1328,7 @@ state, one cache hit, one partial response, and each gate exit path.
 - one batched Jev request per state with bounded retries;
 - typed JSONL result records with cache-hit metadata and terminal coverage records;
 - content-addressed local cache and cache export;
-- `run`, `watch`, `gate`, and minimal `preset` commands;
+- `run`, `jgrep`, `jfilter`, `gate`, `preset`, and cache commands;
 - deterministic capped scanning for `jgrep`;
 - minimal threshold and boolean gate policy parsing;
 - fail-closed gate behavior and graceful interactive errors;
@@ -1371,16 +1341,17 @@ state, one cache hit, one partial response, and each gate exit path.
 - a literal `--hint` option or richer hint index;
 - local model backends and distillation;
 - remote or shared caches;
-- daemonized watch workers and distributed concurrency;
+- watch mode, streaming windowing, daemonized workers, and distributed concurrency;
 - broad policy language features beyond thresholds and boolean combinators;
 - generated explanations or answer prose;
 - CI-guard hardening against hostile state and multi-tenant input;
 - automatic model upgrades or threshold migration;
 - a full text search index that would blur the preset boundary.
 
-The v1 boundary is: **make the three presets real over finite and windowed
-streams, with explicit chunking, caching, typed JSONL, and honest gates; defer
-retrieval, local inference, distillation, and hostile-input hardening.**
+The v1 boundary is: **make the three presets real over finite input, with
+explicit chunking, caching, typed JSONL, and honest single-run gates; defer
+watch mode, streaming windowing, retrieval, local inference, distillation, and
+hostile-input hardening.**
 
 ## 11. risks and future decisions for Henry
 
@@ -1396,12 +1367,57 @@ retrieval, local inference, distillation, and hostile-input hardening.**
   can produce false gates.
 - `Score` and categorical risk levels can be mistaken for precise magnitudes.
   The output and docs must keep them ordinal or threshold-only.
-- A slow API queues watch input. Window mode changes the meaning of a match.
 
 ### future decisions for Henry
 
 1. When should the future CI-hardening line begin, given the current personal
    tool boundary and untrusted-state behavior?
+
+## 12. extensions
+
+The following designs are future material. They are not part of the v1 command
+surface or record contract.
+
+### 12.1 watch mode and stream windowing
+
+A future watch mode reads until EOF and groups arrivals into a configured
+window. It queues windows because Jev latency is much slower than input
+arrival. Candidate options are `--window-size`, `--window-time`, and `--step`.
+
+The future mode uses the canonical record types in section 2.5. Each formed
+window emits exactly one per-window record: `result`, `partial_result`, or
+`error`, with explicit window metadata. `partial_result` is the complete
+record for that window, not an additional marker. A window filter never
+suppresses error, partial-result, or coverage records. An input error before a
+window exists emits one `error` record with `state_ref: null` and `source_ref`;
+it does not create a synthetic window or ordinal.
+
+For a stream, `jfilter` changes meaning:
+
+- finite `record` mode asks whether one record satisfies the predicate;
+- windowed mode asks whether the window contains evidence that satisfies the
+  predicate.
+
+The output state reference and window metadata identify the window start and
+end references. The window semantics are printed in the stderr run header and
+stored in the canonical record metadata. A caller must not read a window
+result as a line-level match.
+
+Future `jgrep` watch mode uses the same rule: the focus is a window, and a
+positive answer means the window contains a match. The default window is one
+paragraph for prose and one record for JSONL. A bounded window is required;
+unbounded `tail -f` state would grow until context rot.
+
+### 12.2 incremental re-judgment
+
+Each window or chunk is independently cache-addressed. On the next watch tick,
+unchanged states are cache hits. A changed state creates a new key and only that
+state is re-judged. A deleted state produces no new answer and may be reported
+in the run summary.
+
+The runner must not reuse an old answer for a state whose context changed. This
+includes changed test-path context for `diff-risk-heat`. This cache behavior is
+what makes a future watch mode cheap.
 
 ## self-review record
 
@@ -1418,14 +1434,14 @@ This spec was reviewed against the required inputs and constraints before PR:
   approval remains open for that choice.
 - Formed-state coverage satisfies `discovered = judged + skipped`, and every
   coverage example balances that equation.
-- Stream mode states the window semantic change explicitly.
+- The v1 scope names watch mode and streaming windowing as deferred extensions.
 - Every focus and context field has enforced byte limits.
 - All three v1 preset files include a model pin, questions, chunking limits,
   typed thresholds, and output schema.
 - Cache keys include exact resolved limits, state, questions, preset version,
   and model.
-- stdout has only the four canonical record types; human-facing output goes to
-  stderr, and watch windows carry explicit metadata.
+- Judgment stdout has only the four canonical record types. Cache export has
+  one JSONL line per cache triple and no coverage record.
 - `jgrep` sends no surrounding paragraphs because its criteria use only `focus`
   and `context.query`.
 - `change_scope` measures behavior-change reach only; the other battery
