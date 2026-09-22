@@ -5,6 +5,8 @@ import hashlib
 import io
 import json
 
+import pytest
+
 from jmap.answers import ErrorResponse, JudgeResponse, NoulAnswer, ScoreAnswer
 from jmap.cache import (
     CacheStore,
@@ -12,7 +14,7 @@ from jmap.cache import (
     cache_key,
     canonical_json_bytes,
 )
-from jmap.runner import Runner, State, StateLimits
+from jmap.runner import FakeJudge, Runner, State, StateLimits
 
 QUESTIONS = {
     "matches_query": {
@@ -86,10 +88,13 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
         ("chunking.limits.focus_bytes", 1),
         ("chunking.limits.context_field_bytes", 1),
         ("chunking.limits.state_bytes", 1),
+        ("question_battery.matches_query.type", "score"),
         ("question_battery.matches_query.instructions", "changed"),
         ("question_battery.matches_query.criteria.true.what", "changed"),
+        ("question_battery.risk.type", "noul"),
         ("question_battery.risk.instructions", "changed"),
         ("question_battery.risk.criteria.0.what", "changed"),
+        ("question_battery.risk.criteria.3.what", "changed"),
         ("state.focus", "changed"),
         ("state.context.file", "other.md"),
         ("state.context.query", "other query"),
@@ -106,6 +111,30 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
         assert cache_key(changed) != cache_key(baseline), path
 
 
+def test_chunking_requires_exact_resolved_fields() -> None:
+    with pytest.raises(ValueError, match="chunking"):
+        build_cache_preimage(
+            model="jev-1.13.0",
+            preset="jgrep",
+            preset_version="1",
+            chunking={"by": "para"},
+            questions=QUESTIONS,
+            state=State("notes/intro.md#p3", "focus"),
+            limits=StateLimits(),
+        )
+
+    with pytest.raises(ValueError, match="chunking"):
+        build_cache_preimage(
+            model="jev-1.13.0",
+            preset="jgrep",
+            preset_version="1",
+            chunking={"by": "para", "context_paragraphs": 0, "future": True},
+            questions=QUESTIONS,
+            state=State("notes/intro.md#p3", "focus"),
+            limits=StateLimits(),
+        )
+
+
 def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
     tmp_path,
 ) -> None:
@@ -113,7 +142,7 @@ def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
     response = JudgeResponse(
         {
             "matches_query": NoulAnswer(0.93),
-            "risk": ScoreAnswer(1.5),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
         }
     )
     entry = store.publish(_preimage(), response)
@@ -133,10 +162,37 @@ def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
     assert loaded.response == response
 
 
+def test_publish_refuses_silently_missing_answers(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+    response = JudgeResponse({"matches_query": NoulAnswer(0.93)})
+
+    with pytest.raises(ValueError, match="answer"):
+        store.publish(_preimage(), response)
+
+    assert list(store.entries()) == []
+
+
+def test_publish_accepts_matching_answer_ids(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+    response = JudgeResponse(
+        {
+            "matches_query": NoulAnswer(0.93),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
+        }
+    )
+
+    entry = store.publish(_preimage(), response)
+
+    assert entry.response == response
+
+
 def test_malformed_and_partial_files_are_cache_misses(tmp_path) -> None:
     store = CacheStore(tmp_path)
     response = JudgeResponse(
-        {"matches_query": NoulAnswer(0.93), "risk": ScoreAnswer(1.5)}
+        {
+            "matches_query": NoulAnswer(0.93),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
+        }
     )
     entry = store.publish(_preimage(), response)
     path = store.path_for(entry.cache_key)
@@ -148,6 +204,13 @@ def test_malformed_and_partial_files_are_cache_misses(tmp_path) -> None:
     path = store.path_for(entry.cache_key)
     payload = json.loads(path.read_text(encoding="utf-8"))
     del payload["answers"]["risk"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    assert store.get(entry.cache_key, QUESTIONS) is None
+
+    entry = store.publish(_preimage(), response)
+    path = store.path_for(entry.cache_key)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["cache_schema"] = "jmap-answer/v0"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert store.get(entry.cache_key, QUESTIONS) is None
 
@@ -184,6 +247,41 @@ def test_partial_response_is_never_published(tmp_path) -> None:
     assert list(store.entries()) == []
 
 
+def test_incomplete_runtime_chunking_cannot_reach_cache(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+
+    with pytest.raises(ValueError, match="chunking"):
+        Runner(FakeJudge()).run(
+            [State("stdin#L1", "focus")],
+            QUESTIONS,
+            preset="jgrep",
+            chunker="para",
+            cache_store=store,
+            chunking={"by": "para"},
+        )
+
+    assert list(store.entries()) == []
+
+
+def test_implicitly_partial_response_is_never_published(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+    runner = Runner(
+        lambda *_: JudgeResponse({"matches_query": NoulAnswer(0.93)})
+    )
+
+    with pytest.raises(ValueError, match="answer"):
+        runner.run(
+            [State("stdin#L1", "focus")],
+            QUESTIONS,
+            preset="jgrep",
+            chunker="para",
+            cache_store=store,
+            chunking={"by": "para", "context_paragraphs": 0},
+        )
+
+    assert list(store.entries()) == []
+
+
 def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     calls = 0
 
@@ -191,7 +289,10 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
         nonlocal calls
         calls += 1
         return JudgeResponse(
-            {"matches_query": NoulAnswer(0.93), "risk": ScoreAnswer(1.5)}
+            {
+                "matches_query": NoulAnswer(0.93),
+                "risk": ScoreAnswer(1.5, confidence=0.8),
+            }
         )
 
     state = State("stdin#L1", "focus")
@@ -223,7 +324,10 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
 def test_clear_only_removes_the_requested_preset(tmp_path) -> None:
     store = CacheStore(tmp_path)
     response = JudgeResponse(
-        {"matches_query": NoulAnswer(0.93), "risk": ScoreAnswer(1.5)}
+        {
+            "matches_query": NoulAnswer(0.93),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
+        }
     )
     store.publish(_preimage(), response)
     other = copy.deepcopy(_preimage())
@@ -237,7 +341,10 @@ def test_clear_only_removes_the_requested_preset(tmp_path) -> None:
 def test_export_emits_exact_triples_and_preserves_scores(tmp_path) -> None:
     store = CacheStore(tmp_path)
     response = JudgeResponse(
-        {"matches_query": NoulAnswer(0.93), "risk": ScoreAnswer(1.5)}
+        {
+            "matches_query": NoulAnswer(0.93),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
+        }
     )
     entry = store.publish(_preimage(), response)
     output = io.StringIO()

@@ -14,6 +14,7 @@ from .answers import JudgeResponse, answer_to_dict, parse_judge_response
 
 CACHE_SCHEMA = "jmap-answer/v1"
 PROTOCOL_VERSION = CACHE_SCHEMA
+_CHUNKING_FIELDS = {"by", "context_paragraphs", "limits"}
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -47,9 +48,15 @@ def build_cache_preimage(
     if not isinstance(resolved_chunking, dict):
         raise TypeError("chunking must be an object")
     if limits is not None:
+        if set(resolved_chunking) not in (
+            _CHUNKING_FIELDS - {"limits"},
+            _CHUNKING_FIELDS,
+        ):
+            raise ValueError("chunking must contain exactly the resolved fields")
         resolved_chunking["limits"] = _limits_dict(limits)
-    if "limits" not in resolved_chunking:
-        raise ValueError("resolved chunking must include limits")
+    elif set(resolved_chunking) != _CHUNKING_FIELDS:
+        raise ValueError("chunking must contain exactly the resolved fields")
+    resolved_chunking["limits"] = _limits_dict(resolved_chunking["limits"])
 
     resolved_state = state.payload if hasattr(state, "payload") else state
     return {
@@ -133,6 +140,9 @@ class CacheStore:
         *,
         usage: Any = None,
     ) -> CacheEntry:
+        battery = preimage.get("question_battery")
+        if not isinstance(battery, Mapping) or set(response.answers) != set(battery):
+            raise ValueError("response answer IDs do not match question battery")
         if not response.complete:
             raise ValueError("only complete responses can be cached")
         key = cache_key(preimage)
@@ -268,14 +278,15 @@ def _digest(key: str) -> str:
 
 
 def _limits_dict(limits: Mapping[str, int] | Any) -> dict[str, int]:
+    fields = ("focus_bytes", "context_field_bytes", "state_bytes")
     if isinstance(limits, Mapping):
+        if set(limits) != set(fields):
+            raise ValueError("limits must contain exactly the resolved fields")
         return {
-            name: int(limits[name])
-            for name in ("focus_bytes", "context_field_bytes", "state_bytes")
+            name: int(limits[name]) for name in fields
         }
     return {
-        name: int(getattr(limits, name))
-        for name in ("focus_bytes", "context_field_bytes", "state_bytes")
+        name: int(getattr(limits, name)) for name in fields
     }
 
 

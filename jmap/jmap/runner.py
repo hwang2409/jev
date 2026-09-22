@@ -278,7 +278,9 @@ class Runner:
             )
         admission = self.admit(states, max_chunks, rejections)
         meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
-        resolved_chunking = dict(chunking or {"by": chunker})
+        resolved_chunking = (
+            dict(chunking) if chunking is not None else {"by": chunker}
+        )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
 

@@ -395,7 +395,7 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
                 f"choice answer for {question_id} requires a string choice"
             )
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _optional_number(
+        confidence = _number(
             raw_answer.get("confidence"), question_id, "confidence"
         )
         return ChoiceAnswer(choice, probabilities, confidence)
@@ -413,7 +413,7 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
         ):
             raise ValueError(f"score answer for {question_id} requires a string legend")
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _optional_number(
+        confidence = _number(
             raw_answer.get("confidence"), question_id, "confidence"
         )
         return ScoreAnswer(score, dict(legend), probabilities, confidence)
@@ -441,12 +441,6 @@ def _number(value: Any, question_id: str, field_name: str) -> float:
     if not math.isfinite(converted):
         raise ValueError(f"{field_name} for {question_id} must be finite")
     return converted
-
-
-def _optional_number(value: Any, question_id: str, field_name: str) -> float | None:
-    if value is None:
-        return None
-    return _number(value, question_id, field_name)
 
 
 def _require_number(value: Any, description: str) -> None:

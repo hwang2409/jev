@@ -105,6 +105,40 @@ def test_parse_rejects_confidence_on_noul() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "question_id,answer",
+    [
+        (
+            "kind",
+            {
+                "type": "choice",
+                "choice": "yes",
+                "probabilities": {"yes": 1.0},
+                "confidence": None,
+            },
+        ),
+        (
+            "risk",
+            {
+                "type": "score",
+                "score": 1.0,
+                "legend": {},
+                "probabilities": {},
+                "confidence": None,
+            },
+        ),
+    ],
+)
+def test_parse_rejects_null_confidence(
+    question_id: str, answer: dict[str, object]
+) -> None:
+    with pytest.raises(ValueError, match="confidence"):
+        parse_judge_response(
+            {"answers": {question_id: answer}},
+            {question_id: QUESTIONS[question_id]},
+        )
+
+
 def test_canonical_records_preserve_each_typed_answer_shape() -> None:
     meta = RecordMeta("diff-risk-heat", "1", "jev-1.13.0", "hunk", "miss")
     answers = {
