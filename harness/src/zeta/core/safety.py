@@ -649,10 +649,6 @@ def layer0_reason(command: str, cwd: str | Path) -> str | None:
     """Return the deterministic layer-0 reason, if one blocks auto-approval."""
 
     _classification, reason = layer0_classify(command, cwd)
-    # Keep the historical near-miss API for scoped /tmp deletes. The evaluator
-    # still escalates them because they are outside the workspace proof.
-    if reason == "destructive_target_outside_workspace" and "/tmp/" in command:
-        return None
     return reason
 
 
