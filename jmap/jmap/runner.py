@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from os import PathLike
 from typing import Any, Protocol, TextIO
 
 from .answers import (
@@ -25,6 +26,7 @@ from .answers import (
     TypedResponse,
 )
 from .cache import CacheStore, build_cache_preimage, cache_key
+from .presets import Preset, resolve_preset, validate_preset
 
 
 def _canonical_bytes(value: Any) -> int:
@@ -226,12 +228,15 @@ class Runner:
         judge_fn: JudgeFn,
         model: str = "jev-1.13.0",
         limits: StateLimits = StateLimits(),
+        *,
+        preset: Preset | str | PathLike[str] | None = None,
     ) -> None:
         if judge_fn is None:
             raise TypeError("judge_fn is required")
         self.judge_fn = judge_fn
         self.model = model
         self.limits = limits
+        self.preset = self._load_preset(preset, None)
 
     def judge(self, state: State, questions: Mapping[str, Any]) -> TypedResponse:
         validate_state(state, self.limits)
@@ -250,10 +255,10 @@ class Runner:
     def run(
         self,
         states: Sequence[State],
-        questions: Mapping[str, Any],
+        questions: Mapping[str, Any] | None = None,
         max_chunks: int | None = None,
         *,
-        preset: str = "jmap",
+        preset: Preset | str | PathLike[str] | None = None,
         preset_version: str = "1",
         chunker: str = "unknown",
         cache: CacheStatus = "not_applicable",
@@ -265,6 +270,36 @@ class Runner:
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
     ) -> RunResult:
+        loaded_preset = self._load_preset(
+            self.preset if preset is None else preset, questions
+        )
+        if loaded_preset is None:
+            if questions is None:
+                raise TypeError("questions or preset is required")
+            runtime_questions = questions
+            runtime_model = self.model
+            runtime_limits = self.limits
+            runtime_name = str(preset) if preset is not None else "jmap"
+            runtime_version = preset_version
+            runtime_chunker = chunker
+            runtime_max_chunks = max_chunks
+            resolved_chunking = dict(chunking) if chunking is not None else {
+                "by": chunker,
+                "max_chunks": max_chunks,
+            }
+        else:
+            runtime_questions = loaded_preset.questions
+            runtime_model = loaded_preset.model
+            runtime_limits = StateLimits(**loaded_preset.chunking["limits"])
+            runtime_name = loaded_preset.name
+            runtime_version = loaded_preset.version
+            runtime_chunker = loaded_preset.effective_chunker(
+                None if chunker == "unknown" else chunker
+            )
+            runtime_max_chunks = loaded_preset.chunking.get("max_chunks")
+            resolved_chunking = dict(loaded_preset.chunking)
+            resolved_chunking["by"] = runtime_chunker
+
         if output_format not in {"jsonl", "pretty"}:
             raise ValueError("output format must be jsonl or pretty")
         if not states and not rejections:
@@ -276,10 +311,11 @@ class Runner:
                     "stdin:byte=0,line=1",
                 ),
             )
-        admission = self.admit(states, max_chunks, rejections)
-        meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
-        resolved_chunking = (
-            dict(chunking) if chunking is not None else {"by": chunker}
+        for state in states:
+            validate_state(state, runtime_limits)
+        admission = admit_states(states, runtime_max_chunks, rejections)
+        meta = RecordMeta(
+            runtime_name, runtime_version, runtime_model, runtime_chunker, cache
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
@@ -294,23 +330,31 @@ class Runner:
             preimage = None
             if cache_store is not None:
                 preimage = build_cache_preimage(
-                    model=self.model,
-                    preset=preset,
-                    preset_version=preset_version,
+                    model=runtime_model,
+                    preset=runtime_name,
+                    preset_version=runtime_version,
                     chunking=resolved_chunking,
-                    questions=questions,
+                    questions=runtime_questions,
                     state=state,
-                    limits=self.limits,
+                    limits=runtime_limits if loaded_preset is None else None,
                 )
-                cached = cache_store.get(cache_key(preimage), questions)
+                cached = cache_store.get(cache_key(preimage), runtime_questions)
                 if cached is not None:
                     response = cached.response
                     state_meta = RecordMeta(
-                        preset, preset_version, self.model, chunker, "hit"
+                        runtime_name,
+                        runtime_version,
+                        runtime_model,
+                        runtime_chunker,
+                        "hit",
                     )
                 else:
                     state_meta = RecordMeta(
-                        preset, preset_version, self.model, chunker, "miss"
+                        runtime_name,
+                        runtime_version,
+                        runtime_model,
+                        runtime_chunker,
+                        "miss",
                     )
                     response = None
             else:
@@ -318,7 +362,7 @@ class Runner:
 
             if response is None:
                 try:
-                    response = self.judge(state, questions)
+                    response = self.judge_fn(state, runtime_questions, runtime_model)
                 except Exception:
                     response = ErrorResponse("request failed")
                 if (
@@ -359,7 +403,11 @@ class Runner:
         reasons = _coverage_reasons(admission, responses)
         coverage = "partial" if reasons else "complete"
         coverage_meta = RecordMeta(
-            preset, preset_version, self.model, chunker, "not_applicable"
+            runtime_name,
+            runtime_version,
+            runtime_model,
+            runtime_chunker,
+            "not_applicable",
         )
         coverage_record = CoverageRecord(
             coverage=coverage,
@@ -390,6 +438,22 @@ class Runner:
             reasons,
             exit_code,
         )
+
+    @staticmethod
+    def _load_preset(
+        preset: Preset | str | PathLike[str] | None,
+        questions: Mapping[str, Any] | None,
+    ) -> Preset | None:
+        if preset is None:
+            return None
+        if isinstance(preset, Preset):
+            return Preset(validate_preset(preset.data), preset.path)
+        if isinstance(preset, PathLike) or "/" in preset:
+            return resolve_preset("preset", explicit_path=preset)
+        if questions is not None:
+            # Keep the pre-preset constructor seam for unit tests and evals.
+            return None
+        return resolve_preset(preset)
 
     def run_jsonl(
         self,

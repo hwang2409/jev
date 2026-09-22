@@ -7,6 +7,7 @@ import pytest
 import yaml
 
 from jmap.presets import (
+    PresetNotFoundError,
     PresetUsageError,
     PresetValidationError,
     load_preset,
@@ -163,6 +164,38 @@ def test_incompatible_chunker_is_usage_error_with_allowed_set() -> None:
     assert error.value.exit_code == 64
     assert resolve_chunker(preset) == "para"
     assert resolve_chunker(preset, "file") == "file"
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../x", "a/b", "/tmp/jgrep.yml"],
+)
+def test_lookup_name_rejects_paths(name: str, tmp_path: Path) -> None:
+    with pytest.raises(PresetNotFoundError, match="safe preset name"):
+        resolve_preset(name, cwd=tmp_path, package_dir=tmp_path, user_dir=tmp_path)
+
+
+@pytest.mark.parametrize("name", BUILTINS)
+def test_each_preset_rejects_incompatible_by(name: str) -> None:
+    preset = resolve_preset(name)
+    incompatible = next(
+        chunker for chunker in ("line", "para", "hunk", "file", "record")
+        if chunker not in preset.compatible_chunkers
+    )
+    with pytest.raises(PresetUsageError, match="incompatible"):
+        resolve_chunker(preset, incompatible)
+
+
+def test_malformed_preset_has_clear_error_without_traceback(tmp_path: Path) -> None:
+    path = tmp_path / "malformed.yml"
+    path.write_text("schema: [", encoding="utf-8")
+
+    with pytest.raises(PresetValidationError) as error:
+        load_preset(path)
+
+    message = str(error.value)
+    assert "invalid YAML" in message
+    assert "Traceback" not in message
 
 
 def test_duplicate_yaml_keys_are_rejected(tmp_path) -> None:

@@ -13,6 +13,7 @@ SCHEMA = "jmap.preset/v1"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 _QUESTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+_PRESET_NAME = re.compile(r"^[a-z][a-z0-9-]*(?:\.(?:yml|yaml))?$")
 _PINNED_MODEL = re.compile(r"^jev-[0-9]+\.[0-9]+\.[0-9]+$")
 _REQUIRED_FIELDS = frozenset(
     {
@@ -240,11 +241,13 @@ def resolve_preset(
     user_dir: str | os.PathLike[str] | None = None,
 ) -> Preset:
     """Resolve a preset in the specified v1 lookup order."""
-    identifier = Path(name)
     if explicit_path is not None:
         return load_preset(explicit_path)
-    if _is_path_reference(identifier):
-        return load_preset(identifier)
+    identifier = os.fspath(name)
+    if isinstance(identifier, bytes) or not _PRESET_NAME.fullmatch(identifier):
+        raise PresetNotFoundError(
+            f"preset name must be a safe preset name, not a path: {name!s}"
+        )
 
     search_cwd = Path(cwd) if cwd is not None else Path.cwd()
     builtins = (
@@ -262,7 +265,7 @@ def resolve_preset(
 
     locations = (search_cwd, builtins, user)
     for directory in locations:
-        for candidate in _candidate_paths(directory, identifier.name):
+        for candidate in _candidate_paths(directory, identifier):
             if candidate.is_file():
                 return load_preset(candidate)
     searched = ", ".join(str(directory) for directory in locations)
@@ -300,13 +303,6 @@ def _candidate_paths(directory: Path, identifier: str) -> tuple[Path, ...]:
     if path.suffix in {".yml", ".yaml"}:
         return (path,)
     return (path, directory / f"{identifier}.yml", directory / f"{identifier}.yaml")
-
-
-def _is_path_reference(path: Path) -> bool:
-    return (
-        path.is_absolute()
-        or path.parent != Path(".")
-    )
 
 
 def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:

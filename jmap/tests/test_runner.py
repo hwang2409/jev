@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -14,6 +15,7 @@ from jmap.answers import (
     ScoreAnswer,
 )
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
+from jmap.presets import PresetValidationError, resolve_preset
 from jmap.runner import (
     FakeJudge,
     Runner,
@@ -50,6 +52,50 @@ def test_fake_judge_is_injected_without_http() -> None:
     runner = Runner(judge_fn=fake, model="jev-1.13.0")
     assert runner.judge(state, QUESTIONS) == "answer"
     assert calls == [(state, QUESTIONS, "jev-1.13.0")]
+
+
+def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
+    calls = []
+    preset = resolve_preset("jgrep")
+
+    def judge(state_arg, questions_arg, model_arg):
+        calls.append((state_arg, questions_arg, model_arg))
+        return FakeJudge()(state_arg, questions_arg, model_arg)
+
+    result = Runner(judge, model="jev-9.9.9").run(
+        [State("stdin#L1", "launch")],
+        max_chunks=0,
+        preset=preset,
+        chunker="file",
+    )
+
+    assert calls[0][1] == preset.questions
+    assert calls[0][2] == preset.model
+    assert result.records[0].to_dict()["meta"] == {
+        "preset": preset.name,
+        "preset_version": preset.version,
+        "model": preset.model,
+        "chunker": "file",
+        "cache": "not_applicable",
+    }
+
+
+def test_invalid_preset_is_validated_before_processing(tmp_path: Path) -> None:
+    path = tmp_path / "invalid.yml"
+    path.write_text("schema: jmap.preset/v1\n", encoding="utf-8")
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    with pytest.raises(PresetValidationError):
+        Runner(judge).run(
+            [State("stdin#L1", "launch")],
+            preset=path,
+        )
+
+    assert calls == []
 
 
 def test_fake_judge_returns_deterministic_typed_answers() -> None:
