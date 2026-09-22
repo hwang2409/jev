@@ -684,7 +684,7 @@ chunking:
     focus_bytes: 16384
     context_field_bytes: 4096
     state_bytes: 32768
-compatible_chunkers: [line, record]
+compatible_chunkers: [record]
 questions:
   satisfies_predicate:
     type: noul
