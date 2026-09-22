@@ -1,0 +1,223 @@
+{
+  "benign_auto_approve_rate": 1.0,
+  "composition": {
+    "category": {
+      "benign": 20,
+      "compound_and_substitution": 11,
+      "credential_stores": 21,
+      "destructive_system_paths": 17,
+      "nested_interpreters": 18,
+      "novel_wrappers": 12,
+      "persistence_network": 26,
+      "pipe_to_shell": 10,
+      "privilege_escalation": 10,
+      "runner_wrappers": 15
+    },
+    "expected": {
+      "analyzable": 24,
+      "deny": 77,
+      "escalate": 59
+    },
+    "source": {
+      "benign": 20,
+      "novel": 12,
+      "round1": 16,
+      "round2": 15,
+      "round3": 39,
+      "round4": 15,
+      "round5": 17,
+      "round6": 26
+    }
+  },
+  "corpus_rows": 160,
+  "dangerous_auto_approved": [],
+  "false_escalate_rate": 0.0,
+  "layer0_exact": 1.0,
+  "layer0_exact_counts": {
+    "exact": 160,
+    "rows": 160
+  },
+  "layer0_mismatches": [],
+  "per_category": {
+    "benign": {
+      "actual": {
+        "analyzable": 20
+      },
+      "confusion": {
+        "analyzable": {
+          "analyzable": 20
+        }
+      },
+      "expected": {
+        "analyzable": 20
+      },
+      "total": 20
+    },
+    "compound_and_substitution": {
+      "actual": {
+        "deny": 4,
+        "escalate": 7
+      },
+      "confusion": {
+        "deny": {
+          "deny": 4
+        },
+        "escalate": {
+          "escalate": 7
+        }
+      },
+      "expected": {
+        "deny": 4,
+        "escalate": 7
+      },
+      "total": 11
+    },
+    "credential_stores": {
+      "actual": {
+        "analyzable": 1,
+        "deny": 20
+      },
+      "confusion": {
+        "analyzable": {
+          "analyzable": 1
+        },
+        "deny": {
+          "deny": 20
+        }
+      },
+      "expected": {
+        "analyzable": 1,
+        "deny": 20
+      },
+      "total": 21
+    },
+    "destructive_system_paths": {
+      "actual": {
+        "deny": 12,
+        "escalate": 5
+      },
+      "confusion": {
+        "deny": {
+          "deny": 12
+        },
+        "escalate": {
+          "escalate": 5
+        }
+      },
+      "expected": {
+        "deny": 12,
+        "escalate": 5
+      },
+      "total": 17
+    },
+    "nested_interpreters": {
+      "actual": {
+        "escalate": 18
+      },
+      "confusion": {
+        "escalate": {
+          "escalate": 18
+        }
+      },
+      "expected": {
+        "escalate": 18
+      },
+      "total": 18
+    },
+    "novel_wrappers": {
+      "actual": {
+        "deny": 7,
+        "escalate": 5
+      },
+      "confusion": {
+        "deny": {
+          "deny": 7
+        },
+        "escalate": {
+          "escalate": 5
+        }
+      },
+      "expected": {
+        "deny": 7,
+        "escalate": 5
+      },
+      "total": 12
+    },
+    "persistence_network": {
+      "actual": {
+        "analyzable": 1,
+        "deny": 14,
+        "escalate": 11
+      },
+      "confusion": {
+        "analyzable": {
+          "analyzable": 1
+        },
+        "deny": {
+          "deny": 14
+        },
+        "escalate": {
+          "escalate": 11
+        }
+      },
+      "expected": {
+        "analyzable": 1,
+        "deny": 14,
+        "escalate": 11
+      },
+      "total": 26
+    },
+    "pipe_to_shell": {
+      "actual": {
+        "deny": 10
+      },
+      "confusion": {
+        "deny": {
+          "deny": 10
+        }
+      },
+      "expected": {
+        "deny": 10
+      },
+      "total": 10
+    },
+    "privilege_escalation": {
+      "actual": {
+        "deny": 10
+      },
+      "confusion": {
+        "deny": {
+          "deny": 10
+        }
+      },
+      "expected": {
+        "deny": 10
+      },
+      "total": 10
+    },
+    "runner_wrappers": {
+      "actual": {
+        "analyzable": 2,
+        "escalate": 13
+      },
+      "confusion": {
+        "analyzable": {
+          "analyzable": 2
+        },
+        "escalate": {
+          "escalate": 13
+        }
+      },
+      "expected": {
+        "analyzable": 2,
+        "escalate": 13
+      },
+      "total": 15
+    }
+  },
+  "safety_recall": 1.0,
+  "safety_recall_counts": {
+    "dangerous": 136,
+    "protected": 136
+  }
+}
