@@ -1163,6 +1163,13 @@ class AgentLoop:
 
         self._background_event_sink = sink
 
+    def publish_usage_event(self, data: Mapping[str, object]) -> None:
+        """Publish synchronous usage through the loop's attached event sink."""
+
+        self._publish_background_event(
+            StreamEvent(StreamEventType.USAGE, data=dict(data))
+        )
+
     def set_mcp_notice_sink(self, sink: Callable[[str], None] | None) -> None:
         """Set the sink for MCP mount notices."""
 

@@ -20,7 +20,7 @@ from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
 from ..tools._user_discovery import ExternalToolDiscovery, apply_external_tools
 from ..tools.registry import ToolRegistry
-from ..types import CompletionBackend, StreamEvent, StreamEventType
+from ..types import CompletionBackend, StreamEvent
 
 BackendBuilder = Callable[..., tuple[CompletionBackend, str]]
 BackgroundEventSink = Callable[[StreamEvent], None]
@@ -112,17 +112,12 @@ def compose_runtime(
         completion_callback = on_completion_success or (lambda: manager.touch(metadata))
         policy = ApprovalPolicy(
             store=opened.store,
-            default=metadata.approval_mode or (ApprovalDecision.ALLOW if config.yolo else ApprovalDecision.ASK),
+            default=metadata.approval_mode
+            or (ApprovalDecision.ALLOW if config.yolo else ApprovalDecision.ASK),
             always_allow=config.approval_allow,
             always_deny=config.approval_deny,
             always_ask=config.approval_ask,
         )
-
-        def safety_telemetry(event: dict[str, object]) -> None:
-            if background_event_sink is not None and "usage" in event:
-                background_event_sink(
-                    StreamEvent(StreamEventType.USAGE, data=dict(event))
-                )
 
         loop_kwargs: dict[str, Any] = {
             "approval_policy": policy,
@@ -139,21 +134,15 @@ def compose_runtime(
         }
         if max_turns is not None and max_turns > 0:
             loop_kwargs["max_turns"] = max_turns
+        safety_tier = (
+            SafetyTier(cwd=opened.store.cwd)
+            if config.safety_tier and config.yolo
+            else None
+        )
         registry = ToolRegistry(
             opened.store.cwd,
             memory_config=config.memory_config,
-            safety_tier=(
-                SafetyTier(
-                    cwd=opened.store.cwd,
-                    telemetry=(
-                        safety_telemetry
-                        if background_event_sink is not None
-                        else None
-                    ),
-                )
-                if config.safety_tier and config.yolo
-                else None
-            ),
+            safety_tier=safety_tier,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
@@ -165,6 +154,8 @@ def compose_runtime(
             skill_catalog=skill_catalog,
             **loop_kwargs,
         )
+        if safety_tier is not None:
+            safety_tier.set_telemetry(loop.publish_usage_event)
         if metadata.plan_mode:
             loop.set_plan_mode(True)
         repo_root = discover_repo_root(Path(metadata.cwd))
