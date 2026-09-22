@@ -29,7 +29,7 @@ def _complete_payload() -> dict[str, object]:
 
 def test_runner_requires_an_explicit_judge_function() -> None:
     with pytest.raises(TypeError, match="judge_fn"):
-        Runner()
+        Runner(None)
 
 
 def test_fake_judge_is_injected_without_http() -> None:
@@ -355,15 +355,28 @@ def test_typesafe_client_enforces_timeout_on_injected_client(monkeypatch) -> Non
 
 
 def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
+    class OversizedStream(httpx.SyncByteStream):
+        chunk = b"x" * 4096
+
+        def __init__(self) -> None:
+            self.bytes_read = 0
+
+        def __iter__(self):
+            while True:
+                self.bytes_read += len(self.chunk)
+                yield self.chunk
+
+    stream = OversizedStream()
+
     monkeypatch.setenv("JEV_API_KEY", "test-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        response = httpx.Response(200, stream=stream, request=request)
+        assert "Content-Length" not in response.headers
+        return response
+
     client = httpx.Client(
-        transport=httpx.MockTransport(
-            lambda request: httpx.Response(
-                200,
-                content=b"{}" + b"x" * MAX_RESPONSE_BYTES,
-                request=request,
-            )
-        )
+        transport=httpx.MockTransport(handler)
     )
 
     response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
@@ -372,6 +385,7 @@ def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
 
     assert isinstance(response, ErrorResponse)
     assert response.error == "response too large"
+    assert stream.bytes_read <= MAX_RESPONSE_BYTES + len(stream.chunk)
 
 
 def test_typesafe_client_handles_mid_body_connection_reset(monkeypatch) -> None:

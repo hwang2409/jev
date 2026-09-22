@@ -152,15 +152,6 @@ class TypeSafeClient:
             except httpx.RequestError:
                 return ErrorResponse("request failed", attempts=attempts), attempts
 
-            if response.status_code in {429, 529}:
-                if attempts < self.max_attempts:
-                    self._wait(attempts, _retry_after(response))
-                    continue
-                return self._status_error(response, attempts), attempts
-            if response.is_success:
-                return response, attempts
-            return self._status_error(response, attempts), attempts
-
         raise AssertionError("retry loop exited without a response")
 
     def _read_response(self, response: httpx.Response) -> bytes | None:

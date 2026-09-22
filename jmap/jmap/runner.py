@@ -188,7 +188,7 @@ class RunResult:
 class Runner:
     def __init__(
         self,
-        judge_fn: JudgeFn | None = None,
+        judge_fn: JudgeFn,
         model: str = "jev-1.13.0",
         limits: StateLimits = StateLimits(),
     ) -> None:
