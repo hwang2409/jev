@@ -87,6 +87,28 @@ jmap cache clear --preset jgrep
 Export writes one answer triple per line and no coverage record. Clear writes a
 small status object. Neither command calls the Jev API.
 
+### offline eval and live smoke
+
+Run the offline eval harness with the same CLI-facing paths and a deterministic
+injected judge:
+
+```bash
+cd jmap && uv run pytest -q tests/test_eval.py tests/test_answers.py \
+  tests/test_cache.py tests/test_chunkers.py tests/test_gates.py \
+  tests/test_presets.py tests/test_runner.py
+```
+
+The live smoke is manual and is not part of pytest or CI. It skips before
+creating a client when `JEV_API_KEY` is absent. When a key is available, run:
+
+```bash
+cd jmap && JEV_API_KEY="$JEV_API_KEY" uv run python scripts/live_api_smoke.py \
+  --cache-dir "$(mktemp -d)"
+```
+
+The smoke runs one `jgrep`, one `jfilter`, one `diff-risk-heat` run, and one
+gate. It prints only a compact status table.
+
 ### exit codes
 
 | code | meaning |
