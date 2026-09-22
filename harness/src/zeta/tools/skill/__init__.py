@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from ..skills import load_skill_prompt
-from .registry import ToolRegistry
+from ...skills import load_skill_prompt
+from ..registry import ToolRegistry
 
 
 def _load(registry: ToolRegistry, arguments: dict[str, str]) -> str:

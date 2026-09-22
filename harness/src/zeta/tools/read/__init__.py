@@ -9,11 +9,11 @@ import os
 from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
-from ..core.abort import AbortSignal
-from ..images import detect_image_media_type
-from ..types import StructuredToolResult
-from ._sandbox import open_target
-from .registry import (
+from ...core.abort import AbortSignal
+from ...images import detect_image_media_type
+from ...types import StructuredToolResult
+from .._sandbox import open_target
+from ..registry import (
     ToolRegistry,
     _BoundedText,
     _success_result,

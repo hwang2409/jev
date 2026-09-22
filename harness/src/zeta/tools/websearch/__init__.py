@@ -9,16 +9,16 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 import httpx
 
-from ..core.abort import AbortSignal
-from ..types import StructuredToolResult
-from .fetch import (
+from ...core.abort import AbortSignal
+from ...types import StructuredToolResult
+from ..fetch import (
     MAX_OUTPUT_BYTES,
     MAX_RESPONSE_BYTES,
     get_response,
     output_block,
     response_text,
 )
-from .registry import ToolRegistry, _success_result
+from ..registry import ToolRegistry, _success_result
 
 DDG_HTML_ENDPOINT = "https://html.duckduckgo.com/html/"
 DDG_LITE_ENDPOINT = "https://lite.duckduckgo.com/lite/"

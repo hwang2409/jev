@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from zeta.tools.browser_adapter import (
+from zeta.tools.browser.adapter import (
     ActionObservation,
     BrowserTimeoutError,
     ElementRef,

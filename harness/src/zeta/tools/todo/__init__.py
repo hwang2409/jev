@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TypedDict
 
-from ..core.todo import TODO_STATUSES, TodoItem, parse_todo_items, todo_counts
-from ..types import StructuredContentValue, StructuredToolResult
-from .registry import ToolRegistry, _success_result, text_block
+from ...core.todo import TODO_STATUSES, TodoItem, parse_todo_items, todo_counts
+from ...types import StructuredContentValue, StructuredToolResult
+from ..registry import ToolRegistry, _success_result, text_block
 
 
 class TodoArguments(TypedDict, total=False):
