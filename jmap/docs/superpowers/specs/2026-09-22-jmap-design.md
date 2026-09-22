@@ -13,8 +13,13 @@
 typed result records as JSONL. Their canonical schemas are defined in section
 2.5.
 
-The primitive makes judgment composable in shell pipelines. A user can pipe its
-output to `jq`, `sort`, `wc`, or another `jmap` invocation.
+The primitive makes judgment composable in shell pipelines. A user can select
+judgment records and extract fields with `jq` before passing them to another
+tool:
+
+```bash
+jmap run --preset jgrep.yml | jq 'select(.record_type == "result") | {state_ref, answers}'
+```
 
 The economic unit is one state visit, not one question. A question battery must
 share one state visit. The API request therefore carries all questions for one
@@ -226,8 +231,6 @@ The common metadata object has these required fields:
 
 `cache` is one of `hit`, `miss`, or `not_applicable`.
 
-V1 records have no window metadata or `window_ref`.
-
 A complete state has this shape:
 
 ```json
@@ -282,7 +285,7 @@ fallback identity.
 The closed `error.kind` enum is `api_error`, `malformed_answer`, `scan_cap`,
 `context_limit`, or `input_error`. `scan_cap` and `context_limit` are the
 skip-summary variant. That variant has `state_ref: null`, `source_ref: null`,
-one per-reason count, a bounded sample of stable refs, and no window fields.
+one per-reason count and a bounded sample of stable refs.
 
 ```json
 {
@@ -1341,7 +1344,7 @@ state, one cache hit, one partial response, and each gate exit path.
 - a literal `--hint` option or richer hint index;
 - local model backends and distillation;
 - remote or shared caches;
-- watch mode, streaming windowing, daemonized workers, and distributed concurrency;
+- live-input monitoring, bounded input grouping, daemonized workers, and distributed concurrency;
 - broad policy language features beyond thresholds and boolean combinators;
 - generated explanations or answer prose;
 - CI-guard hardening against hostile state and multi-tenant input;
@@ -1350,7 +1353,7 @@ state, one cache hit, one partial response, and each gate exit path.
 
 The v1 boundary is: **make the three presets real over finite input, with
 explicit chunking, caching, typed JSONL, and honest single-run gates; defer
-watch mode, streaming windowing, retrieval, local inference, distillation, and
+live-input monitoring, bounded input grouping, retrieval, local inference, distillation, and
 hostile-input hardening.**
 
 ## 11. risks and future decisions for Henry
@@ -1434,7 +1437,7 @@ This spec was reviewed against the required inputs and constraints before PR:
   approval remains open for that choice.
 - Formed-state coverage satisfies `discovered = judged + skipped`, and every
   coverage example balances that equation.
-- The v1 scope names watch mode and streaming windowing as deferred extensions.
+- The v1 scope names live-input monitoring and bounded input grouping as deferred extensions.
 - Every focus and context field has enforced byte limits.
 - All three v1 preset files include a model pin, questions, chunking limits,
   typed thresholds, and output schema.
