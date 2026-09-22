@@ -761,10 +761,13 @@ Edit `harness/pyproject.toml` so pytest uses:
 ```toml
 [tool.pytest.ini_options]
 testpaths = ["tests", "src/zeta/tools"]
-pythonpath = ["tests", "src"]
+pythonpath = ["tests", "src", "."]
 addopts = ["--import-mode=importlib", "-p", "zeta_test_plugin"]
 asyncio_mode = "auto"
 ```
+
+The harness root stays on `pythonpath` because `evals` is a root-level package
+imported by the tests.
 
 Keep `harness/` as the root directory. Do not add a source-tree conftest or
 duplicate fixture code. Do not add `__init__.py` to test directories. Tool
