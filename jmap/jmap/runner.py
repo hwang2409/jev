@@ -24,6 +24,7 @@ from .answers import (
     SkipSummary,
     TypedResponse,
 )
+from .cache import CacheStore, build_cache_preimage, cache_key
 
 
 def _canonical_bytes(value: Any) -> int:
@@ -256,6 +257,8 @@ class Runner:
         preset_version: str = "1",
         chunker: str = "unknown",
         cache: CacheStatus = "not_applicable",
+        cache_store: CacheStore | None = None,
+        chunking: Mapping[str, Any] | None = None,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
@@ -275,6 +278,9 @@ class Runner:
             )
         admission = self.admit(states, max_chunks, rejections)
         meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
+        resolved_chunking = (
+            dict(chunking) if chunking is not None else {"by": chunker}
+        )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
 
@@ -284,12 +290,46 @@ class Runner:
                 emit_jsonl(record, stdout)
 
         for state in admission.admitted:
-            try:
-                response = self.judge(state, questions)
-            except Exception:
-                response = ErrorResponse("request failed")
+            state_meta = meta
+            preimage = None
+            if cache_store is not None:
+                preimage = build_cache_preimage(
+                    model=self.model,
+                    preset=preset,
+                    preset_version=preset_version,
+                    chunking=resolved_chunking,
+                    questions=questions,
+                    state=state,
+                    limits=self.limits,
+                )
+                cached = cache_store.get(cache_key(preimage), questions)
+                if cached is not None:
+                    response = cached.response
+                    state_meta = RecordMeta(
+                        preset, preset_version, self.model, chunker, "hit"
+                    )
+                else:
+                    state_meta = RecordMeta(
+                        preset, preset_version, self.model, chunker, "miss"
+                    )
+                    response = None
+            else:
+                response = None
+
+            if response is None:
+                try:
+                    response = self.judge(state, questions)
+                except Exception:
+                    response = ErrorResponse("request failed")
+                if (
+                    cache_store is not None
+                    and preimage is not None
+                    and isinstance(response, JudgeResponse)
+                    and response.complete
+                ):
+                    cache_store.publish(preimage, response)
             responses.append(response)
-            record = _response_record(state.state_ref, response, meta)
+            record = _response_record(state.state_ref, response, state_meta)
             visible = not isinstance(record, ResultRecord) or result_filter is None
             if isinstance(record, ResultRecord) and result_filter is not None:
                 visible = result_filter(record)

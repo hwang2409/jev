@@ -395,7 +395,9 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
                 f"choice answer for {question_id} requires a string choice"
             )
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _number(raw_answer.get("confidence"), question_id, "confidence")
+        confidence = _number(
+            raw_answer.get("confidence"), question_id, "confidence"
+        )
         return ChoiceAnswer(choice, probabilities, confidence)
     if question_type == "score":
         _require_keys(
@@ -411,7 +413,9 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
         ):
             raise ValueError(f"score answer for {question_id} requires a string legend")
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _number(raw_answer.get("confidence"), question_id, "confidence")
+        confidence = _number(
+            raw_answer.get("confidence"), question_id, "confidence"
+        )
         return ScoreAnswer(score, dict(legend), probabilities, confidence)
     raise ValueError(f"unknown question type for {question_id}: {question_type!r}")
 
