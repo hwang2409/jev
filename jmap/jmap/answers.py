@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -224,6 +225,10 @@ class ErrorRecord:
         elif self.error.kind == "input_error":
             if self.state_ref is not None or not self.source_ref:
                 raise ValueError("input errors require a source reference")
+            if not isinstance(self.source_ref, str) or not re.fullmatch(
+                r".+:byte=\d+,line=\d+", self.source_ref
+            ):
+                raise ValueError("input errors require a canonical source reference")
         elif self.state_ref is not None or self.source_ref is not None:
             raise ValueError("skip summaries cannot identify a state")
         if self.error.kind in {"scan_cap", "context_limit", "input_error"} and (
@@ -275,6 +280,8 @@ class CoverageRecord:
             raise ValueError("complete coverage cannot have reasons")
         if self.coverage == "complete" and self.coverage_counts["failed"]:
             raise ValueError("complete coverage cannot have failed states")
+        if self.coverage == "complete" and self.coverage_counts["skipped"]:
+            raise ValueError("complete coverage cannot have skipped states")
         if self.coverage_counts["discovered"] != (
             self.coverage_counts["judged"] + self.coverage_counts["skipped"]
         ):

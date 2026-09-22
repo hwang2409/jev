@@ -264,6 +264,15 @@ class Runner:
     ) -> RunResult:
         if output_format not in {"jsonl", "pretty"}:
             raise ValueError("output format must be jsonl or pretty")
+        if not states and not rejections:
+            rejections = (
+                StateRejection(
+                    None,
+                    "input_error",
+                    "input is empty",
+                    "stdin:byte=0,line=1",
+                ),
+            )
         admission = self.admit(states, max_chunks, rejections)
         meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
         responses: list[TypedResponse] = []
@@ -299,7 +308,7 @@ class Runner:
                 stderr.write(f"jmap: warning: {record.error.message}\n")
                 stderr.flush()
 
-        failed = sum(isinstance(response, ErrorResponse) for response in responses)
+        failed = sum(not response.complete for response in responses)
         stats = RunStats(
             discovered=admission.discovered,
             judged=len(responses),
@@ -439,29 +448,51 @@ def _rejection_records(
     admission: StateAdmission, meta: RecordMeta
 ) -> tuple[ErrorRecord, ...]:
     grouped: dict[tuple[str, str], list[StateRejection]] = {}
+    events: list[StateRejection | tuple[str, str]] = []
+
+    def add_skip(rejection: StateRejection) -> None:
+        boundary = rejection.boundary or rejection.reason
+        key = (rejection.reason, boundary)
+        if key not in grouped:
+            grouped[key] = []
+            events.append(key)
+        grouped[key].append(rejection)
+
     if admission.skipped and admission.max_chunks is not None:
-        key = ("scan_cap", f"max_chunks={admission.max_chunks}")
-        grouped[key] = [
-            StateRejection(
-                state.state_ref,
-                "scan_cap",
-                "scan cap reached before visit",
-                boundary=f"max_chunks={admission.max_chunks}",
+        for state in admission.skipped:
+            add_skip(
+                StateRejection(
+                    state.state_ref,
+                    "scan_cap",
+                    "scan cap reached before visit",
+                    boundary=f"max_chunks={admission.max_chunks}",
+                )
             )
-            for state in admission.skipped
-        ]
     for rejection in admission.rejections:
         if rejection.reason in {"scan_cap", "context_limit"} and (
             rejection.state_ref is not None
         ):
-            boundary = rejection.boundary or rejection.reason
-            grouped.setdefault((rejection.reason, boundary), []).append(rejection)
+            add_skip(rejection)
+        elif rejection.reason == "input_error":
+            events.append(rejection)
 
-    records: list[ErrorRecord] = []
     skip_meta = RecordMeta(
         meta.preset, meta.preset_version, meta.model, meta.chunker, "not_applicable"
     )
-    for (reason, boundary), skipped in grouped.items():
+    records: list[ErrorRecord] = []
+    for event in events:
+        if isinstance(event, StateRejection):
+            records.append(
+                ErrorRecord(
+                    None,
+                    ErrorDetail("input_error", event.message),
+                    skip_meta,
+                    source_ref=event.source_ref,
+                )
+            )
+            continue
+        reason, boundary = event
+        skipped = grouped[event]
         records.append(
             ErrorRecord(
                 None,
@@ -477,15 +508,6 @@ def _rejection_records(
                 skip_meta,
             )
         )
-    for rejection in admission.input_errors:
-        records.append(
-            ErrorRecord(
-                None,
-                ErrorDetail("input_error", rejection.message),
-                skip_meta,
-                source_ref=rejection.source_ref,
-            )
-        )
     return tuple(records)
 
 
@@ -496,7 +518,7 @@ def _coverage_reasons(
     if admission.skipped:
         found.add("scan_cap")
     for rejection in admission.rejections:
-        if rejection.reason in {"input_error", "context_limit"}:
+        if rejection.reason in {"scan_cap", "input_error", "context_limit"}:
             found.add(rejection.reason)
     for response in responses:
         if isinstance(response, ErrorResponse):

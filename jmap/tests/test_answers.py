@@ -213,3 +213,24 @@ def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
             "cache": "not_applicable",
         },
     }
+
+
+def test_coverage_rejects_complete_when_states_are_skipped() -> None:
+    with pytest.raises(ValueError, match="complete coverage cannot have skipped"):
+        CoverageRecord(
+            "complete",
+            {"discovered": 1, "judged": 0, "emitted": 0, "skipped": 1, "failed": 0},
+            (),
+            RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+        )
+
+
+@pytest.mark.parametrize("source_ref", ["stdin", "stdin:byte=1", "stdin:line=2"])
+def test_input_errors_require_canonical_source_refs(source_ref: str) -> None:
+    with pytest.raises(ValueError, match="source reference"):
+        ErrorRecord(
+            None,
+            ErrorDetail("input_error", "invalid input"),
+            RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+            source_ref=source_ref,
+        )
