@@ -12,6 +12,7 @@ from .runner import (
     StateAdmission,
     StateLimitError,
     StateLimits,
+    StateRejection,
     admit_states,
     validate_state,
 )
@@ -60,14 +61,29 @@ def _state(
     context: Mapping[str, Any],
     limits: StateLimits,
     split_focus: bool = False,
+    rejections: list[StateRejection] | None = None,
+    source_ref: str | None = None,
 ) -> list[State]:
     state = State(state_ref, focus, context)
     try:
         validate_state(state, limits)
     except StateLimitError as exc:
         if not split_focus or not str(exc).startswith("focus exceeds"):
-            raise
-        pieces = _split_utf8(focus, limits.focus_bytes)
+            if rejections is None:
+                raise
+            rejections.append(
+                StateRejection(state_ref, "context_limit", str(exc), source_ref)
+            )
+            return []
+        try:
+            pieces = _split_utf8(focus, limits.focus_bytes)
+        except StateLimitError as split_exc:
+            if rejections is None:
+                raise
+            rejections.append(
+                StateRejection(state_ref, "context_limit", str(split_exc), source_ref)
+            )
+            return []
         total = len(pieces)
         states = []
         for index, piece in enumerate(pieces, start=1):
@@ -78,6 +94,8 @@ def _state(
                     {**context, "subunit": f"{index}/{total}"},
                     limits,
                     split_focus=False,
+                    rejections=rejections,
+                    source_ref=source_ref,
                 )
             )
         return states
@@ -96,6 +114,7 @@ def chunk_line(
     query: str | None = None,
     predicate: str | None = None,
     limits: StateLimits = StateLimits(),
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     lines = _line_units(_as_text(text))
     states: list[State] = []
@@ -118,7 +137,14 @@ def chunk_line(
         if predicate is not None:
             context["predicate"] = predicate
         states.extend(
-            _state(f"{source}#L{index}", focus, context, limits, split_focus=True)
+            _state(
+                f"{source}#L{index}",
+                focus,
+                context,
+                limits,
+                split_focus=True,
+                rejections=_rejections,
+            )
         )
     return states
 
@@ -160,6 +186,7 @@ def chunk_para(
     query: str | None = None,
     predicate: str | None = None,
     limits: StateLimits = StateLimits(),
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     decoded = _as_text(text)
     units = _paragraph_units(decoded)
@@ -185,7 +212,14 @@ def chunk_para(
         if predicate is not None:
             context["predicate"] = predicate
         states.extend(
-            _state(f"{source}#P{index}", focus, context, limits, split_focus=True)
+            _state(
+                f"{source}#P{index}",
+                focus,
+                context,
+                limits,
+                split_focus=True,
+                rejections=_rejections,
+            )
         )
     return states
 
@@ -210,15 +244,31 @@ def chunk_hunk(
     *,
     limits: StateLimits = StateLimits(),
     changed_test_paths: Iterable[str] | None = None,
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     lines = _as_text(diff).splitlines()
     file_path = "stdin"
     current_header: str | None = None
     current_body: list[str] = []
     hunks: list[tuple[str, str, list[str]]] = []
+    pending_old_path: str | None = None
     for line in lines:
-        if line.startswith("+++ "):
-            file_path = _diff_path(line[4:])
+        if line.startswith("diff --git "):
+            if current_header is not None:
+                hunks.append((file_path, current_header, current_body))
+                current_header = None
+                current_body = []
+            pending_old_path = None
+        elif line.startswith("--- "):
+            pending_old_path = _diff_path(line[4:])
+        elif line.startswith("+++ "):
+            if current_header is not None:
+                hunks.append((file_path, current_header, current_body))
+                current_header = None
+                current_body = []
+            new_path = _diff_path(line[4:])
+            file_path = pending_old_path if new_path == "/dev/null" else new_path
+            pending_old_path = None
         match = _HUNK_RE.match(line)
         if match:
             if current_header is not None:
@@ -253,7 +303,16 @@ def chunk_hunk(
             "surrounding": surrounding,
             "changed_tests": tests,
         }
-        states.extend(_state(state_ref, focus, context, limits, split_focus=True))
+        states.extend(
+            _state(
+                state_ref,
+                focus,
+                context,
+                limits,
+                split_focus=True,
+                rejections=_rejections,
+            )
+        )
     return states
 
 
@@ -266,6 +325,7 @@ def chunk_file(
     content: str | bytes | None = None,
     *,
     limits: StateLimits = StateLimits(),
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     normalized = _normalise_file_path(path)
     if content is None:
@@ -277,16 +337,31 @@ def chunk_file(
         "language": suffix,
         "metadata": {"size_bytes": len(decoded.encode("utf-8"))},
     }
-    return _state(normalized, decoded, context, limits, split_focus=False)
+    return _state(
+        normalized,
+        decoded,
+        context,
+        limits,
+        split_focus=False,
+        rejections=_rejections,
+    )
 
 
 def chunk_files(
-    records: str | bytes | Mapping[str, Any], *, limits: StateLimits = StateLimits()
+    records: str | bytes | Mapping[str, Any],
+    *,
+    limits: StateLimits = StateLimits(),
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     if isinstance(records, Mapping):
         if "path" not in records or "content" not in records:
             raise ValueError("file input requires path and content")
-        return chunk_file(records["path"], records["content"], limits=limits)
+        return chunk_file(
+            records["path"],
+            records["content"],
+            limits=limits,
+            _rejections=_rejections,
+        )
     states: list[State] = []
     for line_number, line in enumerate(_as_text(records).splitlines(), start=1):
         if not line.strip():
@@ -298,7 +373,14 @@ def chunk_files(
             or "content" not in record
         ):
             raise ValueError(f"file JSONL line {line_number} requires path and content")
-        states.extend(chunk_file(record["path"], record["content"], limits=limits))
+        states.extend(
+            chunk_file(
+                record["path"],
+                record["content"],
+                limits=limits,
+                _rejections=_rejections,
+            )
+        )
     return states
 
 
@@ -310,6 +392,7 @@ def chunk_record(
     query: str | None = None,
     predicate: str | None = None,
     limits: StateLimits = StateLimits(),
+    _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     if isinstance(records, Mapping):
         values = [records]
@@ -324,25 +407,76 @@ def chunk_record(
             values.append(value)
 
     states: list[State] = []
-    for record in values:
+    seen_refs: set[str] = set()
+    selected_fields = tuple(metadata_fields or ())
+    for record_index, record in enumerate(values, start=1):
         if state_ref_field not in record:
+            if _rejections is not None:
+                _rejections.append(
+                    StateRejection(
+                        None,
+                        "input_error",
+                        "record is missing selected identity field "
+                        f"{state_ref_field!r}",
+                        f"stdin:byte=0,line={record_index}",
+                    )
+                )
+                continue
             raise ValueError(
                 f"record is missing selected identity field {state_ref_field!r}"
             )
-        state_ref = str(record[state_ref_field])
-        if not state_ref:
-            raise ValueError(
-                f"record identity field {state_ref_field!r} must not be empty"
+        identity = record[state_ref_field]
+        if type(identity) not in (str, int) or (
+            isinstance(identity, str) and not identity
+        ):
+            message = (
+                f"record identity field {state_ref_field!r} must be a non-empty "
+                "string or integer"
             )
+            if _rejections is not None:
+                _rejections.append(
+                    StateRejection(
+                        None,
+                        "input_error",
+                        message,
+                        f"stdin:byte=0,line={record_index}",
+                    )
+                )
+                continue
+            raise ValueError(message)
+        state_ref = str(identity)
+        if state_ref in seen_refs:
+            message = f"duplicate record identity {state_ref!r}"
+            if _rejections is not None:
+                _rejections.append(
+                    StateRejection(
+                        state_ref,
+                        "input_error",
+                        message,
+                        f"stdin:byte=0,line={record_index}",
+                    )
+                )
+                continue
+            raise ValueError(message)
+        seen_refs.add(state_ref)
         focus = _canonical_json(record)
-        selected = metadata_fields or [key for key in record if key != state_ref_field]
-        metadata = {key: record[key] for key in selected if key in record}
+        metadata = {key: record[key] for key in selected_fields if key in record}
         context: dict[str, Any] = {"unit": "record", "metadata": metadata}
         if query is not None:
             context["query"] = query
         if predicate is not None:
             context["predicate"] = predicate
-        states.extend(_state(state_ref, focus, context, limits, split_focus=False))
+        states.extend(
+            _state(
+                state_ref,
+                focus,
+                context,
+                limits,
+                split_focus=False,
+                rejections=_rejections,
+                source_ref=f"stdin:byte=0,line={record_index}",
+            )
+        )
     return states
 
 
@@ -358,6 +492,26 @@ class ChunkResult:
     @property
     def admitted(self) -> tuple[State, ...]:
         return self.admission.admitted
+
+    @property
+    def states(self) -> tuple[State, ...]:
+        return self.formed
+
+    @property
+    def judged(self) -> int:
+        return self.admission.judged
+
+    @property
+    def rejections(self) -> tuple[StateRejection, ...]:
+        return self.admission.rejections
+
+    @property
+    def rejected(self) -> tuple[StateRejection, ...]:
+        return self.rejections
+
+    @property
+    def skipped_count(self) -> int:
+        return self.admission.skipped_count
 
     @property
     def skipped(self) -> tuple[State, ...]:
@@ -383,5 +537,9 @@ def chunk_input(
         chunker = functions[by]
     except KeyError as exc:
         raise ValueError(f"unknown chunker {by!r}") from exc
-    formed = tuple(chunker(value, limits=limits, **kwargs))
-    return ChunkResult(formed, admit_states(formed, max_chunks))
+    rejections: list[StateRejection] = []
+    formed = tuple(chunker(value, limits=limits, _rejections=rejections, **kwargs))
+    return ChunkResult(
+        formed,
+        admit_states(formed, max_chunks, rejections),
+    )

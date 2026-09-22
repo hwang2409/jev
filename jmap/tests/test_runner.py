@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from jmap.answers import ChoiceAnswer, ErrorResponse, NoulAnswer, ScoreAnswer
-from jmap.runner import FakeJudge, Runner, State, StateAdmission
+from jmap.runner import (
+    FakeJudge,
+    Runner,
+    State,
+    StateAdmission,
+    StateRejection,
+    admit_states,
+)
 
 QUESTIONS = {
     "is_relevant": {"type": "noul"},
@@ -62,3 +69,15 @@ def test_runner_admits_states_in_input_order_and_keeps_skipped_refs() -> None:
     assert [state.state_ref for state in admission.admitted] == ["stdin#L1", "stdin#L2"]
     assert [state.state_ref for state in admission.skipped] == ["stdin#L3"]
     assert admission.skip_boundary == "max_chunks=2"
+
+
+def test_state_admission_carries_rejections_in_coverage_counts() -> None:
+    rejection = StateRejection("stdin#L2", "context_limit", "too large")
+    admission = admit_states(
+        (State("stdin#L1", "one"),),
+        rejections=(rejection,),
+    )
+    assert admission.discovered == 2
+    assert admission.judged == 1
+    assert admission.skipped_count == 1
+    assert admission.rejections == (rejection,)

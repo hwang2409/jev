@@ -81,6 +81,14 @@ class StateLimitError(ValueError):
     """A formed state exceeds a configured byte limit."""
 
 
+@dataclass(frozen=True, slots=True)
+class StateRejection:
+    state_ref: str | None
+    reason: str
+    message: str
+    source_ref: str | None = None
+
+
 def validate_state(state: State, limits: StateLimits = StateLimits()) -> None:
     identity_size = len(state.state_ref.encode("utf-8"))
     if identity_size > limits.context_field_bytes:
@@ -115,14 +123,23 @@ class StateAdmission:
     admitted: tuple[State, ...]
     skipped: tuple[State, ...]
     max_chunks: int | None = None
+    rejections: tuple[StateRejection, ...] = ()
 
     @property
     def discovered(self) -> int:
-        return len(self.formed)
+        return len(self.formed) + sum(
+            rejection.state_ref is not None for rejection in self.rejections
+        )
 
     @property
     def judged(self) -> int:
         return len(self.admitted)
+
+    @property
+    def skipped_count(self) -> int:
+        return len(self.skipped) + sum(
+            rejection.state_ref is not None for rejection in self.rejections
+        )
 
     @property
     def skip_boundary(self) -> str | None:
@@ -132,7 +149,9 @@ class StateAdmission:
 
 
 def admit_states(
-    states: Sequence[State], max_chunks: int | None = None
+    states: Sequence[State],
+    max_chunks: int | None = None,
+    rejections: Sequence[StateRejection] = (),
 ) -> StateAdmission:
     if max_chunks is not None and max_chunks < 0:
         raise ValueError("max_chunks must be non-negative")
@@ -141,7 +160,13 @@ def admit_states(
         admitted = formed
     else:
         admitted = formed[:max_chunks]
-    return StateAdmission(formed, admitted, formed[len(admitted) :], max_chunks)
+    return StateAdmission(
+        formed,
+        admitted,
+        formed[len(admitted) :],
+        max_chunks,
+        tuple(rejections),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,7 +220,7 @@ class Runner:
             discovered=admission.discovered,
             judged=len(responses),
             emitted=len(responses),
-            skipped=len(admission.skipped),
+            skipped=admission.skipped_count,
             failed=failed,
         )
         return RunResult(admission, responses, stats)
