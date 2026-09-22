@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from zeta.tools.browser_adapter import ElementRef, PageObservation, SnapshotLimits
-from zeta.tools.browser_catalog import SnapshotCatalogBuilder
+from zeta.tools.browser_catalog import SnapshotCatalogBuilder, _serialized_size
 
 
 def test_builder_normalizes_text_caps_catalog_and_stale_ids() -> None:
@@ -121,3 +121,102 @@ def test_builder_invalidates_all_ids_when_generation_changes() -> None:
     assert catalog.invalidated_element_ids == frozenset({"e1"})
     assert builder.is_current(10, "e1") is False
     assert builder.is_current(11, "e1") is True
+
+
+def test_builder_assigns_monotonic_ids_and_bumps_generation_for_url_changes() -> None:
+    first = PageObservation(
+        10,
+        7,
+        "https://example.test/one",
+        "One",
+        "",
+        (ElementRef(10, "e1", "button", "click", "one", "one", None, None, False, True),),
+        True,
+        True,
+    )
+    second = PageObservation(
+        9,
+        7,
+        "https://example.test/two",
+        "Two",
+        "",
+        (),
+        True,
+        True,
+    )
+    builder = SnapshotCatalogBuilder(SnapshotLimits())
+
+    first_catalog = builder.build(first)
+    second_catalog = builder.build(second)
+
+    assert second_catalog.snapshot_id > first_catalog.snapshot_id
+    assert second_catalog.generation == first_catalog.generation + 1
+    assert second_catalog.invalidated_element_ids == frozenset({"e1"})
+
+
+def test_builder_catalog_byte_cap_includes_invalidated_ids() -> None:
+    first = PageObservation(
+        1,
+        1,
+        "https://example.test/one",
+        "One",
+        "",
+        tuple(
+            ElementRef(1, f"e{index}", "button", "click", "item", "item", None, None, False, True)
+            for index in range(6)
+        ),
+        True,
+        True,
+    )
+    builder = SnapshotCatalogBuilder(
+        SnapshotLimits(catalog_bytes=390)
+    )
+    builder.build(first)
+    second = builder.build(
+        PageObservation(2, 1, "https://example.test/two", "Two", "", (), True, True)
+    )
+
+    assert _serialized_size(
+        second.snapshot_id,
+        second.generation,
+        second.url,
+        second.title,
+        second.summary,
+        second.entries,
+        second.invalidated_element_ids,
+    ) <= 390
+
+
+def test_builder_fits_two_thousand_elements_within_time_and_bounds() -> None:
+    import time
+
+    observation = PageObservation(
+        1,
+        1,
+        "https://example.test",
+        "Results",
+        "",
+        tuple(
+            ElementRef(1, f"e{index}", "button", "click", f"item {index}", f"item {index}", None, None, False, True)
+            for index in range(2_000)
+        ),
+        True,
+        True,
+    )
+    builder = SnapshotCatalogBuilder(SnapshotLimits())
+
+    started = time.perf_counter()
+    catalog = builder.build(observation)
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 2
+    assert len(catalog.entries) <= 2_000
+    assert _serialized_size(
+        catalog.snapshot_id,
+        catalog.generation,
+        catalog.url,
+        catalog.title,
+        catalog.summary,
+        catalog.entries,
+        catalog.invalidated_element_ids,
+    ) <= builder.limits.catalog_bytes

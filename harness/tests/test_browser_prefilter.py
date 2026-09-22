@@ -104,3 +104,42 @@ def test_prefilter_reports_no_candidate_without_calling_jev() -> None:
     result = prefilter_catalog("submit form", "submit", catalog)
 
     assert result == PrefilterResult((), "no_candidate", 0)
+
+
+def test_prefilter_rejects_a_large_irrelevant_page() -> None:
+    entries = tuple(
+        CatalogEntry(f"e{index}", "button", "unrelated", "click", "unrelated", None, None, False, True)
+        for index in range(500)
+    )
+    catalog = BrowserCatalog(1, 1, "https://example.test", "", "", entries, frozenset())
+
+    result = prefilter_catalog("checkout", "click", catalog)
+
+    assert result.candidates == ()
+    assert result.reason == "no_candidate"
+    assert result.considered == 500
+
+
+def test_prefilter_keeps_a_clear_target() -> None:
+    entries = (
+        CatalogEntry("target", "button", "Continue checkout", "click", "continue", None, "main", False, True),
+        CatalogEntry("other", "button", "unrelated", "click", "unrelated", None, "main", False, True),
+    )
+    catalog = BrowserCatalog(1, 1, "https://example.test", "", "", entries, frozenset())
+
+    result = prefilter_catalog("continue checkout", "click", catalog)
+
+    assert result.reason is None
+    assert result.candidates[0].element_id == "target"
+
+
+def test_prefilter_preserves_each_tied_role_group() -> None:
+    entries = tuple(
+        CatalogEntry(f"e{index}", role, "result", "custom", "result", None, None, False, True)
+        for index, role in enumerate(("link", "link", "button", "button", "heading", "heading"))
+    )
+    catalog = BrowserCatalog(1, 1, "https://example.test", "", "", entries, frozenset())
+
+    result = prefilter_catalog("result", "custom", catalog, catalog_max=3)
+
+    assert {entry.role for entry in result.candidates} >= {"link", "button", "heading"}

@@ -95,6 +95,20 @@ async def test_fake_returns_next_observation_and_records_values() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fake_click_records_ref_and_advances_snapshot() -> None:
+    first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    second = PageObservation(2, 2, "https://example.test/next", "Two", "", (), True, True)
+    element = ElementRef(1, "e1", "button", "click", "Next", "next", None, "main", False, True)
+    adapter = FakeBrowserAdapter([first, second])
+
+    action = await adapter.click(element, 100)
+
+    assert action.snapshot_id == 2
+    assert action.url == second.url
+    assert adapter.clicks == [element]
+
+
+@pytest.mark.asyncio
 async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
     observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
     adapter = FakeBrowserAdapter([observation])
@@ -105,3 +119,16 @@ async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
 
     assert result.url == "https://example.test/next"
     assert adapter.navigations == ["https://example.test/next"]
+
+
+@pytest.mark.asyncio
+async def test_fake_navigation_advances_scripted_snapshots() -> None:
+    first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    second = PageObservation(2, 2, "https://example.test/two", "Two", "", (), True, True)
+    third = PageObservation(3, 3, "https://example.test/three", "Three", "", (), True, True)
+    adapter = FakeBrowserAdapter([first, second, third])
+
+    first_result = await adapter.navigate(second.url, 100)
+    second_result = await adapter.navigate(third.url, 100)
+
+    assert second_result.snapshot_id > first_result.snapshot_id
