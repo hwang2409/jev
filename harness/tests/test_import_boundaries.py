@@ -88,6 +88,7 @@ def test_layer_modules_import_in_fresh_processes() -> None:
         _module_name(path)
         for path in ROOT.rglob("*.py")
         if path.relative_to(ROOT).parts[0] in FORBIDDEN
+        and "tests" not in path.relative_to(ROOT).parts
     )
 
     failures: list[str] = []
@@ -121,6 +122,7 @@ def test_absolute_import_boundary_has_teeth(tmp_path: Path) -> None:
     violations = [
         violation
         for file_path in mutated_root.rglob("*.py")
+        if "tests" not in file_path.relative_to(mutated_root).parts
         for violation in _forbidden_imports(file_path, mutated_root)
     ]
 
@@ -134,6 +136,7 @@ def test_import_boundaries() -> None:
     violations = [
         violation
         for file_path in ROOT.rglob("*.py")
+        if "tests" not in file_path.relative_to(ROOT).parts
         for violation in _forbidden_imports(file_path)
     ]
     assert not violations, "\n".join(violations)

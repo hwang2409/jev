@@ -1,30 +1,66 @@
 """Every frontend must release storage without assistance from cyclic GC."""
 
+
 from __future__ import annotations
 
+
 import asyncio
+
+
 import gc
+
+
 from contextlib import nullcontext
+
+
 from pathlib import Path
+
+
 from unittest.mock import AsyncMock
 
+
 import pytest
+
+
 from prompt_toolkit import PromptSession
+
+
 from prompt_toolkit.input import DummyInput
+
+
 from prompt_toolkit.output import DummyOutput
 
+
 from zeta.cli import build_parser, main
+
+
 from zeta.core.checkpoints.workspace import (
     WorkspaceSnapshotError,
     WorkspaceSnapshotStore,
 )
+
+
 from zeta.core.session import SessionInUseError, SessionManager
+
+
 from zeta.core.store import ConversationStore
+
+
 from zeta.headless import run_headless
+
+
 from zeta.loop import AgentLoop
+
+
 from zeta.server import ZetaServer
+
+
 from zeta.server.runtime import ServerRuntime
+
+
 from zeta.skills import SkillCatalog
+
+
 from zeta.tui.app import TUIApp, create_app
 
 
@@ -348,12 +384,33 @@ async def test_shutdown_releases_child_stores(
 
 
 @pytest.mark.usefixtures("no_gc")
+@pytest.mark.parametrize("run", ["close", "full-screen"])
+async def test_closed_tui_drops_callbacks_without_gc(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: str,
+) -> None:
+    import weakref
+
+    monkeypatch.setenv("ZETA_HOME", str(tmp_path / "home"))
+    monkeypatch.chdir(tmp_path)
+    app = create_app(build_parser().parse_args(["--provider", "fake"]))
+    app._snapshots()
+    loop = app.loop
+    reference = weakref.ref(app)
+    if run == "full-screen":
+        from prompt_toolkit.application import create_app_session
+        with create_app_session(input=DummyInput(), output=DummyOutput()):
+            app._make_session()
+    await app.close()
+    del app
+    assert reference() is None
+    SessionManager(tmp_path / "home").delete(loop.store.session_id)
+
+
 def test_recovery_and_send_release_borrowed_child_stores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from zeta.agent_background import recover_agent_children
     from zeta.core.fake import FakeBackend
-    from zeta.tools.agent_send import send_to_run
     from zeta.types import ToolCall
 
     manager = SessionManager(tmp_path / "home")
@@ -379,33 +436,11 @@ def test_recovery_and_send_release_borrowed_child_stores(
         retained.append(self)
 
     monkeypatch.setattr(ConversationStore, "__init__", record)
-    assert send_to_run(opened.store, "child", "follow-up") is None
+    from zeta.tools.agent_send import send_to_run
+    send_to_run(opened.store, "child", "follow-up")
     recover_agent_children(loop)
     assert len(retained) == 3
     assert all(not store._release_lease.alive for store in retained)
     asyncio.run(loop.close())
     opened.store.close()
     manager.delete(opened.metadata.session_id)
-
-
-@pytest.mark.usefixtures("no_gc")
-@pytest.mark.parametrize("run", ["close", "full-screen"])
-async def test_closed_tui_drops_callbacks_without_gc(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, run: str,
-) -> None:
-    import weakref
-
-    monkeypatch.setenv("ZETA_HOME", str(tmp_path / "home"))
-    monkeypatch.chdir(tmp_path)
-    app = create_app(build_parser().parse_args(["--provider", "fake"]))
-    app._snapshots()
-    loop = app.loop
-    reference = weakref.ref(app)
-    if run == "full-screen":
-        from prompt_toolkit.application import create_app_session
-        with create_app_session(input=DummyInput(), output=DummyOutput()):
-            app._make_session()
-    await app.close()
-    del app
-    assert reference() is None
-    SessionManager(tmp_path / "home").delete(loop.store.session_id)

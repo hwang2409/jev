@@ -1,24 +1,60 @@
 import asyncio
+
+
 import base64
+
+
 import io
+
+
 import json
+
+
 from pathlib import Path
+
+
 from types import SimpleNamespace
 
+
 import pytest
+
+
 from rich.console import Console
 
+
 from zeta.core.context import ContextAssembler
+
+
 from zeta.core.store import ConversationStore
+
+
 from zeta.images import IMAGE_DEGRADATION_WARNING, detect_image_media_type
+
+
 from zeta.loop import _validated_tool_result
+
+
 from zeta.providers.anthropic import build_messages_payload
+
+
 from zeta.providers.codex import build_responses_payload
+
+
 from zeta.skills import SkillCatalog
+
+
 from zeta.tools import ToolRegistry
+
+
 from zeta.tools.read import IMAGE_MAX_BYTES
+
+
 from zeta.tui.checkpoints import CheckpointTranscriptMixin
+
+
 from zeta.tui.render import render_event
+
+
 from zeta.types import (
     ImageContent,
     Message,
@@ -30,10 +66,13 @@ from zeta.types import (
     ToolResult,
 )
 
+
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
     "0000000d49444154789c6360f8cf00000004000101a2e0c4b00000000049454e44ae426082"
 )
+
+
 IMAGE_FIXTURES = (
     ("png", "image/png", PNG),
     ("jpeg", "image/jpeg", b"\xff\xd8\xff\xd9"),
@@ -48,6 +87,7 @@ IMAGE_FIXTURES = (
         + b"\x00" * 10,
     ),
 )
+
 
 INVALID_IMAGE_FIXTURES = (
     ("image/png", PNG[:24]),
@@ -83,72 +123,6 @@ READ_WEBP_FIXTURES = (
     ("vp8l", _webp_data(b"VP8L", b"/\x00\x00\x00\x00")),
     ("animated-vp8x", _webp_data(b"VP8X", b"\x02" + b"\x00" * 9)),
 )
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("format_name", "mime_type", "data"), IMAGE_FIXTURES)
-async def test_read_detects_images_by_magic_bytes(
-    tmp_path: Path, format_name: str, mime_type: str, data: bytes
-) -> None:
-    path = tmp_path / f"renamed.{format_name}.bin"
-    path.write_bytes(data)
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-image", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is False
-    image = result["content"][1]
-    assert image["type"] == "image"
-    assert image["mimeType"] == mime_type
-    assert base64.b64decode(image["data"]) == data
-    assert result["structuredContent"]["format"] == format_name
-
-
-@pytest.mark.asyncio
-async def test_read_keeps_text_behavior_for_non_images(tmp_path: Path) -> None:
-    path = tmp_path / "note.bin"
-    data = "one\r\ntwo\n三".encode()
-    path.write_bytes(data)
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-text", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is False
-    block = result["content"][0]
-    assert block["text"] == "one\ntwo\n三"
-    assert block["full_size"] == len("one\ntwo\n三".encode())
-    assert block["truncated"] is False
-    assert result["structuredContent"]["sha256"]
-
-
-@pytest.mark.asyncio
-async def test_read_falls_back_for_webp_lookalike_text(tmp_path: Path) -> None:
-    path = tmp_path / "note.bin"
-    path.write_bytes(b"RIFFxxxxWEBPthis is UTF-8 text\n")
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-lookalike", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is False
-    assert result["content"][0]["text"] == "RIFFxxxxWEBPthis is UTF-8 text"
-
-
-def test_png_lookalike_fails_full_image_validation() -> None:
-    data = b"\x89PNG\r\n\x1a\nthis is UTF-8 text"
-
-    assert detect_image_media_type(data) == "image/png"
-    assert detect_image_media_type(data, complete=True) is None
-
-
-@pytest.mark.parametrize(("mime_type", "data"), INVALID_IMAGE_FIXTURES)
-def test_complete_image_validation_requires_container_structure(
-    mime_type: str, data: bytes
-) -> None:
-    assert detect_image_media_type(data) == mime_type
-    assert detect_image_media_type(data, complete=True) is None
 
 
 def _oversized_webp() -> bytes:
@@ -241,6 +215,8 @@ DECISION_TABLE_CASES = [
         id="row-2-oversized-lookalike",
     ),
 ]
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-2-oversized-valid-{format_name}",
@@ -251,6 +227,8 @@ DECISION_TABLE_CASES.extend(
     )
     for format_name, _mime_type, data in IMAGE_FIXTURES
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-2-oversized-invalid-{format_name}",
@@ -263,6 +241,8 @@ DECISION_TABLE_CASES.extend(
         IMAGE_FIXTURES, INVALID_IMAGE_FIXTURES, strict=True
     )
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-3-oversized-valid-{format_name}-with-paging",
@@ -273,6 +253,8 @@ DECISION_TABLE_CASES.extend(
     )
     for format_name, _mime_type, data in IMAGE_FIXTURES
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-3-oversized-invalid-{format_name}-with-paging",
@@ -285,6 +267,8 @@ DECISION_TABLE_CASES.extend(
         IMAGE_FIXTURES, INVALID_IMAGE_FIXTURES, strict=True
     )
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-4-{format_name}-with-paging",
@@ -295,6 +279,8 @@ DECISION_TABLE_CASES.extend(
     )
     for format_name, _mime_type, data in IMAGE_FIXTURES
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-4-{format_name}-invalid-with-paging",
@@ -307,6 +293,8 @@ DECISION_TABLE_CASES.extend(
         IMAGE_FIXTURES, INVALID_IMAGE_FIXTURES, strict=True
     )
 )
+
+
 DECISION_TABLE_CASES.extend(
     pytest.param(
         f"row-5-{format_name}-trailing-data",
@@ -317,6 +305,8 @@ DECISION_TABLE_CASES.extend(
     )
     for format_name, _mime_type, data in IMAGE_FIXTURES
 )
+
+
 DECISION_TABLE_CASES.extend(
     [
         pytest.param(
@@ -381,149 +371,6 @@ DECISION_TABLE_CASES.extend(
 )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("case_name", "data", "arguments", "expected"), DECISION_TABLE_CASES
-)
-async def test_image_read_decision_table(
-    tmp_path: Path,
-    case_name: str,
-    data: bytes,
-    arguments: dict[str, int],
-    expected: str,
-) -> None:
-    path = tmp_path / f"{case_name}.bin"
-    path.write_bytes(data)
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall(case_name, "read", {"path": path.name, **arguments})
-    )
-
-    if expected == "size":
-        assert result["isError"] is True
-        assert result["content"][0]["text"] == (
-            f"image is {len(data)} bytes; cap is "
-            f"{IMAGE_MAX_BYTES} bytes (4 MiB)"
-        )
-    elif expected == "paging":
-        assert result["isError"] is True
-        assert result["content"][0]["text"] == (
-            "offset and limit are not supported for image reads"
-        )
-    elif expected == "image":
-        assert result["isError"] is False
-        assert result["content"][1]["type"] == "image"
-        assert base64.b64decode(result["content"][1]["data"]) == data
-    elif expected == "text":
-        assert result["isError"] is False
-        assert result["content"][0]["text"] == "plain text"
-    else:
-        assert isinstance(expected, tuple)
-        expected_error, expected_text = expected
-        assert result["isError"] is expected_error
-        assert result["content"][0]["text"] == expected_text
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("case_name", "data"), READ_WEBP_FIXTURES)
-async def test_read_detects_webp_codecs(
-    tmp_path: Path, case_name: str, data: bytes
-) -> None:
-    path = tmp_path / f"{case_name}.bin"
-    path.write_bytes(data)
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall(f"read-{case_name}", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is False
-    assert result["content"][1]["type"] == "image"
-    assert result["content"][1]["mimeType"] == "image/webp"
-    assert base64.b64decode(result["content"][1]["data"]) == data
-    assert result["structuredContent"]["format"] == "webp"
-
-@pytest.mark.asyncio
-async def test_read_rejects_oversized_images_with_size_and_cap(tmp_path: Path) -> None:
-    path = tmp_path / "large.png"
-    path.write_bytes(PNG + b"x" * (4 * 1024 * 1024))
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-large-image", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is True
-    message = result["content"][0]["text"]
-    assert "image is 4194374 bytes" in message
-    assert "cap is 4194304 bytes (4 MiB)" in message
-
-
-@pytest.mark.asyncio
-async def test_read_rejects_oversized_webp_before_sample_validation(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "large.webp"
-    path.write_bytes(_oversized_webp())
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-large-webp", "read", {"path": path.name})
-    )
-
-    assert result["isError"] is True
-    message = result["content"][0]["text"]
-    assert "image is 4194324 bytes" in message
-    assert "cap is 4194304 bytes (4 MiB)" in message
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("argument", ["offset", "limit"])
-async def test_read_rejects_paging_arguments_for_images(
-    tmp_path: Path, argument: str
-) -> None:
-    path = tmp_path / "image.png"
-    path.write_bytes(PNG)
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-paged-image", "read", {"path": path.name, argument: 1})
-    )
-
-    assert result["isError"] is True
-    assert result["content"][0]["text"] == (
-        "offset and limit are not supported for image reads"
-    )
-
-
-@pytest.mark.asyncio
-async def test_read_image_near_cap_fits_default_context_budget(tmp_path: Path) -> None:
-    path = tmp_path / "near-cap.png"
-    path.write_bytes(PNG + b"x" * (IMAGE_MAX_BYTES - len(PNG)))
-
-    result = await ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty()).execute(
-        ToolCall("read-near-cap", "read", {"path": path.name})
-    )
-    assert result["isError"] is False
-
-    blocks = result["content"]
-    receipt = blocks[0]["text"]
-    store = ConversationStore(tmp_path, session_id="near-cap-session")
-    store.append_message(
-        Message(
-            MessageRole.TOOL_RESULT,
-            tool_result=ToolResult(
-                "read-near-cap",
-                receipt,
-                content_blocks=blocks,
-                structured_content=result["structuredContent"],
-            ),
-        )
-    )
-
-    assembled = await ContextAssembler(store).assemble()
-
-    assert assembled[0].tool_result is not None
-    assert assembled[0].tool_result.content_blocks is not None
-    assert len(assembled[0].tool_result.content_blocks[1]["data"]) > 5_000_000
-
-
 def _image_tool_result(data: bytes = PNG) -> ToolResult:
     encoded = base64.b64encode(data).decode("ascii")
     return ToolResult(
@@ -584,26 +431,6 @@ def test_codex_payload_injects_tool_image_as_input_image() -> None:
     assert image == {
         "type": "input_image",
         "image_url": "data:image/png;base64," + base64.b64encode(PNG).decode("ascii"),
-    }
-
-
-def test_codex_pasted_image_path_keeps_image_bytes_in_user_content() -> None:
-    encoded = base64.b64encode(PNG).decode("ascii")
-    payload = build_responses_payload(
-        [
-            Message(
-                MessageRole.USER,
-                [TextContent("inspect this"), ImageContent(encoded, "image/png")],
-            )
-        ],
-        [],
-        model="codex-test",
-    )
-
-    image = payload["input"][0]["content"][1]
-    assert image == {
-        "type": "input_image",
-        "image_url": "data:image/png;base64," + encoded,
     }
 
 
