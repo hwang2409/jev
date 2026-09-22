@@ -127,9 +127,7 @@ class FakeBrowserAdapter:
         self._detached: set[str] = set()
         self._timeouts: set[str] = set()
         self._races: set[str] = set()
-        self._closed = False
-        self._launched = False
-        self.navigations: list[tuple[str, int]] = []
+        self.navigations: list[str] = []
         self.clicks: list[ElementRef] = []
         self.typed: list[tuple[ElementRef, str, bool]] = []
         self.selected: list[tuple[ElementRef, str]] = []
@@ -145,12 +143,12 @@ class FakeBrowserAdapter:
         self._races.add(action)
 
     async def launch(self) -> None:
-        self._launched = True
+        return None
 
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         self._maybe_fail("navigate")
-        observation = self._advance_observation()
-        self.navigations.append((url, timeout_ms))
+        observation = self._current_observation()
+        self.navigations.append(url)
         return replace(observation, url=url)
 
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
@@ -171,7 +169,7 @@ class FakeBrowserAdapter:
         timeout_ms: int,
     ) -> ActionObservation:
         del timeout_ms
-        self._maybe_fail("type")
+        self._maybe_fail("type_text", "type")
         self._check_element(element_ref)
         self.typed.append((element_ref, text, replace))
         return self._next_action_observation()
@@ -207,7 +205,7 @@ class FakeBrowserAdapter:
         return _bounded_extracted(value, limit)
 
     async def close(self) -> None:
-        self._closed = True
+        return None
 
     def _current_observation(self) -> PageObservation:
         if not self._observations:
@@ -234,13 +232,14 @@ class FakeBrowserAdapter:
         if element_ref.element_id in self._detached:
             raise ElementUnavailableError(element_ref.element_id)
 
-    def _maybe_fail(self, action: str) -> None:
-        if action in self._timeouts:
-            self._timeouts.remove(action)
-            raise BrowserTimeoutError(action)
-        if action in self._races:
-            self._races.remove(action)
-            raise NavigationRaceError(action)
+    def _maybe_fail(self, *actions: str) -> None:
+        for action in actions:
+            if action in self._timeouts:
+                self._timeouts.remove(action)
+                raise BrowserTimeoutError(action)
+            if action in self._races:
+                self._races.remove(action)
+                raise NavigationRaceError(action)
 
     @staticmethod
     def _attribute_value(target: ElementRef | None, attribute: str) -> str | None:
@@ -263,8 +262,22 @@ def _bounded_extracted(
     limit: int,
 ) -> ExtractedData:
     if isinstance(value, dict):
-        full_size = sum(len(item or "".encode("utf-8")) for item in value.values())
-        return ExtractedData(value, False, full_size)
+        full_size = sum(len((item or "").encode("utf-8")) for item in value.values())
+        remaining = max(limit, 0)
+        bounded: dict[str, str | None] = {}
+        for key, item in value.items():
+            if item is None:
+                bounded[key] = None
+                continue
+            bounded_item = _bounded_string(item, remaining)
+            bounded[key] = bounded_item
+            remaining -= len(bounded_item.encode("utf-8"))
+        bounded_size = sum(len((item or "").encode("utf-8")) for item in bounded.values())
+        return ExtractedData(bounded, bounded_size < full_size, full_size)
     encoded = value.encode("utf-8")
-    bounded = encoded[: max(limit, 0)].decode("utf-8", errors="ignore")
+    bounded = _bounded_string(value, limit)
     return ExtractedData(bounded, len(bounded.encode("utf-8")) < len(encoded), len(encoded))
+
+
+def _bounded_string(value: str, limit: int) -> str:
+    return value.encode("utf-8")[: max(limit, 0)].decode("utf-8", errors="ignore")

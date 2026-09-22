@@ -104,4 +104,4 @@ async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
     result = await adapter.navigate("https://example.test/next", 100)
 
     assert result.url == "https://example.test/next"
-    assert adapter.navigations == [("https://example.test/next", 100)]
+    assert adapter.navigations == ["https://example.test/next"]
