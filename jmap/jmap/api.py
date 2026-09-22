@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 
 SYSTEMONE_URL = "https://api.typesafe.ai/v1/systemone"
 DEFAULT_MAX_ATTEMPTS = 3
+# Keep retry delays bounded so server hints and injected jitter cannot hang a run.
+MAX_WAIT_SECONDS = 30.0
+# Bound successful response bodies before parsing them into memory.
+MAX_RESPONSE_BYTES = 1_048_576
 
 
 class TypeSafeClient:
@@ -29,6 +33,7 @@ class TypeSafeClient:
         http_client: httpx.Client | None = None,
         timeout: float = 30.0,
         max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+        max_response_bytes: int = MAX_RESPONSE_BYTES,
         sleep: Callable[[float], None] | None = None,
         jitter: Callable[[], float] | None = None,
         backoff_base: float = 1.0,
@@ -37,9 +42,13 @@ class TypeSafeClient:
             raise ValueError("max_attempts must be positive")
         if backoff_base < 0:
             raise ValueError("backoff_base must not be negative")
+        if max_response_bytes <= 0:
+            raise ValueError("max_response_bytes must be positive")
         self.http_client = http_client or httpx.Client(timeout=timeout)
         self._owns_http_client = http_client is None
-        self.max_attempts = max_attempts
+        self.max_attempts = min(max_attempts, DEFAULT_MAX_ATTEMPTS)
+        self.timeout = timeout
+        self.max_response_bytes = max_response_bytes
         self.sleep = sleep or time.sleep
         self.jitter = jitter or (lambda: random.uniform(0.0, backoff_base))
         self.backoff_base = backoff_base
@@ -73,7 +82,7 @@ class TypeSafeClient:
         if parsed.complete:
             return parsed
 
-        response, retry_attempts = self._post(payload, api_key)
+        response, retry_attempts = self._post(payload, api_key, attempts)
         if isinstance(response, ErrorResponse):
             return response
         try:
@@ -90,19 +99,51 @@ class TypeSafeClient:
             self.http_client.close()
 
     def _post(
-        self, payload: Mapping[str, Any], api_key: str
+        self, payload: Mapping[str, Any], api_key: str, attempts_used: int = 0
     ) -> tuple[httpx.Response | ErrorResponse, int]:
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
         }
-        attempts = 0
+        attempts = attempts_used
+        if attempts >= self.max_attempts:
+            return (
+                ErrorResponse("request attempt budget exhausted", attempts=attempts),
+                attempts,
+            )
         while attempts < self.max_attempts:
             attempts += 1
             try:
-                response = self.http_client.post(
-                    SYSTEMONE_URL, headers=headers, json=payload
-                )
+                with self.http_client.stream(
+                    "POST",
+                    SYSTEMONE_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=self.timeout,
+                ) as response:
+                    if response.status_code in {429, 529}:
+                        if attempts < self.max_attempts:
+                            self._wait(attempts, _retry_after(response))
+                            continue
+                        return self._status_error(response, attempts), attempts
+                    if response.is_success:
+                        content = self._read_response(response)
+                        if content is None:
+                            return ErrorResponse(
+                                "response too large",
+                                http_status=response.status_code,
+                                attempts=attempts,
+                            ), attempts
+                        return (
+                            httpx.Response(
+                                response.status_code,
+                                headers=response.headers,
+                                content=content,
+                                request=response.request,
+                            ),
+                            attempts,
+                        )
+                    return self._status_error(response, attempts), attempts
             except httpx.TimeoutException:
                 if attempts < self.max_attempts:
                     self._wait(attempts, None)
@@ -122,12 +163,30 @@ class TypeSafeClient:
 
         raise AssertionError("retry loop exited without a response")
 
+    def _read_response(self, response: httpx.Response) -> bytes | None:
+        content_length = response.headers.get("Content-Length")
+        if content_length is not None:
+            try:
+                if int(content_length) > self.max_response_bytes:
+                    return None
+            except ValueError:
+                pass
+
+        content = bytearray()
+        for chunk in response.iter_bytes():
+            content.extend(chunk)
+            if len(content) > self.max_response_bytes:
+                return None
+        return bytes(content)
+
     def _wait(self, attempt: int, retry_after: float | None) -> None:
         if retry_after is None:
-            delay = self.backoff_base * (2 ** (attempt - 1)) + max(0.0, self.jitter())
+            base = min(MAX_WAIT_SECONDS, max(0.0, self.backoff_base))
+            jitter = min(MAX_WAIT_SECONDS, max(0.0, self.jitter()))
+            delay = base * (2 ** (attempt - 1)) + jitter
         else:
             delay = retry_after
-        self.sleep(delay)
+        self.sleep(min(MAX_WAIT_SECONDS, max(0.0, delay)))
 
     @staticmethod
     def _status_error(response: httpx.Response, attempts: int) -> ErrorResponse:

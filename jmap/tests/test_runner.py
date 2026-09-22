@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from jmap.answers import ChoiceAnswer, ErrorResponse, NoulAnswer, ScoreAnswer
-from jmap.api import TypeSafeClient
+from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
 from jmap.runner import (
     FakeJudge,
     Runner,
@@ -21,6 +21,15 @@ QUESTIONS = {
     "kind": {"type": "choice"},
     "risk": {"type": "score"},
 }
+
+
+def _complete_payload() -> dict[str, object]:
+    return {"answers": {"is_relevant": {"type": "noul", "noul": 0.9}}}
+
+
+def test_runner_requires_an_explicit_judge_function() -> None:
+    with pytest.raises(TypeError, match="judge_fn"):
+        Runner()
 
 
 def test_fake_judge_is_injected_without_http() -> None:
@@ -138,6 +147,43 @@ def test_typesafe_client_sends_one_full_battery_request(monkeypatch) -> None:
     }
 
 
+def test_typesafe_client_retries_timeout_then_succeeds(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise httpx.ReadTimeout("timed out", request=request)
+        return httpx.Response(200, json=_complete_payload(), request=request)
+
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "jev-1.13.0"
+    )
+
+    assert response.complete
+    assert attempts == 2
+
+
+def test_typesafe_client_rejects_malformed_success_response(monkeypatch) -> None:
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, text="not json", request=request)
+        )
+    )
+
+    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    )
+
+    assert response == ErrorResponse(
+        "malformed answer", http_status=200, attempts=1
+    )
+
+
 def test_typesafe_client_retries_retryable_statuses_and_timeout(
     monkeypatch,
 ) -> None:
@@ -210,6 +256,29 @@ def test_typesafe_client_honors_retry_after(monkeypatch) -> None:
     assert sleeps == [7.0]
 
 
+def test_typesafe_client_clamps_large_retry_after(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429, headers={"Retry-After": "1e100"}, request=request
+            )
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
+    sleeps: list[float] = []
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = TypeSafeClient(
+        http_client=client, sleep=sleeps.append, jitter=lambda: 1e100
+    )(State("stdin#L1", "focus"), {}, "jev-1.13.0")
+
+    assert response.complete
+    assert sleeps == [MAX_WAIT_SECONDS]
+
+
 def test_typesafe_client_retries_an_incomplete_full_battery(monkeypatch) -> None:
     attempts = 0
 
@@ -236,6 +305,93 @@ def test_typesafe_client_retries_an_incomplete_full_battery(monkeypatch) -> None
 
     assert attempts == 2
     assert response.complete
+
+
+def test_typesafe_client_shares_attempt_budget_across_retries(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(429, request=request)
+        return httpx.Response(
+            200,
+            json={"answers": {"is_relevant": {"type": "noul", "noul": 0.5}}},
+            request=request,
+        )
+
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = TypeSafeClient(
+        http_client=client, max_attempts=99, sleep=lambda _: None
+    )(
+        State("stdin#L1", "focus"),
+        {"is_relevant": {"type": "noul"}, "kind": {"type": "choice"}},
+        "jev-1.13.0",
+    )
+
+    assert attempts == 3
+    assert response.missing_questions == ("kind",)
+
+
+def test_typesafe_client_enforces_timeout_on_injected_client(monkeypatch) -> None:
+    seen_timeouts: list[dict[str, float | None]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_timeouts.append(request.extensions["timeout"])
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(timeout=None, transport=httpx.MockTransport(handler))
+    response = TypeSafeClient(http_client=client, timeout=2.5)(
+        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    )
+
+    assert response.complete
+    assert seen_timeouts == [
+        {"connect": 2.5, "read": 2.5, "write": 2.5, "pool": 2.5}
+    ]
+
+
+def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                content=b"{}" + b"x" * MAX_RESPONSE_BYTES,
+                request=request,
+            )
+        )
+    )
+
+    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    )
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error == "response too large"
+
+
+def test_typesafe_client_handles_mid_body_connection_reset(monkeypatch) -> None:
+    class ResetStream(httpx.SyncByteStream):
+        def __iter__(self):
+            yield b'{"answers": '
+            raise httpx.ReadError("connection reset")
+
+    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(200, stream=ResetStream(), request=request)
+        )
+    )
+
+    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    )
+
+    assert response == ErrorResponse("request failed", attempts=1)
 
 
 def test_typesafe_client_returns_missing_ids_after_second_incomplete_response(

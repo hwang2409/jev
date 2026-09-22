@@ -193,9 +193,7 @@ class Runner:
         limits: StateLimits = StateLimits(),
     ) -> None:
         if judge_fn is None:
-            from .api import TypeSafeClient
-
-            judge_fn = TypeSafeClient()
+            raise TypeError("judge_fn is required")
         self.judge_fn = judge_fn
         self.model = model
         self.limits = limits
