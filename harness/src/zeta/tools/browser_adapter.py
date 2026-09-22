@@ -147,7 +147,7 @@ class FakeBrowserAdapter:
 
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         self._maybe_fail("navigate")
-        observation = self._current_observation()
+        observation = self._advance_observation()
         self.navigations.append(url)
         return replace(observation, url=url)
 
