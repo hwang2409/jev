@@ -141,15 +141,90 @@ their implementations in `__init__.py`. `agent_send` remains outside
 discovery. `tools/plan_mode/` stays in place for stage 2.
 
 Planning-time snapshot — regenerate the interim stage-1 import list at stage 1
-start with this command. Treat its output as authoritative:
+start with this command. Treat its output as authoritative. The AST walk scans
+the files moved by this stage and emits every relative import statement. This
+catches both parent imports and flat-tool sibling imports:
 
 ```sh
-rg -n --glob '*.py' \
-  'from \.\.(registry|_process|_sandbox|agent_presets|agent_send|calendar|memory|fetch)' \
-  harness/src/zeta/tools
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+moved = {
+    "agent", "bash", "calendar", "edit", "exec", "fetch", "memory",
+    "read", "route", "skill", "todo", "websearch", "write",
+}
+root = Path("harness/src/zeta/tools")
+for name in sorted(moved):
+    path = root / f"{name}.py"
+    tree = ast.parse(path.read_text())
+    for node in sorted(ast.walk(tree), key=lambda item: getattr(item, "lineno", 0)):
+        if isinstance(node, ast.ImportFrom) and node.level:
+            print(f"{path}:{node.lineno}:from {'.' * node.level}{node.module or ''}")
+PY
 ```
 
-Expected output shape: one `path:line:import` record for each interim import.
+Actual output from the stage-1 tree:
+
+```text
+harness/src/zeta/tools/agent.py:15:from ..agent_receipt
+harness/src/zeta/tools/agent.py:24:from ..core.approval
+harness/src/zeta/tools/agent.py:25:from ..core.checkpoints
+harness/src/zeta/tools/agent.py:30:from ..core.session_files
+harness/src/zeta/tools/agent.py:31:from ..core.store
+harness/src/zeta/tools/agent.py:32:from ..model_catalog
+harness/src/zeta/tools/agent.py:33:from ..types
+harness/src/zeta/tools/agent.py:41:from .agent_presets
+harness/src/zeta/tools/agent.py:45:from .agent_send
+harness/src/zeta/tools/agent.py:50:from .registry
+harness/src/zeta/tools/bash.py:19:from ..core.abort
+harness/src/zeta/tools/bash.py:20:from ..types
+harness/src/zeta/tools/bash.py:21:from ._process
+harness/src/zeta/tools/bash.py:22:from ._sandbox
+harness/src/zeta/tools/bash.py:23:from .registry
+harness/src/zeta/tools/calendar.py:16:from ..types
+harness/src/zeta/tools/calendar.py:17:from .registry
+harness/src/zeta/tools/edit.py:9:from ..types
+harness/src/zeta/tools/edit.py:10:from ._sandbox
+harness/src/zeta/tools/edit.py:11:from .registry
+harness/src/zeta/tools/exec.py:14:from ..core.abort
+harness/src/zeta/tools/exec.py:15:from ..types
+harness/src/zeta/tools/exec.py:23:from ._process
+harness/src/zeta/tools/exec.py:24:from .registry
+harness/src/zeta/tools/fetch.py:17:from ..core.abort
+harness/src/zeta/tools/fetch.py:18:from ..types
+harness/src/zeta/tools/fetch.py:19:from .registry
+harness/src/zeta/tools/memory.py:18:from ..core.abort
+harness/src/zeta/tools/memory.py:19:from ..execution
+harness/src/zeta/tools/memory.py:20:from ..types
+harness/src/zeta/tools/memory.py:21:from ._process
+harness/src/zeta/tools/memory.py:22:from .registry
+harness/src/zeta/tools/read.py:12:from ..core.abort
+harness/src/zeta/tools/read.py:13:from ..images
+harness/src/zeta/tools/read.py:14:from ..types
+harness/src/zeta/tools/read.py:15:from ._sandbox
+harness/src/zeta/tools/read.py:16:from .registry
+harness/src/zeta/tools/route.py:8:from ..execution
+harness/src/zeta/tools/route.py:9:from ..providers.jev
+harness/src/zeta/tools/route.py:10:from ..types
+harness/src/zeta/tools/route.py:11:from .calendar
+harness/src/zeta/tools/route.py:12:from .memory
+harness/src/zeta/tools/route.py:13:from .registry
+harness/src/zeta/tools/skill.py:5:from ..skills
+harness/src/zeta/tools/skill.py:6:from .registry
+harness/src/zeta/tools/todo.py:7:from ..core.todo
+harness/src/zeta/tools/todo.py:8:from ..types
+harness/src/zeta/tools/todo.py:9:from .registry
+harness/src/zeta/tools/websearch.py:12:from ..core.abort
+harness/src/zeta/tools/websearch.py:13:from ..types
+harness/src/zeta/tools/websearch.py:14:from .fetch
+harness/src/zeta/tools/websearch.py:21:from .registry
+harness/src/zeta/tools/write.py:9:from ..types
+harness/src/zeta/tools/write.py:10:from ._sandbox
+harness/src/zeta/tools/write.py:11:from ._sandbox
+harness/src/zeta/tools/write.py:12:from .registry
+```
+
 Use these output-derived stage-1 relative imports because `_shared` does not
 exist:
 
@@ -283,15 +358,23 @@ cd harness && PYTHONPATH=src python -c 'import zeta; import zeta.tools.browser; 
 cd harness && PYTHONPATH=src python -c 'import zeta.tools.registry'
 ```
 
-Use the matching package name for every changed tool. The targeted behavior
-parity gate runs before and after the task:
+Use the matching package name for every changed tool. The affected test list
+comes from the stage-1 move list and the importer records above. It includes
+all central tests that exercise the moved agent, route, skill, command,
+safety, discovery, browser, and tool handlers. The targeted behavior parity
+gate runs before and after the task:
 
 ```sh
 cd harness && uv run --frozen pytest -q \
-  tests/test_tool_discovery.py tests/test_calendar_tools.py \
-  tests/test_memory_tools.py tests/test_read_images.py tests/test_todo.py \
-  tests/test_webtools.py tests/test_tools.py tests/test_sandbox.py \
-  tests/test_background.py tests/test_session_safety.py \
+  tests/test_agent.py tests/test_agent_output.py tests/test_automations.py \
+  tests/test_session.py tests/test_session_resilience.py \
+  tests/test_session_safety.py tests/test_session_shutdown.py \
+  tests/test_memory_tools.py tests/test_read_images.py tests/test_tools.py \
+  tests/test_todo.py tests/test_webtools.py tests/test_skills.py \
+  tests/test_evals.py tests/test_safety.py tests/test_commands.py \
+  tests/test_background.py tests/test_router_auto.py tests/test_router_mode.py \
+  tests/test_sandbox.py tests/test_tool_discovery.py \
+  tests/test_calendar_tools.py \
   tests/test_browser_adapter.py tests/test_browser_catalog.py \
   tests/test_browser_prefilter.py
 ```
@@ -436,12 +519,82 @@ Move `agent_presets.py`, `plan_mode/`, and `loop_setup.py` only after these
 helper rewrites pass.
 
 Planning-time snapshot — regenerate this support-importer list at stage 2
-start with the command below. Treat its output as authoritative:
+start with the command below. Treat its output as authoritative. The AST walk
+resolves relative imports and emits only imports of the support modules being
+moved. It includes the `registry` import only from `loop_setup.py`, where the
+move changes its relative depth:
 
 ```sh
-rg -n --glob '*.py' \
-  'agent_presets|loop_setup|plan_mode|from \.registry|from \.\.registry' \
-  harness/src harness/tests
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+support = {
+    "zeta.tools.agent_presets",
+    "zeta.tools.loop_setup",
+    "zeta.tools.plan_mode",
+}
+root = Path("harness")
+src_root = root / "src" / "zeta"
+
+def module_name(path):
+    if path.is_relative_to(src_root):
+        rel = path.relative_to(src_root).with_suffix("")
+        parts = list(rel.parts)
+        is_package = parts[-1] == "__init__"
+        if is_package:
+            parts.pop()
+        return "zeta." + ".".join(parts), is_package
+    rel = path.relative_to(root / "tests").with_suffix("")
+    return "tests." + ".".join(rel.parts), False
+
+def resolve_relative(current, is_package, level, module):
+    package = current.split(".") if is_package else current.split(".")[:-1]
+    if level > len(package):
+        return ""
+    base = package[: len(package) - level + 1]
+    if module:
+        base.extend(module.split("."))
+    return ".".join(base)
+
+paths = list(src_root.rglob("*.py")) + list((root / "tests").rglob("*.py"))
+for path in sorted(paths):
+    current, is_package = module_name(path)
+    tree = ast.parse(path.read_text())
+    lines = path.read_text().splitlines()
+    for node in sorted(ast.walk(tree), key=lambda item: getattr(item, "lineno", 0)):
+        targets = []
+        if isinstance(node, ast.ImportFrom):
+            target = node.module or ""
+            if node.level:
+                target = resolve_relative(current, is_package, node.level, target)
+            if target in support or (
+                target == "zeta.tools.registry" and current == "zeta.tools.loop_setup"
+            ):
+                targets.append(target)
+        elif isinstance(node, ast.Import):
+            targets.extend(alias.name for alias in node.names if alias.name in support)
+        if targets:
+            print(f"{path}:{node.lineno}:{lines[node.lineno - 1].strip()}")
+PY
+```
+
+Actual output from the stage-2 tree:
+
+```text
+harness/src/zeta/agent_runner.py:26:from .tools.agent_presets import (
+harness/src/zeta/loop.py:70:from .tools.agent_presets import (
+harness/src/zeta/loop.py:73:from .tools.loop_setup import select_tool_registry
+harness/src/zeta/loop.py:75:from .tools.plan_mode import (
+harness/src/zeta/skills/agent_catalog.py:9:from ..tools.agent_presets import AGENT_PRESETS, AgentPreset
+harness/src/zeta/tools/agent.py:41:from .agent_presets import (
+harness/src/zeta/tools/loop_setup.py:11:from .registry import ToolHandler, ToolRegistry
+harness/src/zeta/tools/plan_mode/__init__.py:5:from ..agent_presets import PLAN_PRESET
+harness/src/zeta/tui/agent_card.py:25:from ..tools.agent_presets import GENERAL_PRESET, get_agent_preset
+harness/tests/test_agent.py:28:from zeta.tools.agent_presets import (
+harness/tests/test_agent.py:2852:from zeta.tools.agent_presets import AGENT_PRESETS
+harness/tests/test_agent.py:2922:from zeta.tools.agent_presets import AGENT_PRESETS, RUN_PRESET
+harness/tests/test_plan_mode.py:19:from zeta.tools.plan_mode import PLAN_MODE_PREAMBLE, PLAN_MODE_TOOLS
 ```
 
 Expected output shape: one `path:line:import` record for each support importer.
@@ -876,7 +1029,10 @@ cd harness && uv run --frozen pytest --collect-only -q
 Record the `collected <N> items` line and compare it with the pre-stage no-path
 baseline. A count mismatch blocks the stage until the split is corrected.
 
-Run the targeted post-move tests and wheel build:
+Run the targeted post-move tests and wheel build. The executable test list is
+the union of every destination in the stage-3 split table, including central
+integration remainders. This executes the tests that the collection-only gate
+cannot exercise.
 
 ```sh
 cd harness && uv run --frozen pytest -q \
@@ -889,8 +1045,16 @@ cd harness && uv run --frozen pytest -q \
   src/zeta/tools/bash/tests src/zeta/tools/exec/tests \
   src/zeta/tools/edit/tests src/zeta/tools/write/tests \
   src/zeta/tools/zeta_background/tests src/zeta/tools/_shared/tests \
-  tests/test_import_boundaries.py tests/test_todo_persistence.py \
-  tests/test_todo_tui.py tests/test_agent_output_tui.py
+  tests/test_import_boundaries.py tests/test_agent_integration.py \
+  tests/test_agent_output_tui.py tests/test_automations_integration.py \
+  tests/test_session_integration.py tests/test_session_resilience_integration.py \
+  tests/test_session_safety_integration.py tests/test_session_shutdown.py \
+  tests/test_memory_tools_integration.py tests/test_read_images_integration.py \
+  tests/test_tools_integration.py tests/test_todo_persistence.py \
+  tests/test_todo_tui.py tests/test_skills.py tests/test_evals.py \
+  tests/test_safety.py tests/test_commands.py tests/test_background_integration.py \
+  tests/test_router_auto_integration.py tests/test_router_mode_integration.py \
+  tests/test_sandbox_integration.py
 cd harness && uv build
 ```
 
@@ -1045,7 +1209,7 @@ from pathlib import Path
 
 names = (
     "agent_background", "agent_budget", "agent_receipt", "agent_runner",
-    "execution", "headless", "images", "model_catalog", "persistence",
+    "execution", "headless", "images", "loop", "model_catalog", "persistence",
     "session_cli", "settings", "submission_pipeline", "submission", "types",
 )
 patterns = [
@@ -1065,8 +1229,123 @@ Expected output shape: one `path:line:import` record for each old-path
 importer. Split source files must appear under every post-stage-3 destination
 that retains the importer. The output-derived rewrite inventory is below.
 
-The types move is last. Therefore, regenerate this interim inventory before
-moving `types.py`:
+The fixed command's loop importer records from the current tree were:
+
+```text
+harness/src/zeta/__init__.py:36:from .loop import AgentLoop
+harness/src/zeta/agent_runner.py:46:from .loop import AgentLoop
+harness/src/zeta/agent_runner.py:516:from .loop import AgentLoop
+harness/src/zeta/core/loop.py:7:from ..loop import AgentLoop
+harness/src/zeta/runtime/cleanup.py:9:from ..loop import AgentLoop
+harness/src/zeta/runtime/composition.py:17:from ..loop import AgentLoop
+harness/src/zeta/runtime/driver.py:10:from ..loop import AgentLoop
+harness/src/zeta/runtime/unattended.py:8:from ..loop import AgentLoop
+harness/src/zeta/server/runtime.py:17:from ..loop import AgentLoop
+harness/src/zeta/tui/app.py:39:from ..loop import AgentLoop
+harness/tests/conftest.py:426:from zeta.loop import AgentLoop
+harness/tests/test_agent.py:23:from zeta.loop import AgentLoop
+harness/tests/test_agent.py:1198:monkeypatch.setattr("zeta.loop.mount_mcp_servers", mount_write_tool)
+harness/tests/test_agent_output.py:11:from zeta.loop import AgentLoop
+harness/tests/test_agent_status.py:11:from zeta.loop import AgentLoop
+harness/tests/test_agents.py:11:from zeta.loop import AgentLoop
+harness/tests/test_anthropic.py:3101:from zeta.loop import _error_info
+harness/tests/test_checkpoint.py:14:from zeta.loop import AgentLoop
+harness/tests/test_codex.py:2438:from zeta.loop import _error_info
+harness/tests/test_command_menu.py:21:from zeta.loop import AgentLoop
+harness/tests/test_commands.py:28:from zeta.loop import AgentLoop
+harness/tests/test_evals.py:27:from zeta.loop import AgentLoop
+harness/tests/test_headless.py:21:from zeta.loop import AgentLoop
+harness/tests/test_jev_compaction.py:12:from zeta.loop import AgentLoop
+harness/tests/test_loop.py:17:from zeta.loop import _validated_tool_result
+harness/tests/test_mcp.py:17:from zeta.loop import AgentLoop
+harness/tests/test_mcp.py:391:monkeypatch.setattr("zeta.loop.mount_mcp_servers", observe_mount)
+harness/tests/test_mcp.py:2224:monkeypatch.setattr("zeta.loop.mount_mcp_servers", delayed_mount)
+harness/tests/test_mcp_oauth.py:18:from zeta.loop import AgentLoop
+harness/tests/test_model_picker.py:22:from zeta.loop import AgentLoop
+harness/tests/test_plan_mode.py:16:from zeta.loop import AgentLoop
+harness/tests/test_read_images.py:14:from zeta.loop import _validated_tool_result
+harness/tests/test_router_auto.py:9:import zeta.loop as loop_module
+harness/tests/test_router_auto.py:15:from zeta.loop import AgentLoop
+harness/tests/test_router_mode.py:14:from zeta.loop import AgentLoop
+harness/tests/test_router_mode.py:594:import zeta.loop as loop_module
+harness/tests/test_selection.py:19:from zeta.loop import AgentLoop
+harness/tests/test_server.py:2286:from zeta.loop import _error_info
+harness/tests/test_session_shutdown.py:24:from zeta.loop import AgentLoop
+harness/tests/test_session_shutdown.py:235:monkeypatch.setattr("zeta.loop.ContextAssembler", fail)
+harness/tests/test_session_shutdown.py:339:monkeypatch.setattr("zeta.loop.ContextAssembler", fail)
+harness/tests/test_slash.py:34:from zeta.loop import AgentLoop
+harness/tests/test_stream_watchdog.py:26:from zeta.loop import AgentLoop
+harness/tests/test_theme_and_keys.py:17:from zeta.loop import AgentLoop
+harness/tests/test_todo.py:18:from zeta.loop import AgentLoop
+harness/tests/test_tree.py:13:from zeta.loop import AgentLoop
+harness/tests/test_user_tool_discovery.py:15:from zeta.loop import AgentLoop
+harness/tests/test_workspace_snapshots.py:26:from zeta.loop import AgentLoop
+```
+
+After the stage-3 plugin split, the `tests/conftest.py` record is
+`tests/zeta_test_plugin.py`. The list above is the complete loop set, including
+function-local monkeypatch strings.
+
+The types move is last. First run this dependency-order sweep. It emits only
+late-moving implementations that import an earlier-moving implementation:
+
+```sh
+python3 - <<'PY'
+import ast
+from pathlib import Path
+
+order = {
+    "execution": 1, "headless": 2, "loop": 3,
+    "agent_background": 4, "agent_budget": 5, "agent_receipt": 6,
+    "agent_runner": 7, "cli": 8, "session_cli": 9, "settings": 10,
+    "images": 11, "model_catalog": 12, "submission": 13,
+    "submission_pipeline": 14, "persistence": 15, "types": 16,
+}
+root = Path("harness/src/zeta")
+
+def resolve_relative(current, level, module):
+    package = current.split(".")[:-1]
+    base = package[: len(package) - level + 1]
+    if module:
+        base.extend(module.split("."))
+    return ".".join(base)
+
+for old, position in order.items():
+    path = root / f"{old}.py"
+    tree = ast.parse(path.read_text())
+    lines = path.read_text().splitlines()
+    current = f"zeta.{old}"
+    for node in sorted(ast.walk(tree), key=lambda item: getattr(item, "lineno", 0)):
+        if not isinstance(node, ast.ImportFrom) or not node.level:
+            continue
+        target = resolve_relative(current, node.level, node.module or "")
+        target_name = target.removeprefix("zeta.")
+        if target_name in order and order[target_name] < position:
+            print(f"{path}:{node.lineno}:{lines[node.lineno - 1].strip()} -> {target}")
+PY
+```
+
+Actual output from the stage-4 tree:
+
+```text
+harness/src/zeta/agent_receipt.py:481:from .agent_background import adopt_agent_children -> zeta.agent_background
+harness/src/zeta/agent_runner.py:10:from .agent_background import finish_background_child -> zeta.agent_background
+harness/src/zeta/agent_runner.py:11:from .agent_budget import ( -> zeta.agent_budget
+harness/src/zeta/agent_runner.py:16:from .agent_budget import child_depth as next_agent_depth -> zeta.agent_budget
+harness/src/zeta/agent_runner.py:17:from .agent_receipt import TerminalState, _without_agent_receipt_suffix -> zeta.agent_receipt
+harness/src/zeta/agent_runner.py:46:from .loop import AgentLoop -> zeta.loop
+harness/src/zeta/agent_runner.py:516:from .loop import AgentLoop -> zeta.loop
+harness/src/zeta/cli.py:253:from .headless import run_headless -> zeta.headless
+harness/src/zeta/submission_pipeline.py:23:from .submission import Submission -> zeta.submission
+harness/src/zeta/types.py:19:from .images import ( -> zeta.images
+```
+
+The sweep confirms the listed interim rewrites for every late mover. It adds
+one missing rewrite: while `images.py` moves, update `zeta/types.py` from
+`.images` to `.media.images`; after the types move, use `..media.images`.
+Therefore, it adds no other late-mover rewrites beyond `types.py`.
+
+Now regenerate this interim inventory before moving `types.py`:
 
 ```sh
 python3 - <<'PY'
@@ -1135,6 +1414,9 @@ implementation. Apply these interim rewrites before the fresh-process gate:
 - `cli/session.py`: `.core.session` becomes `..core.session`.
 - `config/settings.py`: `.core.approval` becomes `..core.approval`.
 - `media/images.py`: `.types` becomes `..types`.
+- `types.py`: while the implementation remains at `zeta.types`, `.images`
+  becomes `.media.images`; after the last move to `protocol/types.py`, it
+  becomes `..media.images`.
 - `submission/pipeline.py`: `.core.*`, `.submission`, `.tools.exec`,
   `.tui.composer`, and `.types` become `..core.*`, `.model`, `..tools.exec`,
   `..tui.composer`, and `..types`.
@@ -1423,6 +1705,46 @@ rg -n --glob '*.py' --glob '!src/zeta/types.py' \
 
 Remove the shim only when this command finds no importer and the new-path
 import checks pass.
+
+After every stage-4 importer rewrite, run this final all-module old-path gate.
+It excludes only the `zeta.loop` shim file itself. It must print no output;
+the gate covers every loose module, not just `loop`:
+
+```sh
+rg -n --glob '*.py' --glob '!src/zeta/loop.py' \
+  -e '^[[:space:]]*(from|import)[[:space:]]+zeta\.(agent_background|agent_budget|agent_receipt|agent_runner|execution|headless|images|loop|model_catalog|persistence|session_cli|settings|submission_pipeline|submission|types)([.[:space:]]|$)' \
+  -e '^[[:space:]]*from[[:space:]]+zeta[[:space:]]+import[[:space:]]+[^#]*(agent_background|agent_budget|agent_receipt|agent_runner|execution|headless|images|loop|model_catalog|persistence|session_cli|settings|submission_pipeline|submission|types)\b' \
+  -e '^[[:space:]]*from[[:space:]]+\.{1,3}(agent_background|agent_budget|agent_receipt|agent_runner|execution|headless|images|loop|model_catalog|persistence|session_cli|settings|submission_pipeline|submission|types)\b' \
+  harness/src harness/tests
+```
+
+The pre-move run returned 142 records. Its actual output started with:
+
+```text
+harness/tests/test_approval.py:25:from zeta.types import (
+harness/tests/test_settings.py:12:from zeta.settings import (
+harness/tests/test_types.py:1:from zeta.types import (
+harness/tests/test_agents.py:11:from zeta.loop import AgentLoop
+harness/tests/test_agents.py:20:from zeta.types import TextContent, ToolCall
+harness/tests/test_workspace_snapshots.py:26:from zeta.loop import AgentLoop
+harness/tests/test_workspace_snapshots.py:267:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:280:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:297:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:313:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:346:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:377:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:412:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_workspace_snapshots.py:429:    from zeta.types import Message, MessageRole, TextContent
+harness/tests/test_checkpoint.py:14:from zeta.loop import AgentLoop
+harness/tests/test_checkpoint.py:17:from zeta.types import (
+harness/tests/test_mcp_oauth.py:18:from zeta.loop import AgentLoop
+harness/tests/test_mcp_oauth.py:51:from zeta.types import TextContent
+harness/tests/test_tui.py:49:from zeta.persistence import DraftPersistence, history_for
+harness/tests/test_tui.py:91:from zeta.types import (
+```
+
+122 more lines followed. After all stage-4 rewrites, the same command must
+produce no output.
 
 Before moving `persistence.py`, replace the eager `zeta.tui.__init__` import
 of `.app` with a lazy initializer. Verify `import zeta.tui` and
