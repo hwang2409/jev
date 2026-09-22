@@ -660,8 +660,9 @@ stage 4  zeta.agent/{background,budget,receipt,runner};
          zeta.runtime/{execution,headless,loop};
          zeta.submission/{model,pipeline}; zeta.tui/persistence
          gate: each new grouping initializer is empty or lazy before its
-         first child moves. runtime remains lazy. zeta.tui is audited as
-         cycle-free because its initializer has no eager child imports.
+         first child moves. runtime remains lazy. Before moving persistence,
+         make zeta.tui.__init__ lazy: the current initializer eagerly imports
+         .app, which imports persistence. The lazy initializer is the gate.
          Result: every listed move passes the invariant.
 ```
 
@@ -824,9 +825,11 @@ behavior under test:
   rendering, layout, status, truncation, pinning, and terminal-size tests
   move to `harness/tests/test_todo_tui.py`.
 - `test_import_boundaries.py` stays whole at
-  `harness/tests/test_import_boundaries.py`. It scans the complete `src/zeta`
-  tree, starts fresh subprocess imports, and checks forbidden dependencies;
-  it is a cross-cutting boundary suite, not a tool test.
+  `harness/tests/test_import_boundaries.py`. It scans production Python files
+  under the complete `src/zeta` tree, starts fresh subprocess imports, and
+  checks forbidden dependencies; it is a cross-cutting boundary suite, not a
+  tool test. Its production-module scans exclude every `**/tests/**` path
+  after stage 3 co-location.
 
 Use this ownership rule for future mixed files: place a test with the
 smallest behavior owner when it tests one tool's public contract; keep it in
@@ -852,12 +855,13 @@ The direct `agent_send` or `send_to_run` tests in `test_agent.py` move to
 `test_recovery_and_send_release_borrowed_child_stores` moves to the same
 owner, while its session shutdown and lease-recovery assertions stay central.
 
-The later run-lifecycle tests `test_a_queued_prompt_stays_out_of_the_run_context`,
-`test_a_run_with_an_empty_queue_finishes_normally`, and
-`test_runs_and_send_commands_drive_a_live_run` stay agent-owned because they
-test `AgentLoop` lifecycle or slash-command integration, not the direct
-`agent_send` contract. This behavior-owner rule also applies to later tests
-that mention a run without calling `send_to_run` directly.
+The later run-lifecycle tests `test_a_queued_prompt_stays_out_of_the_run_context`
+and `test_a_run_with_an_empty_queue_finishes_normally` stay agent-owned because
+they test `AgentLoop` lifecycle, not the direct `agent_send` contract. The
+slash-command integration test `test_runs_and_send_commands_drive_a_live_run`
+stays central in `harness/tests` because it crosses agent lifecycle and TUI
+boundaries. This behavior-owner rule also applies to later tests that mention
+a run without calling `send_to_run` directly.
 
 The session and CLI lifecycle portions of `test_session_resilience.py` stay in
 `harness/tests`; its `from zeta import session_cli` alias is an importer count,
@@ -1004,7 +1008,10 @@ before and after each ownership split.
 
 Verification: `uv run --frozen pytest --collect-only -q` and compare collected
 node counts with the pre-move baseline. Run every moved test by its new path,
-then the complete suite. Run `uv build` and inspect the wheel contents.
+then the complete suite. Update both production-module scans in
+`test_import_boundaries.py` to exclude paths matching `**/tests/**`: the
+fresh-process module list and the forbidden-import scan. Run the boundary
+suite after that update. Run `uv build` and inspect the wheel contents.
 
 ### stage 4: group loose top-level modules
 
@@ -1021,6 +1028,11 @@ the other loose modules move to the proposed `agent`, `cli`, `config`,
 temporary re-export shims for `loop`, `settings`, and `types` until their
 importer counts reach zero. Preserve the `zeta.cli` package exports and
 `zeta.cli:main` entry point.
+
+Before moving `persistence.py` to `zeta.tui.persistence`, replace the current
+eager `zeta.tui.__init__` import of `.app` with a lazy initializer. Verify
+`import zeta.tui` and `import zeta.tui.persistence` in separate fresh Python
+processes before and after the move.
 
 Risk: import cycles and high fan-out breakage, especially around the lazy
 runtime initializer, `types`, `loop`, and `settings`.
@@ -1089,9 +1101,9 @@ This design was reviewed against the ticket requirements before handoff:
   helper patch-seam changes enumerated;
 - `agent_send` registration remains manual and its ordering invariant is
   checked by the parity gate;
-- direct `agent_send` and `send_to_run` tests are found by content, including
-  the two later run-lifecycle contract tests, while broader lifecycle tests
-  stay agent-owned by the behavior-owner rule;
+- direct `agent_send` and `send_to_run` tests are found by content, while
+  broader lifecycle tests stay agent-owned and the slash-command integration
+  test stays central by the behavior-owner rule;
 - `agent_send`, `skill`, agent-output, todo, and boundary-test ownership,
   including mixed-file splits, is explicit;
 - pytest discovery, the shared plugin and its fixtures, src layout, and wheel
