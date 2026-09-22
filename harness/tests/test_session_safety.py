@@ -602,7 +602,7 @@ async def test_session_lifecycle_has_no_absolute_session_file_operations(tmp_pat
 
 
 async def test_background_descriptor_keeps_lease_until_registry_close(tmp_path):
-    from zeta.tools._process import BackgroundTaskRegistry
+    from zeta.tools._shared.process import BackgroundTaskRegistry
 
     manager = SessionManager(tmp_path / "home")
     opened = manager.create(provider="fake", model="offline", cwd=tmp_path)

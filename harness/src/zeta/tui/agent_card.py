@@ -22,7 +22,7 @@ from ..agent_receipt import (
 from ..core.checkpoints import ConversationIntegrityError, load_session_json
 from ..core.session_files import SessionError, open_session_file, session_directory
 from ..tools.agent import send_to_run
-from ..tools.agent_presets import GENERAL_PRESET, get_agent_preset
+from ..agent.presets import GENERAL_PRESET, get_agent_preset
 from ..types import StreamEvent, StreamEventType, ToolCall
 from . import theme
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-import zeta.tools._sandbox as sandbox_module
+import zeta.tools._shared.sandbox as sandbox_module
 import zeta.tools.read as read_module
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry

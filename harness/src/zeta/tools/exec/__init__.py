@@ -20,7 +20,7 @@ from ...types import (
     ToolTextBlock,
     flatten_tool_content,
 )
-from .._process import _kill_and_reap, tool_subprocess_env
+from .._shared.process import _kill_and_reap, tool_subprocess_env
 from ..registry import (
     ToolRegistry,
     ToolStream,

@@ -23,7 +23,7 @@ from .providers.factory import build_backend, credential_store
 from .skills.agent_catalog import load_agent
 from .tools import ToolStreamPublisher
 from .tools.agent import ChildApprovalPolicy, agent_stats
-from .tools.agent_presets import (
+from .agent.presets import (
     GENERAL_PRESET,
     RUN_PRESET,
     AgentPreset,

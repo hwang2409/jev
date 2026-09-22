@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-import zeta.tools._sandbox as sandbox_module
+import zeta.tools._shared.sandbox as sandbox_module
 import zeta.tools.exec as exec_module
 import zeta.tools.read as read_module
 import zeta.tools.write as write_module
@@ -1779,7 +1779,7 @@ def _assert_env_dump_is_scrubbed(dump: str) -> None:
 def test_tool_subprocess_env_blocks_credentials_and_preserves_rest(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from zeta.tools._process import tool_subprocess_env
+    from zeta.tools._shared.process import tool_subprocess_env
 
     _seed_env(monkeypatch)
 

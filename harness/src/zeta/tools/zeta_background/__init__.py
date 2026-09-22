@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from ...types import StructuredToolResult
-from .._sandbox import expand_user_path
+from .._shared.sandbox import expand_user_path
 from ..registry import ToolRegistry, _success_result, text_block
 
 

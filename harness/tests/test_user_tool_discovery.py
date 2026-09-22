@@ -15,7 +15,7 @@ from zeta.core.store import ConversationStore
 from zeta.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.tools._user_discovery import (
+from zeta.tools._shared.user_discovery import (
     apply_external_tools,
     trust_project_tools,
 )

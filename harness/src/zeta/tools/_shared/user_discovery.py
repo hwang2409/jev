@@ -47,7 +47,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .registry import ToolDefinition, ToolRegistry
+    from ..registry import ToolDefinition, ToolRegistry
 
 TOOLS_DIRNAME = "tools"
 USER_SCOPE = "user"

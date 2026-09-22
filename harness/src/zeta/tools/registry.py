@@ -62,8 +62,8 @@ from ..types import (
     flatten_tool_content,
     validate_tool_content_block,
 )
-from ._process import BackgroundTaskRegistry
-from ._sandbox import SandboxPolicy
+from ._shared.process import BackgroundTaskRegistry
+from ._shared.sandbox import SandboxPolicy
 
 if TYPE_CHECKING:
     from ..skills.agent_catalog import AgentCatalog

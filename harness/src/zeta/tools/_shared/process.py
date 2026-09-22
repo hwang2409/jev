@@ -14,9 +14,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
 
-from ..core.checkpoints import load_session_json
-from ..core.process_env import subprocess_env
-from ..core.session_files import (
+from ...core.checkpoints import load_session_json
+from ...core.process_env import subprocess_env
+from ...core.session_files import (
     open_session_file,
     read_session_file,
     session_root,
