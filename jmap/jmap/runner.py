@@ -4,6 +4,7 @@ import hashlib
 import json
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from os import PathLike
 from typing import Any, Protocol, TextIO
 
 from .answers import (
@@ -25,6 +26,12 @@ from .answers import (
     TypedResponse,
 )
 from .cache import CacheStore, build_cache_preimage, cache_key
+from .presets import (
+    Preset,
+    PresetUsageError,
+    resolve_preset,
+    validate_preset,
+)
 
 
 def _canonical_bytes(value: Any) -> int:
@@ -220,18 +227,33 @@ class RunResult:
     exit_code: int = 0
 
 
+_DEFAULT_MODEL = "jev-1.13.0"
+
+
+class _Unset:
+    __slots__ = ()
+
+
+_UNSET = _Unset()
+
+
 class Runner:
     def __init__(
         self,
         judge_fn: JudgeFn,
-        model: str = "jev-1.13.0",
-        limits: StateLimits = StateLimits(),
+        model: str | _Unset = _UNSET,
+        limits: StateLimits | _Unset = _UNSET,
+        *,
+        preset: Preset | str | PathLike[str] | None = None,
     ) -> None:
         if judge_fn is None:
             raise TypeError("judge_fn is required")
         self.judge_fn = judge_fn
-        self.model = model
-        self.limits = limits
+        self._model_supplied = model is not _UNSET
+        self._limits_supplied = limits is not _UNSET
+        self.model = _DEFAULT_MODEL if model is _UNSET else model
+        self.limits = StateLimits() if limits is _UNSET else limits
+        self.preset = self._load_preset(preset)
 
     def judge(self, state: State, questions: Mapping[str, Any]) -> TypedResponse:
         validate_state(state, self.limits)
@@ -250,21 +272,90 @@ class Runner:
     def run(
         self,
         states: Sequence[State],
-        questions: Mapping[str, Any],
-        max_chunks: int | None = None,
+        questions: Mapping[str, Any] | None | _Unset = _UNSET,
+        max_chunks: int | None | _Unset = _UNSET,
         *,
-        preset: str = "jmap",
-        preset_version: str = "1",
-        chunker: str = "unknown",
+        preset: Preset | str | PathLike[str] | None = None,
+        preset_version: str | None | _Unset = _UNSET,
+        chunker: str | _Unset = _UNSET,
         cache: CacheStatus = "not_applicable",
         cache_store: CacheStore | None = None,
-        chunking: Mapping[str, Any] | None = None,
+        chunking: Mapping[str, Any] | None | _Unset = _UNSET,
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
     ) -> RunResult:
+        loaded_preset = self._load_preset(self.preset if preset is None else preset)
+        if loaded_preset is None:
+            if questions is _UNSET or questions is None:
+                raise TypeError("questions or preset is required")
+            runtime_questions = questions
+            runtime_model = self.model
+            runtime_limits = self.limits
+            runtime_name = str(preset) if preset is not None else "jmap"
+            runtime_version = "1" if preset_version is _UNSET else preset_version
+            runtime_chunker = "unknown" if chunker is _UNSET else chunker
+            runtime_max_chunks = None if max_chunks is _UNSET else max_chunks
+            resolved_chunking = (
+                dict(chunking)
+                if chunking is not _UNSET and chunking is not None
+                else {
+                    "by": runtime_chunker,
+                    "max_chunks": runtime_max_chunks,
+                }
+            )
+        else:
+            if questions is not _UNSET:
+                raise PresetUsageError(
+                    "questions cannot be supplied with a preset; "
+                    "use the preset's questions"
+                )
+            runtime_chunker = loaded_preset.effective_chunker(
+                None if chunker is _UNSET else chunker
+            )
+            preset_limits = StateLimits(**loaded_preset.chunking["limits"])
+            if self._model_supplied and self.model != loaded_preset.model:
+                raise PresetUsageError(
+                    f"model {self.model!r} conflicts with preset "
+                    f"{loaded_preset.name!r}"
+                )
+            if self._limits_supplied and self.limits != preset_limits:
+                raise PresetUsageError(
+                    f"limits conflict with preset {loaded_preset.name!r}"
+                )
+            if (
+                preset_version is not _UNSET
+                and preset_version != loaded_preset.version
+            ):
+                raise PresetUsageError(
+                    f"preset_version {preset_version!r} conflicts with preset "
+                    f"{loaded_preset.name!r}"
+                )
+            preset_max_chunks = loaded_preset.chunking.get("max_chunks")
+            if max_chunks is not _UNSET and max_chunks != preset_max_chunks:
+                raise PresetUsageError(
+                    f"max_chunks {max_chunks!r} conflicts with preset "
+                    f"{loaded_preset.name!r}"
+                )
+            runtime_questions = loaded_preset.questions
+            runtime_model = loaded_preset.model
+            runtime_limits = preset_limits
+            runtime_name = loaded_preset.name
+            runtime_version = loaded_preset.version
+            resolved_chunking = dict(loaded_preset.chunking)
+            resolved_chunking["by"] = runtime_chunker
+            if chunking is not _UNSET:
+                if chunking is None:
+                    raise PresetUsageError(
+                        f"chunking conflicts with preset {loaded_preset.name!r}"
+                    )
+                self._reject_chunking_conflicts(
+                    chunking, resolved_chunking, loaded_preset.name
+                )
+            runtime_max_chunks = preset_max_chunks
+
         if output_format not in {"jsonl", "pretty"}:
             raise ValueError("output format must be jsonl or pretty")
         if not states and not rejections:
@@ -276,10 +367,11 @@ class Runner:
                     "stdin:byte=0,line=1",
                 ),
             )
-        admission = self.admit(states, max_chunks, rejections)
-        meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
-        resolved_chunking = (
-            dict(chunking) if chunking is not None else {"by": chunker}
+        for state in states:
+            validate_state(state, runtime_limits)
+        admission = admit_states(states, runtime_max_chunks, rejections)
+        meta = RecordMeta(
+            runtime_name, runtime_version, runtime_model, runtime_chunker, cache
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
@@ -294,23 +386,31 @@ class Runner:
             preimage = None
             if cache_store is not None:
                 preimage = build_cache_preimage(
-                    model=self.model,
-                    preset=preset,
-                    preset_version=preset_version,
+                    model=runtime_model,
+                    preset=runtime_name,
+                    preset_version=runtime_version,
                     chunking=resolved_chunking,
-                    questions=questions,
+                    questions=runtime_questions,
                     state=state,
-                    limits=self.limits,
+                    limits=runtime_limits if loaded_preset is None else None,
                 )
-                cached = cache_store.get(cache_key(preimage), questions)
+                cached = cache_store.get(cache_key(preimage), runtime_questions)
                 if cached is not None:
                     response = cached.response
                     state_meta = RecordMeta(
-                        preset, preset_version, self.model, chunker, "hit"
+                        runtime_name,
+                        runtime_version,
+                        runtime_model,
+                        runtime_chunker,
+                        "hit",
                     )
                 else:
                     state_meta = RecordMeta(
-                        preset, preset_version, self.model, chunker, "miss"
+                        runtime_name,
+                        runtime_version,
+                        runtime_model,
+                        runtime_chunker,
+                        "miss",
                     )
                     response = None
             else:
@@ -318,7 +418,7 @@ class Runner:
 
             if response is None:
                 try:
-                    response = self.judge(state, questions)
+                    response = self.judge_fn(state, runtime_questions, runtime_model)
                 except Exception:
                     response = ErrorResponse("request failed")
                 if (
@@ -359,7 +459,11 @@ class Runner:
         reasons = _coverage_reasons(admission, responses)
         coverage = "partial" if reasons else "complete"
         coverage_meta = RecordMeta(
-            preset, preset_version, self.model, chunker, "not_applicable"
+            runtime_name,
+            runtime_version,
+            runtime_model,
+            runtime_chunker,
+            "not_applicable",
         )
         coverage_record = CoverageRecord(
             coverage=coverage,
@@ -391,14 +495,51 @@ class Runner:
             exit_code,
         )
 
+    @staticmethod
+    def _load_preset(
+        preset: Preset | str | PathLike[str] | None,
+    ) -> Preset | None:
+        if preset is None:
+            return None
+        if isinstance(preset, Preset):
+            return Preset(validate_preset(preset.data), preset.path)
+        if isinstance(preset, PathLike) or "/" in preset:
+            return resolve_preset("preset", explicit_path=preset)
+        return resolve_preset(preset)
+
+    @staticmethod
+    def _reject_chunking_conflicts(
+        requested: Mapping[str, Any],
+        resolved: Mapping[str, Any],
+        preset_name: str,
+    ) -> None:
+        for key, value in requested.items():
+            if key not in resolved:
+                raise PresetUsageError(
+                    f"chunking.{key} conflicts with preset {preset_name!r}"
+                )
+            expected = resolved[key]
+            if isinstance(value, Mapping):
+                if not isinstance(expected, Mapping):
+                    raise PresetUsageError(
+                        f"chunking.{key} conflicts with preset {preset_name!r}"
+                    )
+                Runner._reject_chunking_conflicts(value, expected, preset_name)
+            elif value != expected:
+                raise PresetUsageError(
+                    f"chunking.{key} conflicts with preset {preset_name!r}"
+                )
+
     def run_jsonl(
         self,
         states: Sequence[State],
-        questions: Mapping[str, Any],
-        stdout: TextIO,
+        questions: Mapping[str, Any] | None | _Unset = _UNSET,
+        stdout: TextIO | None = None,
         **kwargs: Any,
     ) -> RunResult:
         """Run a finite judgment and write only canonical JSONL to stdout."""
+        if stdout is None:
+            raise TypeError("stdout is required")
         kwargs["stdout"] = stdout
         return self.run(states, questions, **kwargs)
 

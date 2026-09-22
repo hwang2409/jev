@@ -1,0 +1,482 @@
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import yaml
+
+SCHEMA = "jmap.preset/v1"
+CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
+QUESTION_TYPES = frozenset({"noul", "choice", "score"})
+_QUESTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
+_PRESET_NAME = re.compile(r"^[a-z][a-z0-9-]*(?:\.(?:yml|yaml))?$")
+_PINNED_MODEL = re.compile(r"^jev-[0-9]+\.[0-9]+\.[0-9]+$")
+_REQUIRED_FIELDS = frozenset(
+    {
+        "schema",
+        "name",
+        "version",
+        "model",
+        "chunking",
+        "compatible_chunkers",
+        "questions",
+        "thresholds",
+        "output",
+    }
+)
+_OPTIONAL_FIELDS = frozenset({"description"})
+_OUTPUT_FIELDS = frozenset(
+    {
+        "record_type",
+        "state_ref",
+        "source_ref",
+        "answers",
+        "error",
+        "missing_questions",
+        "coverage",
+        "coverage_counts",
+        "coverage_reasons",
+        "meta",
+    }
+)
+
+
+class _UniqueKeyLoader(yaml.SafeLoader):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: yaml.Loader, node: yaml.nodes.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    mapping: dict[Any, Any] = {}
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        if isinstance(key, bool):
+            key = str(key).lower()
+        if key in mapping:
+            raise yaml.YAMLError(f"duplicate YAML key: {key!r}")
+        mapping[key] = loader.construct_object(value_node, deep=deep)
+    return mapping
+
+
+_UniqueKeyLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+class PresetError(ValueError):
+    """Base error for invalid or unusable presets."""
+
+
+class PresetValidationError(PresetError):
+    """A preset does not match the v1 schema."""
+
+
+class PresetUsageError(PresetError):
+    """A valid preset cannot be used with the requested invocation options."""
+
+    exit_code = 64
+
+
+class PresetNotFoundError(FileNotFoundError):
+    """No preset matched the requested lookup name or path."""
+
+
+@dataclass(frozen=True, slots=True)
+class Preset:
+    data: Mapping[str, Any]
+    path: Path
+
+    @property
+    def name(self) -> str:
+        return str(self.data["name"])
+
+    @property
+    def version(self) -> str:
+        return str(self.data["version"])
+
+    @property
+    def model(self) -> str:
+        return str(self.data["model"])
+
+    @property
+    def chunking(self) -> Mapping[str, Any]:
+        return self.data["chunking"]
+
+    @property
+    def questions(self) -> Mapping[str, Any]:
+        return self.data["questions"]
+
+    @property
+    def compatible_chunkers(self) -> tuple[str, ...]:
+        return tuple(self.data["compatible_chunkers"])
+
+    @property
+    def default_chunker(self) -> str:
+        return str(self.chunking["by"])
+
+    def effective_chunker(self, by: str | None = None) -> str:
+        return resolve_chunker(self, by)
+
+
+def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Validate and return one decoded v1 preset mapping."""
+    root = _mapping(data, "preset")
+    _reject_unknown(root, _REQUIRED_FIELDS | _OPTIONAL_FIELDS, "preset")
+    _require_fields(root, _REQUIRED_FIELDS, "preset")
+
+    if root["schema"] != SCHEMA:
+        raise PresetValidationError(f"schema must be {SCHEMA!r}")
+    _string(root["name"], "name")
+    _string(root["version"], "version")
+    model = _string(root["model"], "model")
+    if not _PINNED_MODEL.fullmatch(model):
+        raise PresetValidationError("model must be a pinned jev semver version")
+    if "description" in root:
+        _string(root["description"], "description")
+
+    chunking = _mapping(root["chunking"], "chunking")
+    _reject_unknown(
+        chunking,
+        {"by", "context_paragraphs", "context_lines", "max_chunks", "limits"},
+        "chunking",
+    )
+    _require_fields(chunking, {"by", "limits"}, "chunking")
+    by = _string(chunking["by"], "chunking.by")
+    if by not in CHUNKERS:
+        raise PresetValidationError(f"chunking.by must be one of {sorted(CHUNKERS)}")
+    for field_name in ("context_paragraphs", "context_lines", "max_chunks"):
+        if field_name in chunking:
+            _nonnegative_integer(chunking[field_name], f"chunking.{field_name}")
+    limits = _mapping(chunking["limits"], "chunking.limits")
+    _reject_unknown(
+        limits,
+        {"focus_bytes", "context_field_bytes", "state_bytes"},
+        "chunking.limits",
+    )
+    _require_fields(
+        limits,
+        {"focus_bytes", "context_field_bytes", "state_bytes"},
+        "chunking.limits",
+    )
+    for field_name, value in limits.items():
+        _positive_integer(value, f"chunking.limits.{field_name}")
+
+    compatible = _string_list(root["compatible_chunkers"], "compatible_chunkers")
+    if not compatible:
+        raise PresetValidationError("compatible_chunkers must not be empty")
+    if len(set(compatible)) != len(compatible):
+        raise PresetValidationError("compatible_chunkers must not contain duplicates")
+    unknown_chunkers = set(compatible) - CHUNKERS
+    if unknown_chunkers:
+        raise PresetValidationError(
+            f"compatible_chunkers contains unknown values: {sorted(unknown_chunkers)}"
+        )
+    if by not in compatible:
+        raise PresetValidationError("chunking.by must be in compatible_chunkers")
+
+    questions = _mapping(root["questions"], "questions")
+    if not questions:
+        raise PresetValidationError("questions must not be empty")
+    for question_id, question in questions.items():
+        if not isinstance(question_id, str) or not _QUESTION_ID.fullmatch(question_id):
+            raise PresetValidationError(
+                f"question ID {question_id!r} must be lowercase and stable"
+            )
+        _validate_question(question, question_id)
+
+    thresholds = _mapping(root["thresholds"], "thresholds")
+    for question_id, threshold in thresholds.items():
+        if question_id not in questions:
+            raise PresetValidationError(
+                f"threshold references unknown question {question_id!r}"
+            )
+        _validate_threshold(threshold, question_id, questions[question_id])
+
+    output = _mapping(root["output"], "output")
+    _reject_unknown(output, {"default_format", "pretty_template", "fields"}, "output")
+    _require_fields(output, {"default_format", "pretty_template", "fields"}, "output")
+    if output["default_format"] not in {"jsonl", "pretty"}:
+        raise PresetValidationError("output.default_format must be jsonl or pretty")
+    _string(output["pretty_template"], "output.pretty_template")
+    output_fields = _string_list(output["fields"], "output.fields")
+    unknown_output_fields = set(output_fields) - _OUTPUT_FIELDS
+    if unknown_output_fields:
+        raise PresetValidationError(
+            f"output.fields contains unknown values: {sorted(unknown_output_fields)}"
+        )
+
+    return root
+
+
+def load_preset(path: str | os.PathLike[str]) -> Preset:
+    """Read and validate a preset at an exact path."""
+    resolved_path = Path(path).expanduser()
+    try:
+        data = yaml.load(
+            resolved_path.read_text(encoding="utf-8"), Loader=_UniqueKeyLoader
+        )
+    except OSError as exc:
+        raise PresetNotFoundError(str(resolved_path)) from exc
+    except yaml.YAMLError as exc:
+        raise PresetValidationError(f"invalid YAML in {resolved_path}: {exc}") from exc
+    try:
+        validated = validate_preset(data)
+    except PresetValidationError as exc:
+        raise PresetValidationError(f"{resolved_path}: {exc}") from exc
+    return Preset(validated, resolved_path.resolve())
+
+
+def resolve_preset(
+    name: str | os.PathLike[str],
+    *,
+    explicit_path: str | os.PathLike[str] | None = None,
+    cwd: str | os.PathLike[str] | None = None,
+    package_dir: str | os.PathLike[str] | None = None,
+    user_dir: str | os.PathLike[str] | None = None,
+) -> Preset:
+    """Resolve a preset in the specified v1 lookup order."""
+    if explicit_path is not None:
+        return load_preset(explicit_path)
+    identifier = os.fspath(name)
+    if isinstance(identifier, bytes) or not _PRESET_NAME.fullmatch(identifier):
+        raise PresetNotFoundError(
+            f"preset name must be a safe preset name, not a path: {name!s}"
+        )
+
+    search_cwd = Path(cwd) if cwd is not None else Path.cwd()
+    builtins = (
+        Path(package_dir)
+        if package_dir is not None
+        else Path(__file__).with_name("presets")
+    )
+    configured_user_dir = os.environ.get("JMAP_PRESETS")
+    if user_dir is not None:
+        user = Path(user_dir)
+    elif configured_user_dir:
+        user = Path(configured_user_dir).expanduser()
+    else:
+        user = Path("~/.config/jmap/presets").expanduser()
+
+    locations = (search_cwd, builtins, user)
+    for directory in locations:
+        for candidate in _candidate_paths(directory, identifier):
+            if candidate.is_file():
+                return load_preset(candidate)
+    searched = ", ".join(str(directory) for directory in locations)
+    raise PresetNotFoundError(f"preset {name!s} was not found in: {searched}")
+
+
+def lookup_preset(name: str | os.PathLike[str], **kwargs: Any) -> Preset:
+    """Compatibility alias for resolve_preset."""
+    return resolve_preset(name, **kwargs)
+
+
+def resolve_chunker(preset: Preset | Mapping[str, Any], by: str | None = None) -> str:
+    """Return the effective chunker or raise a command usage error."""
+    data = preset.data if isinstance(preset, Preset) else validate_preset(preset)
+    allowed = tuple(data["compatible_chunkers"])
+    effective = by if by is not None else str(data["chunking"]["by"])
+    if effective not in allowed:
+        allowed_text = ", ".join(allowed)
+        raise PresetUsageError(
+            f"chunker {effective!r} is incompatible with preset {data['name']!r}; "
+            f"allowed set: [{allowed_text}]"
+        )
+    return effective
+
+
+def check_chunker_compatibility(
+    preset: Preset | Mapping[str, Any], by: str | None = None
+) -> str:
+    """Compatibility alias for resolve_chunker."""
+    return resolve_chunker(preset, by)
+
+
+def _candidate_paths(directory: Path, identifier: str) -> tuple[Path, ...]:
+    path = directory / identifier
+    if path.suffix in {".yml", ".yaml"}:
+        return (path,)
+    return (path, directory / f"{identifier}.yml", directory / f"{identifier}.yaml")
+
+
+def _mapping(value: Any, field_name: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise PresetValidationError(f"{field_name} must be an object")
+    return value
+
+
+def _require_fields(
+    value: Mapping[str, Any], required: set[str] | frozenset[str], field_name: str
+) -> None:
+    missing = required - set(value)
+    if missing:
+        raise PresetValidationError(
+            f"{field_name} is missing required fields: {sorted(missing)}"
+        )
+
+
+def _reject_unknown(
+    value: Mapping[str, Any], allowed: set[str] | frozenset[str], field_name: str
+) -> None:
+    unknown = set(value) - allowed
+    if unknown:
+        raise PresetValidationError(
+            f"{field_name} contains unknown fields: {sorted(unknown)}"
+        )
+
+
+def _string(value: Any, field_name: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise PresetValidationError(f"{field_name} must be a non-empty string")
+    return value
+
+
+def _string_list(value: Any, field_name: str) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        raise PresetValidationError(f"{field_name} must be a list")
+    result = [_string(item, f"{field_name}[]") for item in value]
+    return result
+
+
+def _positive_integer(value: Any, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise PresetValidationError(f"{field_name} must be a positive integer")
+
+
+def _nonnegative_integer(value: Any, field_name: str) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise PresetValidationError(f"{field_name} must be a non-negative integer")
+
+
+def _validate_question(value: Any, question_id: str) -> None:
+    question = _mapping(value, f"questions.{question_id}")
+    _reject_unknown(
+        question,
+        {"type", "instructions", "criteria"},
+        f"questions.{question_id}",
+    )
+    _require_fields(
+        question,
+        {"type", "instructions", "criteria"},
+        f"questions.{question_id}",
+    )
+    question_type = _string(question["type"], f"questions.{question_id}.type")
+    if question_type not in QUESTION_TYPES:
+        raise PresetValidationError(
+            f"questions.{question_id}.type must be one of {sorted(QUESTION_TYPES)}"
+        )
+    instructions = _mapping(
+        question["instructions"], f"questions.{question_id}.instructions"
+    )
+    _reject_unknown(
+        instructions,
+        {"question", "state_fields", "focus"},
+        f"questions.{question_id}.instructions",
+    )
+    _require_fields(
+        instructions,
+        {"question", "state_fields", "focus"},
+        f"questions.{question_id}.instructions",
+    )
+    _string(instructions["question"], f"questions.{question_id}.instructions.question")
+    state_fields = _string_list(
+        instructions["state_fields"],
+        f"questions.{question_id}.instructions.state_fields",
+    )
+    if "focus" not in state_fields:
+        raise PresetValidationError(
+            f"questions.{question_id}.instructions.state_fields must name focus"
+        )
+    if any(
+        field != "focus" and not field.startswith("context.")
+        for field in state_fields
+    ):
+        raise PresetValidationError(
+            f"questions.{question_id}.instructions.state_fields must use "
+            "literal context fields"
+        )
+    _string(instructions["focus"], f"questions.{question_id}.instructions.focus")
+    _validate_criteria(question["criteria"], question_type, question_id)
+
+
+def _validate_criteria(value: Any, question_type: str, question_id: str) -> None:
+    field_name = f"questions.{question_id}.criteria"
+    if question_type == "score":
+        if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+            raise PresetValidationError(f"{field_name} must be a list for score")
+        if len(value) != 4:
+            raise PresetValidationError(f"{field_name} must have four score levels")
+        for index, criterion in enumerate(value):
+            _validate_criterion(criterion, f"{field_name}[{index}]")
+        return
+    criteria = _mapping(value, field_name)
+    if question_type == "noul":
+        criterion_keys = set(criteria)
+        if criterion_keys == {True, False}:
+            criteria = {
+                str(key).lower(): criterion for key, criterion in criteria.items()
+            }
+        if set(criteria) != {"true", "false"}:
+            raise PresetValidationError(f"{field_name} must contain true and false")
+    if not criteria:
+        raise PresetValidationError(f"{field_name} must not be empty")
+    for polarity, criterion in criteria.items():
+        _validate_criterion(criterion, f"{field_name}.{polarity}")
+
+
+def _validate_criterion(value: Any, field_name: str) -> None:
+    criterion = _mapping(value, field_name)
+    _reject_unknown(criterion, {"what", "not_for", "examples"}, field_name)
+    _require_fields(criterion, {"what", "not_for", "examples"}, field_name)
+    _string(criterion["what"], f"{field_name}.what")
+    _string(criterion["not_for"], f"{field_name}.not_for")
+    examples = _string_list(criterion["examples"], f"{field_name}.examples")
+    if not examples:
+        raise PresetValidationError(f"{field_name}.examples must not be empty")
+
+
+def _validate_threshold(value: Any, question_id: str, question: Any) -> None:
+    field_name = f"thresholds.{question_id}"
+    threshold = _mapping(value, field_name)
+    _reject_unknown(threshold, {"type", "keep_at_least", "fail_at_least"}, field_name)
+    _require_fields(threshold, {"type"}, field_name)
+    question_type = _mapping(question, f"questions.{question_id}")["type"]
+    if threshold["type"] != question_type:
+        raise PresetValidationError(f"{field_name}.type must match question type")
+    threshold_fields = set(threshold) - {"type"}
+    if threshold_fields != {"keep_at_least"} and threshold_fields != {"fail_at_least"}:
+        raise PresetValidationError(
+            f"{field_name} must have exactly one of keep_at_least or fail_at_least"
+        )
+    field = next(iter(threshold_fields))
+    amount = threshold[field]
+    if question_type == "choice":
+        raise PresetValidationError(
+            "choice thresholds use equality, not numeric values"
+        )
+    if question_type == "score":
+        if field != "fail_at_least":
+            raise PresetValidationError("score thresholds require fail_at_least")
+        if (
+            isinstance(amount, bool)
+            or not isinstance(amount, int)
+            or amount not in range(4)
+        ):
+            raise PresetValidationError(
+                f"{field_name}.fail_at_least must be an integer from 0 to 3"
+            )
+        return
+    if (
+        isinstance(amount, bool)
+        or not isinstance(amount, (int, float))
+        or not 0 <= amount <= 1
+    ):
+        raise PresetValidationError(
+            f"{field_name}.{field} must be a number from 0 to 1"
+        )

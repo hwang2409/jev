@@ -14,7 +14,11 @@ from .answers import JudgeResponse, answer_to_dict, parse_judge_response
 
 CACHE_SCHEMA = "jmap-answer/v1"
 PROTOCOL_VERSION = CACHE_SCHEMA
-_CHUNKING_FIELDS = {"by", "context_paragraphs", "limits"}
+_CHUNKING_SHAPES = (
+    frozenset({"by", "max_chunks", "limits"}),
+    frozenset({"by", "context_paragraphs", "max_chunks", "limits"}),
+    frozenset({"by", "context_lines", "max_chunks", "limits"}),
+)
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -48,13 +52,10 @@ def build_cache_preimage(
     if not isinstance(resolved_chunking, dict):
         raise TypeError("chunking must be an object")
     if limits is not None:
-        if set(resolved_chunking) not in (
-            _CHUNKING_FIELDS - {"limits"},
-            _CHUNKING_FIELDS,
-        ):
+        if frozenset((*resolved_chunking, "limits")) not in _CHUNKING_SHAPES:
             raise ValueError("chunking must contain exactly the resolved fields")
         resolved_chunking["limits"] = _limits_dict(limits)
-    elif set(resolved_chunking) != _CHUNKING_FIELDS:
+    elif frozenset(resolved_chunking) not in _CHUNKING_SHAPES:
         raise ValueError("chunking must contain exactly the resolved fields")
     resolved_chunking["limits"] = _limits_dict(resolved_chunking["limits"])
 

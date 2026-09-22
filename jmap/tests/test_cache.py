@@ -14,6 +14,7 @@ from jmap.cache import (
     cache_key,
     canonical_json_bytes,
 )
+from jmap.presets import resolve_preset
 from jmap.runner import FakeJudge, Runner, State, StateLimits
 
 QUESTIONS = {
@@ -35,7 +36,7 @@ def _preimage() -> dict[str, object]:
         model="jev-1.13.0",
         preset="jgrep",
         preset_version="1",
-        chunking={"by": "para", "context_paragraphs": 0},
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
         questions=QUESTIONS,
         state=State(
             "notes/intro.md#p3",
@@ -51,7 +52,8 @@ def test_cache_key_has_the_exact_canonical_preimage() -> None:
     expected = (
         b'{"cache_schema":"jmap-answer/v1","chunking":{"by":"para",'
         b'"context_paragraphs":0,"limits":{"context_field_bytes":4096,'
-        b'"focus_bytes":16384,"state_bytes":32768}},"model":"jev-1.13.0",'
+        b'"focus_bytes":16384,"state_bytes":32768},"max_chunks":512},'
+        b'"model":"jev-1.13.0",'
         b'"preset":"jgrep","preset_version":"1","question_battery":'
         b'{"matches_query":{"criteria":{"true":{"what":"direct evidence"}},'
         b'"instructions":"judge the focus","type":"noul"},"risk":{"criteria":'
@@ -71,6 +73,7 @@ def test_cache_key_ignores_object_insertion_order() -> None:
     reordered["chunking"] = {
         "limits": reordered["chunking"]["limits"],
         "context_paragraphs": 0,
+        "max_chunks": 512,
         "by": "para",
     }
     assert cache_key(preimage) == cache_key(reordered)
@@ -85,6 +88,7 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
         ("preset_version", "2"),
         ("chunking.by", "line"),
         ("chunking.context_paragraphs", 1),
+        ("chunking.max_chunks", 1),
         ("chunking.limits.focus_bytes", 1),
         ("chunking.limits.context_field_bytes", 1),
         ("chunking.limits.state_bytes", 1),
@@ -128,11 +132,44 @@ def test_chunking_requires_exact_resolved_fields() -> None:
             model="jev-1.13.0",
             preset="jgrep",
             preset_version="1",
-            chunking={"by": "para", "context_paragraphs": 0, "future": True},
+            chunking={
+                "by": "para",
+                "context_paragraphs": 0,
+                "max_chunks": 512,
+                "future": True,
+            },
             questions=QUESTIONS,
             state=State("notes/intro.md#p3", "focus"),
             limits=StateLimits(),
         )
+
+
+@pytest.mark.parametrize("name", ("jgrep", "jfilter", "diff-risk-heat"))
+def test_real_presets_have_cacheable_chunking_and_stable_key_inputs(name: str) -> None:
+    preset = resolve_preset(name)
+    state = State("stdin#L1", "focus", {"source": "stdin"})
+    baseline = build_cache_preimage(
+        model=preset.model,
+        preset=preset.name,
+        preset_version=preset.version,
+        chunking=preset.chunking,
+        questions=preset.questions,
+        state=state,
+    )
+
+    changed_version = copy.deepcopy(baseline)
+    changed_version["preset_version"] = "2"
+    changed_criterion = copy.deepcopy(baseline)
+    question_id = next(iter(changed_criterion["question_battery"]))
+    question = changed_criterion["question_battery"][question_id]
+    if isinstance(question["criteria"], list):
+        question["criteria"][0]["what"] += " changed"
+    else:
+        first_criterion = next(iter(question["criteria"].values()))
+        first_criterion["what"] += " changed"
+
+    assert cache_key(changed_version) != cache_key(baseline)
+    assert cache_key(changed_criterion) != cache_key(baseline)
 
 
 def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
@@ -221,10 +258,9 @@ def test_failed_response_is_never_published(tmp_path) -> None:
     runner.run(
         [State("stdin#L1", "focus")],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
-        chunking={"by": "para", "context_paragraphs": 0},
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
     )
 
     assert list(store.entries()) == []
@@ -238,10 +274,9 @@ def test_partial_response_is_never_published(tmp_path) -> None:
     runner.run(
         [State("stdin#L1", "focus")],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
-        chunking={"by": "para", "context_paragraphs": 0},
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
     )
 
     assert list(store.entries()) == []
@@ -254,10 +289,9 @@ def test_incomplete_runtime_chunking_cannot_reach_cache(tmp_path) -> None:
         Runner(FakeJudge()).run(
             [State("stdin#L1", "focus")],
             QUESTIONS,
-            preset="jgrep",
             chunker="para",
             cache_store=store,
-            chunking={"by": "para"},
+            chunking={"by": "para", "context_paragraphs": 0},
         )
 
     assert list(store.entries()) == []
@@ -273,10 +307,9 @@ def test_implicitly_partial_response_is_never_published(tmp_path) -> None:
         runner.run(
             [State("stdin#L1", "focus")],
             QUESTIONS,
-            preset="jgrep",
             chunker="para",
             cache_store=store,
-            chunking={"by": "para", "context_paragraphs": 0},
+            chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
         )
 
     assert list(store.entries()) == []
@@ -300,18 +333,16 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     first = Runner(judge).run(
         [state],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
-        chunking={"by": "para", "context_paragraphs": 0},
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
     )
     second = Runner(lambda *_: (_ for _ in ()).throw(AssertionError("cache miss"))).run(
         [state],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
-        chunking={"by": "para", "context_paragraphs": 0},
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
     )
 
     assert calls == 1
