@@ -537,6 +537,7 @@ chunking:
     focus_bytes: 16384
     context_field_bytes: 4096
     state_bytes: 32768
+compatible_chunkers: [hunk]
 questions: {}
 thresholds: {}
 output:
@@ -546,9 +547,15 @@ output:
 ```
 
 Required fields are `schema`, `name`, `version`, `model`, `chunking`,
-`questions`, `thresholds`, and `output`. `model` is a pinned resolved version,
-not an alias. A preset version changes whenever its questions, criteria,
-chunking, thresholds, or output meaning changes.
+`compatible_chunkers`, `questions`, `thresholds`, and `output`. `model` is a
+pinned resolved version, not an alias. A preset version changes whenever its
+questions, criteria, chunking, thresholds, or output meaning changes.
+
+`compatible_chunkers` is a required list whose values come from the `--by`
+vocabulary: `line`, `para`, `hunk`, `file`, and `record`. If `--by` is
+provided with a chunker not in this list, the invocation is a usage error with
+exit code `64`; the error message names the allowed set. If `--by` is omitted,
+the effective chunker is the preset's `chunking.by` value.
 
 Thresholds are namespaced by question ID and primitive type. A threshold tuned
 for a Noul cannot be applied to a Score. Each v1 preset below ships typed
@@ -609,6 +616,7 @@ chunking:
     focus_bytes: 16384
     context_field_bytes: 4096
     state_bytes: 32768
+compatible_chunkers: [line, para, file]
 questions:
   matches_query:
     type: noul
@@ -676,6 +684,7 @@ chunking:
     focus_bytes: 16384
     context_field_bytes: 4096
     state_bytes: 32768
+compatible_chunkers: [record]
 questions:
   satisfies_predicate:
     type: noul
@@ -744,6 +753,7 @@ chunking:
     focus_bytes: 16384
     context_field_bytes: 4096
     state_bytes: 32768
+compatible_chunkers: [hunk]
 questions:
   change_scope:
     type: score
