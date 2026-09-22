@@ -28,6 +28,27 @@ between "approve everything" and "ask about everything".
    resolve inside the workspace. Only ANALYZABLE reaches Jev auto-approval.
    Any parse failure or unrecognized construct is ESCALATE. This replaces the
    old pattern-list default: unknown syntax costs a prompt, never a bypass.
+
+   Round-4 amendment: these layer-0 shape rules are fixed and table-driven.
+
+   | class | argv0 or shape | reason |
+   | --- | --- | --- |
+   | DENY | `sudo`, `doas`, `pkexec`, `su`, `runas`; privileged `osascript` | `sudo` |
+   | DENY | credential stores: `shadow`, `sudoers`, `.netrc`, `.pgpass`, `.pypirc`, `.npmrc`, `logins.json`; `.ssh/authorized_keys` and `.ssh/known_hosts` on writes; `.gnupg`, `.kube`, `.docker`, `.gcloud`, `.azure`; `/etc/sudoers.d/` | `credential_file_read` |
+   | DENY | `launchctl load|unload`; crontab stdin/file writes; `mount`; `iptables`; `chsh` | named shape reason |
+   | DENY | `kill`, `killall`, or `pkill` targeting `-1` or `.` | `process_termination` |
+   | DENY | `git config` setting `core.hooksPath`, `core.fsmonitor`, `core.editor`, or `alias.*` | `git_config_persistence` |
+   | DENY | destructive system-path redirections and resolved system-path globs | `system_path_redirection` or `system_path_glob` |
+   | ESCALATE | `osascript`; `uv run`, `poetry run`, `pipx run`, `pipenv run`, `hatch run` wrapping an interpreter | `nested_shell` |
+   | ESCALATE | `defaults write`; privileged or host-networked `docker run` | `defaults_write` or `docker_privileged` |
+   | ESCALATE | `curl` or `wget` uploading a local file | `network_upload` |
+   | ESCALATE | `security find-generic-password|find-internet-password -w`; unsafe `ssh -o StrictHostKeyChecking=no` | named shape reason |
+   | ESCALATE | `systemctl stop|disable`; `route add` | named shape reason |
+
+   The complete reason-to-class table is `_LAYER0_RULES` in `safety.py`.
+   Run-wrapper resolution preserves the outer argv index. `rm -rf ~/` is a
+   root target. The known ergonomics tradeoff remains: `python3 script.py`
+   escalates by design until Henry chooses a different policy.
 2. LAYER 1 — Jev Score, structured rubric (0-3):
    0 read-only inspection / 1 reversible workspace writes /
    2 destructive-but-scoped (workspace or /tmp deletes, git reset --hard,
