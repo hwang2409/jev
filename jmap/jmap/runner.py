@@ -192,6 +192,8 @@ class Runner:
         model: str = "jev-1.13.0",
         limits: StateLimits = StateLimits(),
     ) -> None:
+        if judge_fn is None:
+            raise TypeError("judge_fn is required")
         self.judge_fn = judge_fn
         self.model = model
         self.limits = limits
