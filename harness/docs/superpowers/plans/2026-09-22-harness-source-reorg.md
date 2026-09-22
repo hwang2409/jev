@@ -336,10 +336,76 @@ executable zero-result check:
 
 ```sh
 set +e
-rg -n  -e 'zeta\.(?:tools\.browser_adapter|tools\.browser_catalog)(?:[.[:space:]]|$)' -e 'from[[:space:]]+zeta[[:space:]]+import[^#]*(?:tools\.browser_adapter|tools\.browser_catalog)\b' -e 'from[[:space:]]+[.]+(?:browser_adapter|browser_catalog)\b' harness/src harness/tests > /tmp/reorg-stage1-old-paths.txt
+python - <<'PY' > /tmp/reorg-stage1-old-paths.txt
+import ast
+import re
+from pathlib import Path
+
+ROOT = Path('.')
+SRC = ROOT / 'harness/src/zeta'
+OLD_NAMES = ['zeta.tools.browser_adapter', 'zeta.tools.browser_catalog']
+NEW_NAMES = ['zeta.tools.browser.adapter', 'zeta.tools.browser.catalog']
+EXCLUDED = []
+
+def dotted_prefix(name, root):
+    return name == root or name.startswith(root + '.')
+
+def old_path_matches(name):
+    if any(dotted_prefix(name, new) for new in NEW_NAMES):
+        return False
+    return any(dotted_prefix(name, old) for old in OLD_NAMES)
+
+def module_for(path):
+    rel = path.relative_to(SRC).with_suffix('')
+    parts = list(rel.parts)
+    if parts[-1] == '__init__':
+        parts.pop()
+    return '.'.join(parts)
+
+def current_for(path):
+    if path.is_relative_to(SRC):
+        current = module_for(path)
+        return current + '.__init__' if path.name == '__init__.py' else current
+    return '.'.join(path.relative_to(ROOT / 'harness').with_suffix('').parts)
+
+def resolve(current, level, module):
+    if not level:
+        return module or ''
+    package = current.rsplit('.', 1)[0] if not current.endswith('.__init__') else current.removesuffix('.__init__')
+    base = package.split('.') if package else []
+    base = base[:len(base) - level + 1]
+    if module:
+        base += module.split('.')
+    return '.'.join(base)
+
+hits = set()
+for path in sorted(list((ROOT / 'harness/src/zeta').rglob('*.py')) + list((ROOT / 'harness/tests').glob('*.py'))):
+    if str(path) in EXCLUDED:
+        continue
+    text = path.read_text()
+    tree = ast.parse(text, filename=str(path))
+    current = current_for(path)
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            target = resolve(current, node.level, node.module)
+            names = ([target] if target else []) + [f'{target}.{alias.name}' if target else alias.name for alias in node.names]
+        for name in names:
+            if name and old_path_matches(name):
+                hits.add(f'{path}:{node.lineno}:{name}')
+    for line_no, line in enumerate(text.splitlines(), 1):
+        for match in re.finditer(r'\bzeta(?:\.[A-Za-z_]\w*)+', line):
+            name = match.group()
+            if old_path_matches(name):
+                hits.add(f'{path}:{line_no}:{name}')
+
+print('\n'.join(sorted(hits)))
+PY
 status=$?
-if [ "$status" -eq 0 ]; then cat /tmp/reorg-stage1-old-paths.txt; exit 1; fi
-if [ "$status" -ne 1 ]; then exit "$status"; fi
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ -s /tmp/reorg-stage1-old-paths.txt ]; then cat /tmp/reorg-stage1-old-paths.txt; exit 1; fi
 set -e
 ```
 
@@ -592,10 +658,76 @@ executable zero-result check:
 
 ```sh
 set +e
-rg -n  -e 'zeta\.(?:tools\._process|tools\._sandbox|tools\._user_discovery|tools\.agent_presets|tools\.plan_mode|tools\.loop_setup)(?:[.[:space:]]|$)' -e 'from[[:space:]]+zeta[[:space:]]+import[^#]*(?:tools\._process|tools\._sandbox|tools\._user_discovery|tools\.agent_presets|tools\.plan_mode|tools\.loop_setup)\b' -e 'from[[:space:]]+[.]+(?:_process|_sandbox|_user_discovery|agent_presets|plan_mode|loop_setup)\b' harness/src harness/tests > /tmp/reorg-stage2-old-paths.txt
+python - <<'PY' > /tmp/reorg-stage2-old-paths.txt
+import ast
+import re
+from pathlib import Path
+
+ROOT = Path('.')
+SRC = ROOT / 'harness/src/zeta'
+OLD_NAMES = ['zeta.tools._process', 'zeta.tools._sandbox', 'zeta.tools._user_discovery', 'zeta.tools.agent_presets', 'zeta.tools.loop_setup', 'zeta.tools.plan_mode']
+NEW_NAMES = ['zeta.agent.plan_mode', 'zeta.agent.presets', 'zeta.runtime.tool_setup', 'zeta.tools._shared.process', 'zeta.tools._shared.sandbox', 'zeta.tools._shared.user_discovery']
+EXCLUDED = []
+
+def dotted_prefix(name, root):
+    return name == root or name.startswith(root + '.')
+
+def old_path_matches(name):
+    if any(dotted_prefix(name, new) for new in NEW_NAMES):
+        return False
+    return any(dotted_prefix(name, old) for old in OLD_NAMES)
+
+def module_for(path):
+    rel = path.relative_to(SRC).with_suffix('')
+    parts = list(rel.parts)
+    if parts[-1] == '__init__':
+        parts.pop()
+    return '.'.join(parts)
+
+def current_for(path):
+    if path.is_relative_to(SRC):
+        current = module_for(path)
+        return current + '.__init__' if path.name == '__init__.py' else current
+    return '.'.join(path.relative_to(ROOT / 'harness').with_suffix('').parts)
+
+def resolve(current, level, module):
+    if not level:
+        return module or ''
+    package = current.rsplit('.', 1)[0] if not current.endswith('.__init__') else current.removesuffix('.__init__')
+    base = package.split('.') if package else []
+    base = base[:len(base) - level + 1]
+    if module:
+        base += module.split('.')
+    return '.'.join(base)
+
+hits = set()
+for path in sorted(list((ROOT / 'harness/src/zeta').rglob('*.py')) + list((ROOT / 'harness/tests').glob('*.py'))):
+    if str(path) in EXCLUDED:
+        continue
+    text = path.read_text()
+    tree = ast.parse(text, filename=str(path))
+    current = current_for(path)
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            target = resolve(current, node.level, node.module)
+            names = ([target] if target else []) + [f'{target}.{alias.name}' if target else alias.name for alias in node.names]
+        for name in names:
+            if name and old_path_matches(name):
+                hits.add(f'{path}:{node.lineno}:{name}')
+    for line_no, line in enumerate(text.splitlines(), 1):
+        for match in re.finditer(r'\bzeta(?:\.[A-Za-z_]\w*)+', line):
+            name = match.group()
+            if old_path_matches(name):
+                hits.add(f'{path}:{line_no}:{name}')
+
+print('\n'.join(sorted(hits)))
+PY
 status=$?
-if [ "$status" -eq 0 ]; then cat /tmp/reorg-stage2-old-paths.txt; exit 1; fi
-if [ "$status" -ne 1 ]; then exit "$status"; fi
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ -s /tmp/reorg-stage2-old-paths.txt ]; then cat /tmp/reorg-stage2-old-paths.txt; exit 1; fi
 set -e
 ```
 
@@ -2215,10 +2347,76 @@ executable zero-result check:
 
 ```sh
 set +e
-rg -n --glob '!src/zeta/loop.py' --glob '!src/zeta/settings.py' --glob '!src/zeta/types.py' -e 'zeta\.(?:execution|headless|loop|agent_background|agent_budget|agent_receipt|agent_runner|cli|session_cli|settings|images|model_catalog|submission|submission_pipeline|persistence|types)(?:[.[:space:]]|$)' -e 'from[[:space:]]+zeta[[:space:]]+import[^#]*(?:execution|headless|loop|agent_background|agent_budget|agent_receipt|agent_runner|cli|session_cli|settings|images|model_catalog|submission|submission_pipeline|persistence|types)\b' -e 'from[[:space:]]+[.]+(?:execution|headless|loop|agent_background|agent_budget|agent_receipt|agent_runner|cli|session_cli|settings|images|model_catalog|submission|submission_pipeline|persistence|types)\b' harness/src harness/tests > /tmp/reorg-stage4-old-paths.txt
+python - <<'PY' > /tmp/reorg-stage4-old-paths.txt
+import ast
+import re
+from pathlib import Path
+
+ROOT = Path('.')
+SRC = ROOT / 'harness/src/zeta'
+OLD_NAMES = ['zeta.agent_background', 'zeta.agent_budget', 'zeta.agent_receipt', 'zeta.agent_runner', 'zeta.cli', 'zeta.execution', 'zeta.headless', 'zeta.images', 'zeta.loop', 'zeta.model_catalog', 'zeta.persistence', 'zeta.session_cli', 'zeta.settings', 'zeta.submission', 'zeta.submission_pipeline', 'zeta.types']
+NEW_NAMES = ['zeta.agent.background', 'zeta.agent.budget', 'zeta.agent.receipt', 'zeta.agent.runner', 'zeta.cli.main', 'zeta.cli.session', 'zeta.config.settings', 'zeta.media.images', 'zeta.models.catalog', 'zeta.protocol.types', 'zeta.runtime.execution', 'zeta.runtime.headless', 'zeta.runtime.loop', 'zeta.submission.model', 'zeta.submission.pipeline', 'zeta.tui.persistence']
+EXCLUDED = ['harness/src/zeta/loop.py', 'harness/src/zeta/settings.py', 'harness/src/zeta/types.py']
+
+def dotted_prefix(name, root):
+    return name == root or name.startswith(root + '.')
+
+def old_path_matches(name):
+    if any(dotted_prefix(name, new) for new in NEW_NAMES):
+        return False
+    return any(dotted_prefix(name, old) for old in OLD_NAMES)
+
+def module_for(path):
+    rel = path.relative_to(SRC).with_suffix('')
+    parts = list(rel.parts)
+    if parts[-1] == '__init__':
+        parts.pop()
+    return '.'.join(parts)
+
+def current_for(path):
+    if path.is_relative_to(SRC):
+        current = module_for(path)
+        return current + '.__init__' if path.name == '__init__.py' else current
+    return '.'.join(path.relative_to(ROOT / 'harness').with_suffix('').parts)
+
+def resolve(current, level, module):
+    if not level:
+        return module or ''
+    package = current.rsplit('.', 1)[0] if not current.endswith('.__init__') else current.removesuffix('.__init__')
+    base = package.split('.') if package else []
+    base = base[:len(base) - level + 1]
+    if module:
+        base += module.split('.')
+    return '.'.join(base)
+
+hits = set()
+for path in sorted(list((ROOT / 'harness/src/zeta').rglob('*.py')) + list((ROOT / 'harness/tests').glob('*.py'))):
+    if str(path) in EXCLUDED:
+        continue
+    text = path.read_text()
+    tree = ast.parse(text, filename=str(path))
+    current = current_for(path)
+    for node in ast.walk(tree):
+        names = []
+        if isinstance(node, ast.Import):
+            names = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            target = resolve(current, node.level, node.module)
+            names = ([target] if target else []) + [f'{target}.{alias.name}' if target else alias.name for alias in node.names]
+        for name in names:
+            if name and old_path_matches(name):
+                hits.add(f'{path}:{node.lineno}:{name}')
+    for line_no, line in enumerate(text.splitlines(), 1):
+        for match in re.finditer(r'\bzeta(?:\.[A-Za-z_]\w*)+', line):
+            name = match.group()
+            if old_path_matches(name):
+                hits.add(f'{path}:{line_no}:{name}')
+
+print('\n'.join(sorted(hits)))
+PY
 status=$?
-if [ "$status" -eq 0 ]; then cat /tmp/reorg-stage4-old-paths.txt; exit 1; fi
-if [ "$status" -ne 1 ]; then exit "$status"; fi
+if [ "$status" -ne 0 ]; then exit "$status"; fi
+if [ -s /tmp/reorg-stage4-old-paths.txt ]; then cat /tmp/reorg-stage4-old-paths.txt; exit 1; fi
 set -e
 ```
 
@@ -2421,9 +2619,16 @@ def parse_imports(path: Path) -> list[ImportRecord]:
     return sorted(records, key=lambda r: (display(r.path), r.line, r.old))
 
 
+def dotted_prefix(name: str, root: str) -> bool:
+    return name == root or name.startswith(root + ".")
+
+
 def remap(name: str, moves: list[tuple[str, str]]) -> str:
+    new_names = {new for _, new in moves}
+    if any(dotted_prefix(name, new) for new in new_names):
+        return name
     for old, new in sorted(moves, key=lambda item: len(item[0]), reverse=True):
-        if name == old or name.startswith(old + "."):
+        if dotted_prefix(name, old):
             return new + name[len(old):]
     return name
 
@@ -2479,6 +2684,31 @@ def all_moves_through(stage: int) -> list[tuple[str, str]]:
 def state_moves(stage: int) -> tuple[list[tuple[str, str]], list[tuple[str, str]]]:
     before = all_moves_through(stage - 1)
     return before, before + MOVE_TABLE[stage]
+
+
+def old_path_matches(name: str, moves: list[tuple[str, str]]) -> bool:
+    old_names = {old for old, new in moves if old != new}
+    new_names = {new for _, new in moves}
+    if any(dotted_prefix(name, new) for new in new_names):
+        return False
+    return any(dotted_prefix(name, old) for old in old_names)
+
+
+def scan(names: list[str], moves: list[tuple[str, str]]) -> list[str]:
+    return sorted(name for name in names if old_path_matches(name, moves))
+
+
+def self_check() -> None:
+    moves = all_moves_through(max(MOVE_TABLE))
+    paths = {path for stage in MOVE_TABLE.values() for old, new in stage for path in (old, new)}
+    for path in sorted(paths):
+        remapped = remap(path, moves)
+        assert remap(remapped, moves) == remapped
+    assert remap("zeta.cli.main", moves) == "zeta.cli.main"
+    assert remap("zeta.submission.model", moves) == "zeta.submission.model"
+    correct_tree = {remap(path, moves) for path in paths}
+    correct_tree.update(f"{path}.child" for path in tuple(correct_tree))
+    assert scan(sorted(correct_tree), moves) == []
 
 
 PINNED_STAGE4_ORDER = [
@@ -2567,22 +2797,85 @@ def dotted_references(stage: int, before_moves: list[tuple[str, str]], after_mov
 
 
 def old_path_scan_command(stage: int) -> list[str]:
-    names = [old.removeprefix("zeta.") for old, new in MOVE_TABLE[stage] if old != new]
-    if not names:
+    moves = [(old, new) for old, new in MOVE_TABLE[stage] if old != new]
+    if not moves:
         return ["true"]
-    dotted = "|".join(re.escape(name) for name in names)
-    relative = "|".join(re.escape(name.rsplit(".", 1)[-1]) for name in names)
-    exclusions = " ".join(
-        f"--glob '!src/zeta/{name}.py'"
-        for name in ("loop", "settings", "types")
-        if stage == 4
-    )
+    old_names = sorted(old for old, _ in moves)
+    new_names = sorted({new for _, new in moves})
+    exclusions = sorted(str(HARNESS / f"src/zeta/{name}.py") for name in ("loop", "settings", "types")) if stage == 4 else []
+    output = f"/tmp/reorg-stage{stage}-old-paths.txt"
     return [
         "set +e",
-        f"rg -n {exclusions} -e 'zeta\\.(?:{dotted})(?:[.[:space:]]|$)' -e 'from[[:space:]]+zeta[[:space:]]+import[^#]*(?:{dotted})\\b' -e 'from[[:space:]]+[.]+(?:{relative})\\b' harness/src harness/tests > /tmp/reorg-stage{stage}-old-paths.txt",
+        f"python - <<'PY' > {output}",
+        "import ast",
+        "import re",
+        "from pathlib import Path",
+        "",
+        "ROOT = Path('.')",
+        "SRC = ROOT / 'harness/src/zeta'",
+        f"OLD_NAMES = {old_names!r}",
+        f"NEW_NAMES = {new_names!r}",
+        f"EXCLUDED = {exclusions!r}",
+        "",
+        "def dotted_prefix(name, root):",
+        "    return name == root or name.startswith(root + '.')",
+        "",
+        "def old_path_matches(name):",
+        "    if any(dotted_prefix(name, new) for new in NEW_NAMES):",
+        "        return False",
+        "    return any(dotted_prefix(name, old) for old in OLD_NAMES)",
+        "",
+        "def module_for(path):",
+        "    rel = path.relative_to(SRC).with_suffix('')",
+        "    parts = list(rel.parts)",
+        "    if parts[-1] == '__init__':",
+        "        parts.pop()",
+        "    return '.'.join(parts)",
+        "",
+        "def current_for(path):",
+        "    if path.is_relative_to(SRC):",
+        "        current = module_for(path)",
+        "        return current + '.__init__' if path.name == '__init__.py' else current",
+        "    return '.'.join(path.relative_to(ROOT / 'harness').with_suffix('').parts)",
+        "",
+        "def resolve(current, level, module):",
+        "    if not level:",
+        "        return module or ''",
+        "    package = current.rsplit('.', 1)[0] if not current.endswith('.__init__') else current.removesuffix('.__init__')",
+        "    base = package.split('.') if package else []",
+        "    base = base[:len(base) - level + 1]",
+        "    if module:",
+        "        base += module.split('.')",
+        "    return '.'.join(base)",
+        "",
+        "hits = set()",
+        "for path in sorted(list((ROOT / 'harness/src/zeta').rglob('*.py')) + list((ROOT / 'harness/tests').glob('*.py'))):",
+        "    if str(path) in EXCLUDED:",
+        "        continue",
+        "    text = path.read_text()",
+        "    tree = ast.parse(text, filename=str(path))",
+        "    current = current_for(path)",
+        "    for node in ast.walk(tree):",
+        "        names = []",
+        "        if isinstance(node, ast.Import):",
+        "            names = [alias.name for alias in node.names]",
+        "        elif isinstance(node, ast.ImportFrom):",
+        "            target = resolve(current, node.level, node.module)",
+        "            names = ([target] if target else []) + [f'{target}.{alias.name}' if target else alias.name for alias in node.names]",
+        "        for name in names:",
+        "            if name and old_path_matches(name):",
+        "                hits.add(f'{path}:{node.lineno}:{name}')",
+        "    for line_no, line in enumerate(text.splitlines(), 1):",
+        "        for match in re.finditer(r'\\bzeta(?:\\.[A-Za-z_]\\w*)+', line):",
+        "            name = match.group()",
+        "            if old_path_matches(name):",
+        "                hits.add(f'{path}:{line_no}:{name}')",
+        "",
+        "print('\\n'.join(sorted(hits)))",
+        "PY",
         "status=$?",
-        f"if [ \"$status\" -eq 0 ]; then cat /tmp/reorg-stage{stage}-old-paths.txt; exit 1; fi",
-        "if [ \"$status\" -ne 1 ]; then exit \"$status\"; fi",
+        "if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi",
+        f"if [ -s {output} ]; then cat {output}; exit 1; fi",
         "set -e",
     ]
 
@@ -2631,13 +2924,10 @@ def stage_output(stage: int, records: list[ImportRecord]) -> str:
     # Final scan includes AST imports, aliases, and dotted strings.
     scan = []
     scan_moves = MOVE_TABLE[stage] if stage != 3 else []
-    scan_names = {old for old, new in scan_moves if old != new}
-    if stage == 4:
-        scan_names = {old for old, _ in MOVE_TABLE[4]}
     for record in records:
         if record.path.name in {"loop.py", "settings.py", "types.py"} and record.path.parent == HARNESS / "src/zeta":
             continue
-        if any(record.target == old or record.target.startswith(old + ".") for old in scan_names):
+        if old_path_matches(record.target, scan_moves):
             scan.append((display(record.path), record.line, record.target))
     scan.extend((path, line, old) for path, line, old, _ in dotted_references(stage, [], []))
     out = [f"## stage {stage} generated output", "", "generated by `reorg_derive.py` — regenerate, do not hand-edit.", "", "### move order", ""]
@@ -2711,6 +3001,7 @@ def stage_output(stage: int, records: list[ImportRecord]) -> str:
 
 
 def main() -> None:
+    self_check()
     records = [record for path in source_files() for record in parse_imports(path)]
     print("# reorg_derive.py output")
     print("# deterministic; generated from MOVE_TABLE and SPLIT_TABLE")
