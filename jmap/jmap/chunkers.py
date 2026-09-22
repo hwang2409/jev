@@ -106,6 +106,30 @@ def _line_units(text: str) -> list[str]:
     return text.splitlines()
 
 
+def _jsonl_lines(value: str | bytes) -> Iterable[tuple[int, int, str]]:
+    offset = 0
+    if isinstance(value, bytes):
+        lines = value.splitlines(keepends=True)
+        for line_number, raw_line in enumerate(lines, start=1):
+            yield line_number, offset, decode_stdin(raw_line)
+            offset += len(raw_line)
+        return
+
+    for line_number, line in enumerate(value.splitlines(keepends=True), start=1):
+        yield line_number, offset, line
+        offset += len(line.encode("utf-8"))
+
+
+def _input_error(
+    rejections: list[StateRejection] | None,
+    message: str,
+    source_ref: str,
+) -> None:
+    if rejections is None:
+        raise ValueError(message)
+    rejections.append(StateRejection(None, "input_error", message, source_ref))
+
+
 def chunk_line(
     text: str | bytes,
     *,
@@ -224,19 +248,21 @@ def chunk_para(
     return states
 
 
-_HUNK_RE = re.compile(r"^@@\s+(.+?)\s+@@(?:\s.*)?$")
+_HUNK_RE = re.compile(
+    r"^@@\s+-(\d+)(?:,(\d+))?\s+\+(\d+)(?:,(\d+))?\s+@@(?:\s.*)?$"
+)
 
 
-def _normalise_path(value: str) -> str:
+def _normalise_path(value: str, *, strip_git_prefix: bool = False) -> str:
     path = value.strip()
-    if path.startswith(("a/", "b/")):
+    if strip_git_prefix and path.startswith(("a/", "b/")):
         path = path[2:]
     return PurePosixPath(path).as_posix()
 
 
 def _diff_path(line: str) -> str:
     path = line.split("\t", 1)[0].split(" ", 1)[0]
-    return _normalise_path(path)
+    return _normalise_path(path, strip_git_prefix=True)
 
 
 def chunk_hunk(
@@ -252,31 +278,35 @@ def chunk_hunk(
     current_body: list[str] = []
     hunks: list[tuple[str, str, list[str]]] = []
     pending_old_path: str | None = None
+    old_remaining = 0
+    new_remaining = 0
     for line in lines:
+        if current_header is not None:
+            if old_remaining or new_remaining:
+                current_body.append(line)
+                if line != r"\ No newline at end of file":
+                    if line.startswith((" ", "-")):
+                        old_remaining -= 1
+                    if line.startswith((" ", "+")):
+                        new_remaining -= 1
+                continue
+            hunks.append((file_path, current_header, current_body))
+            current_header = None
+            current_body = []
         if line.startswith("diff --git "):
-            if current_header is not None:
-                hunks.append((file_path, current_header, current_body))
-                current_header = None
-                current_body = []
             pending_old_path = None
         elif line.startswith("--- "):
             pending_old_path = _diff_path(line[4:])
         elif line.startswith("+++ "):
-            if current_header is not None:
-                hunks.append((file_path, current_header, current_body))
-                current_header = None
-                current_body = []
             new_path = _diff_path(line[4:])
             file_path = pending_old_path if new_path == "/dev/null" else new_path
             pending_old_path = None
         match = _HUNK_RE.match(line)
         if match:
-            if current_header is not None:
-                hunks.append((file_path, current_header, current_body))
             current_header = line
             current_body = []
-        elif current_header is not None:
-            current_body.append(line)
+            old_remaining = int(match.group(2) or "1")
+            new_remaining = int(match.group(4) or "1")
     if current_header is not None:
         hunks.append((file_path, current_header, current_body))
 
@@ -326,6 +356,7 @@ def chunk_file(
     *,
     limits: StateLimits = StateLimits(),
     _rejections: list[StateRejection] | None = None,
+    _source_ref: str | None = None,
 ) -> list[State]:
     normalized = _normalise_file_path(path)
     if content is None:
@@ -344,6 +375,7 @@ def chunk_file(
         limits,
         split_focus=False,
         rejections=_rejections,
+        source_ref=_source_ref,
     )
 
 
@@ -363,22 +395,37 @@ def chunk_files(
             _rejections=_rejections,
         )
     states: list[State] = []
-    for line_number, line in enumerate(_as_text(records).splitlines(), start=1):
+    for line_number, byte_offset, line in _jsonl_lines(records):
         if not line.strip():
             continue
-        record = json.loads(line)
+        source_ref = f"stdin:byte={byte_offset},line={line_number}"
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as exc:
+            _input_error(
+                _rejections,
+                f"file JSONL line {line_number} is invalid JSON: {exc.msg}",
+                source_ref,
+            )
+            continue
         if (
             not isinstance(record, dict)
             or "path" not in record
             or "content" not in record
         ):
-            raise ValueError(f"file JSONL line {line_number} requires path and content")
+            _input_error(
+                _rejections,
+                f"file JSONL line {line_number} requires path and content",
+                source_ref,
+            )
+            continue
         states.extend(
             chunk_file(
                 record["path"],
                 record["content"],
                 limits=limits,
                 _rejections=_rejections,
+                _source_ref=source_ref,
             )
         )
     return states
@@ -395,36 +442,43 @@ def chunk_record(
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     if isinstance(records, Mapping):
-        values = [records]
+        values = [(records, None)]
     else:
         values = []
-        for line_number, line in enumerate(_as_text(records).splitlines(), start=1):
+        for line_number, byte_offset, line in _jsonl_lines(records):
             if not line.strip():
                 continue
-            value = json.loads(line)
+            source_ref = f"stdin:byte={byte_offset},line={line_number}"
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _input_error(
+                    _rejections,
+                    f"record JSONL line {line_number} is invalid JSON: {exc.msg}",
+                    source_ref,
+                )
+                continue
             if not isinstance(value, dict):
-                raise ValueError(f"record JSONL line {line_number} must be an object")
-            values.append(value)
+                _input_error(
+                    _rejections,
+                    f"record JSONL line {line_number} must be an object",
+                    source_ref,
+                )
+                continue
+            values.append((value, source_ref))
 
     states: list[State] = []
     seen_refs: set[str] = set()
     selected_fields = tuple(metadata_fields or ())
-    for record_index, record in enumerate(values, start=1):
+    for record_index, (record, source_ref) in enumerate(values, start=1):
         if state_ref_field not in record:
-            if _rejections is not None:
-                _rejections.append(
-                    StateRejection(
-                        None,
-                        "input_error",
-                        "record is missing selected identity field "
-                        f"{state_ref_field!r}",
-                        f"stdin:byte=0,line={record_index}",
-                    )
-                )
-                continue
-            raise ValueError(
-                f"record is missing selected identity field {state_ref_field!r}"
+            _input_error(
+                _rejections,
+                "record is missing selected identity field "
+                f"{state_ref_field!r}",
+                source_ref or f"stdin:byte=0,line={record_index}",
             )
+            continue
         identity = record[state_ref_field]
         if type(identity) not in (str, int) or (
             isinstance(identity, str) and not identity
@@ -433,31 +487,21 @@ def chunk_record(
                 f"record identity field {state_ref_field!r} must be a non-empty "
                 "string or integer"
             )
-            if _rejections is not None:
-                _rejections.append(
-                    StateRejection(
-                        None,
-                        "input_error",
-                        message,
-                        f"stdin:byte=0,line={record_index}",
-                    )
-                )
-                continue
-            raise ValueError(message)
+            _input_error(
+                _rejections,
+                message,
+                source_ref or f"stdin:byte=0,line={record_index}",
+            )
+            continue
         state_ref = str(identity)
         if state_ref in seen_refs:
             message = f"duplicate record identity {state_ref!r}"
-            if _rejections is not None:
-                _rejections.append(
-                    StateRejection(
-                        state_ref,
-                        "input_error",
-                        message,
-                        f"stdin:byte=0,line={record_index}",
-                    )
-                )
-                continue
-            raise ValueError(message)
+            if _rejections is None:
+                raise ValueError(message)
+            _rejections.append(
+                StateRejection(state_ref, "input_error", message, source_ref)
+            )
+            continue
         seen_refs.add(state_ref)
         focus = _canonical_json(record)
         metadata = {key: record[key] for key in selected_fields if key in record}
@@ -474,7 +518,7 @@ def chunk_record(
                 limits,
                 split_focus=False,
                 rejections=_rejections,
-                source_ref=f"stdin:byte=0,line={record_index}",
+                source_ref=source_ref,
             )
         )
     return states

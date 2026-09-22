@@ -39,6 +39,9 @@ def test_chunkers_produce_stable_refs() -> None:
     )
     assert chunk_hunk(diff)[0].state_ref == "app.py@@-1,2+1,2"
     assert chunk_file("app.py", "print('ok')")[0].state_ref == "app.py"
+    assert chunk_file("a/app.py", "print('ok')")[0].state_ref == "a/app.py"
+    git_diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n"
+    assert chunk_hunk(git_diff)[0].state_ref == "app.py@@-1+1"
     assert chunk_record('{"id":"evt-7","kind":"payment"}\n')[0].state_ref == "evt-7"
 
 
@@ -69,6 +72,25 @@ diff --git a/deleted.py b/deleted.py
 -gone
 """
     assert chunk_hunk(deleted)[0].state_ref == "deleted.py@@-1+0,0"
+
+
+def test_hunk_body_markers_are_not_file_headers() -> None:
+    diff = """\
+diff --git a/app.py b/app.py
+--- a/app.py
++++ b/app.py
+@@ -1,2 +1,3 @@
+-old
++new
+++ literal added
++++ literal added
+--- literal removed
+"""
+    states = chunk_hunk(diff)
+    assert len(states) == 1
+    assert "++ literal added" in states[0].focus
+    assert "+++ literal added" in states[0].focus
+    assert "--- literal removed" in states[0].focus
 
 
 def test_record_requires_selected_stable_identity() -> None:
@@ -125,6 +147,42 @@ def test_record_rejects_duplicate_stable_refs() -> None:
     assert result.rejections[0].reason == "input_error"
 
 
+def test_record_jsonl_rejects_bad_lines_and_continues() -> None:
+    records = '{"id":"é"}\nnot json\n{"id":"last"}\n'
+    result = chunk_input("record", records)
+    assert [state.state_ref for state in result.admitted] == ["é", "last"]
+    assert len(result.rejections) == 1
+    assert result.rejections[0].reason == "input_error"
+    assert result.rejections[0].source_ref == (
+        f"stdin:byte={len('{\"id\":\"é\"}\n'.encode())},line=2"
+    )
+
+
+def test_record_jsonl_errors_count_blank_lines_and_bytes() -> None:
+    records = " \n\n{\"kind\":\"missing-id\"}\n{\"id\":\"last\"}\n"
+    result = chunk_input("record", records)
+    assert [state.state_ref for state in result.admitted] == ["last"]
+    assert len(result.rejections) == 1
+    assert result.rejections[0].message.endswith("'id'")
+    assert result.rejections[0].source_ref == (
+        f"stdin:byte={len(b' \n\n')},line=3"
+    )
+
+
+def test_file_jsonl_rejects_bad_lines_and_continues() -> None:
+    records = (
+        '{"path":"first.txt","content":"one"}\n'
+        "not json\n"
+        '{"path":"last.txt","content":"last"}\n'
+    )
+    result = chunk_input("file", records)
+    assert [state.state_ref for state in result.admitted] == ["first.txt", "last.txt"]
+    assert len(result.rejections) == 1
+    assert result.rejections[0].source_ref == (
+        f"stdin:byte={len(b'{\"path\":\"first.txt\",\"content\":\"one\"}\n')},line=2"
+    )
+
+
 def test_invalid_stdin_bytes_use_replacement_characters() -> None:
     assert decode_stdin(b"ok\xff\n") == "ok\ufffd\n"
 
@@ -149,14 +207,33 @@ def test_identity_and_query_fields_are_rejected_when_oversized() -> None:
 
 
 def test_supported_oversized_focus_is_split_into_explicit_subunits() -> None:
-    states = chunk_para("abcdefghij", limits=StateLimits(focus_bytes=4))
+    states = chunk_line("abcdefghij\nok", limits=StateLimits(focus_bytes=4))
     assert [state.state_ref for state in states] == [
-        "stdin#P1/1",
-        "stdin#P1/2",
-        "stdin#P1/3",
+        "stdin#L1/1",
+        "stdin#L1/2",
+        "stdin#L1/3",
+        "stdin#L2",
     ]
-    assert "subunit" in states[0].context
+    assert "".join(state.focus for state in states[:3]) == "abcdefghij"
+    assert states[3].focus == "ok"
+    assert [state.context["subunit"] for state in states[:3]] == ["1/3", "2/3", "3/3"]
     assert all(len(state.focus.encode("utf-8")) <= 4 for state in states)
+
+
+def test_empty_and_unadmittable_inputs_remain_finite() -> None:
+    empty = chunk_input("line", "")
+    assert empty.admitted == ()
+    assert empty.discovered == 0
+
+    exceeds_all_limits = chunk_input(
+        "line",
+        "abcdefghij",
+        limits=StateLimits(focus_bytes=4, state_bytes=1),
+    )
+    assert exceeds_all_limits.admitted == ()
+    assert exceeds_all_limits.discovered == 3
+    assert exceeds_all_limits.judged == 0
+    assert len(exceeds_all_limits.rejections) == 3
 
 
 def test_files_reject_oversized_focus_instead_of_truncating() -> None:
