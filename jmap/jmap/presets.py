@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import string
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -209,6 +210,7 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     if output["default_format"] not in {"jsonl", "pretty"}:
         raise PresetValidationError("output.default_format must be jsonl or pretty")
     _string(output["pretty_template"], "output.pretty_template")
+    _validate_pretty_template(output["pretty_template"], questions)
     output_fields = _string_list(output["fields"], "output.fields")
     unknown_output_fields = set(output_fields) - _OUTPUT_FIELDS
     if unknown_output_fields:
@@ -217,6 +219,72 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
 
     return root
+
+
+def _validate_pretty_template(
+    template: str, questions: Mapping[str, Any]
+) -> None:
+    values: dict[str, Any] = {
+        "record_type": "result",
+        "state_ref": "state_ref",
+        "answers": {},
+        "meta": {
+            "preset": "preset",
+            "preset_version": "1",
+            "model": "jev-1.0.0",
+            "chunker": "para",
+            "cache": "not_applicable",
+        },
+    }
+    for question_id, question in questions.items():
+        question_type = question["type"]
+        answer: dict[str, Any] = {"type": question_type}
+        if question_type == "noul":
+            answer["noul"] = 0.5
+        elif question_type == "choice":
+            answer.update(
+                choice="value", probabilities={}, confidence=0.5
+            )
+        elif question_type == "score":
+            answer.update(score=1, legend={}, probabilities={}, confidence=0.5)
+        values["answers"][question_id] = answer
+
+    formatter = string.Formatter()
+    try:
+        fields = list(formatter.parse(template))
+    except ValueError as exc:
+        raise PresetValidationError(
+            f"output.pretty_template is invalid: {exc}"
+        ) from exc
+
+    for _, field_name, format_spec, conversion in fields:
+        if field_name is None:
+            continue
+        if not field_name:
+            raise PresetValidationError(
+                "output.pretty_template does not support positional fields"
+            )
+        value: Any = values
+        for part in field_name.split("."):
+            if not isinstance(value, Mapping) or part not in value:
+                raise PresetValidationError(
+                    "output.pretty_template references unknown field "
+                    f"{field_name!r}"
+                )
+            value = value[part]
+        if "{" in format_spec or "}" in format_spec:
+            raise PresetValidationError(
+                "output.pretty_template does not support nested format fields"
+            )
+        if conversion:
+            value = formatter.convert_field(value, conversion)
+        try:
+            format(value, format_spec)
+        except (TypeError, ValueError) as exc:
+            raise PresetValidationError(
+                "output.pretty_template has an invalid format specifier "
+                f"for field {field_name!r}: {exc}"
+            ) from exc
 
 
 def load_preset(path: str | os.PathLike[str]) -> Preset:

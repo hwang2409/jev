@@ -50,10 +50,8 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("paths", nargs="*", help="file paths when --by file is used")
 
     jgrep = commands.add_parser("jgrep", help="run the jgrep preset")
-    jgrep.add_argument("query", nargs="?", help="natural-language query")
-    jgrep.add_argument("--query", dest="query_option")
     jgrep.set_defaults(short_preset="jgrep")
-    _add_judgment_options(jgrep, include_query=False, include_predicate=False)
+    _add_judgment_options(jgrep, include_predicate=False)
     jgrep.add_argument("paths", nargs="*", help="file paths when --by file is used")
 
     jfilter = commands.add_parser("jfilter", help="run the jfilter preset")

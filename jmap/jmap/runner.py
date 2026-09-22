@@ -796,8 +796,15 @@ def emit_pretty(
     record: ResultRecord, stderr: TextIO, template: str | None = None
 ) -> None:
     if template is None:
-        rendered = json.dumps(
-            record.to_dict()["answers"], ensure_ascii=False, sort_keys=True
+        rendered = "\t".join(
+            (
+                record.state_ref,
+                json.dumps(
+                    record.to_dict()["answers"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
+            )
         )
     else:
         rendered = _render_pretty_template(record.to_dict(), template)

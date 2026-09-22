@@ -49,7 +49,7 @@ The first implementation exposes one executable and this v1 command surface:
 | Command | Purpose | stdout contract |
 | --- | --- | --- |
 | `jmap run --preset PATH [OPTIONS]` | Judge finite input with a preset. | Judgment JSONL. |
-| `jmap jgrep QUERY [OPTIONS]` | Short form for the `jgrep` preset. | Judgment JSONL. |
+| `jmap jgrep --query QUERY [OPTIONS]` | Short form for the `jgrep` preset. | Judgment JSONL. |
 | `jmap jfilter PREDICATE [OPTIONS]` | Short form for the `jfilter` preset. | Judgment JSONL. |
 | `jmap gate --preset PATH --policy EXPR [--require-states N] [OPTIONS]` | Run one finite judgment and apply a failure policy. | Judgment JSONL. |
 | `jmap preset {list,show,validate} [NAME\|PATH]` | Inspect or validate a preset. | Preset metadata, not judgment JSONL. |
@@ -60,7 +60,7 @@ Presets are the user-facing short form. These commands are equivalent:
 
 ```text
 jmap run --preset jgrep.yml --query "mentions a migration"
-jmap jgrep "mentions a migration"
+jmap jgrep --query "mentions a migration"
 ```
 
 The short forms select installed presets and pass their remaining arguments to
@@ -595,8 +595,8 @@ a keyword expander. Recall is bounded by the chunker and the scan cap.
 Invocation:
 
 ```bash
-jmap jgrep 'describes the launch decision' < notes.md
-jmap jgrep 'mentions a failed payment' --by para --max-chunks 256 < notes.md
+jmap jgrep --query 'describes the launch decision' < notes.md
+jmap jgrep --query 'mentions a failed payment' --by para --max-chunks 256 < notes.md
 ```
 
 The v1 battery has one question. It names the exact fields and keeps
