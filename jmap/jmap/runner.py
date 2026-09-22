@@ -188,10 +188,14 @@ class RunResult:
 class Runner:
     def __init__(
         self,
-        judge_fn: JudgeFn,
+        judge_fn: JudgeFn | None = None,
         model: str = "jev-1.13.0",
         limits: StateLimits = StateLimits(),
     ) -> None:
+        if judge_fn is None:
+            from .api import TypeSafeClient
+
+            judge_fn = TypeSafeClient()
         self.judge_fn = judge_fn
         self.model = model
         self.limits = limits
