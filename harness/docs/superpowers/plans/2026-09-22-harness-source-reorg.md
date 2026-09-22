@@ -132,8 +132,8 @@ Use these interim stage-1 relative imports because `_shared` does not exist:
 
 - `agent/__init__.py`: `from ..registry`, `from ..agent_presets`, and
   `from ..agent_send`;
-- `bash/__init__.py` and `exec/__init__.py`: `from .._process` and
-  `from .._sandbox`;
+- `bash/__init__.py`: `from .._process` and `from .._sandbox`;
+- `exec/__init__.py`: `from .._process`;
 - `memory/__init__.py`: `from .._process`;
 - `read/__init__.py`, `write/__init__.py`, and `edit/__init__.py`:
   `from .._sandbox`;
@@ -384,6 +384,7 @@ helper rewrites pass. Their complete importer rewrites are:
   `from ..agent.presets`.
 - `tools/plan_mode/__init__.py`, moved to `agent/plan_mode/__init__.py`:
   `from ..agent_presets` -> `from ..presets`.
+- `loop.py`: `from .tools.plan_mode` -> `from .agent.plan_mode`.
 - `tests/test_agent.py`: `from zeta.tools.agent_presets` ->
   `from zeta.agent.presets` at the module import and both function-local
   imports.
@@ -395,9 +396,14 @@ or tool-setup path:
 
 ```sh
 rg -n --glob '*.py' \
-  'zeta\.tools\._(process|sandbox|user_discovery)|zeta\.tools\.agent_presets|zeta\.tools\.plan_mode|tools\.(agent_presets|loop_setup)' \
+  'zeta\.tools\._(process|sandbox|user_discovery)|zeta\.tools\.agent_presets|zeta\.tools\.plan_mode|tools\.(agent_presets|loop_setup|plan_mode)' \
   harness/src harness/tests
 ```
+
+The relative-import audit was regenerated with `rg 'from \.{1,3}tools\.'`.
+It found the listed `agent_presets`, `loop_setup`, and `plan_mode` importers;
+the other matches are registry or tool imports that stay in place until their
+later stage-4 moves.
 
 #### 2b. Move agent policy and tool setup
 
@@ -634,10 +640,58 @@ and test directories are never package initializers. Verdict: no production
 cycle change and no test directory enters built-in tool discovery.
 
 Run collection in importlib mode before and after each ownership split. The
-targeted parity gate is:
+pre-move gate uses the current central files:
 
 ```sh
-cd harness && uv run --frozen pytest --collect-only -q
+cd harness && uv run --frozen pytest --collect-only -q \
+  tests/test_agent.py tests/test_agent_output.py tests/test_automations.py \
+  tests/test_session.py tests/test_session_resilience.py \
+  tests/test_session_safety.py tests/test_session_shutdown.py \
+  tests/test_memory_tools.py tests/test_read_images.py tests/test_tools.py \
+  tests/test_todo.py tests/test_webtools.py tests/test_skills.py \
+  tests/test_evals.py tests/test_safety.py tests/test_commands.py \
+  tests/test_background.py
+```
+
+The post-move gate executes every destination in the split table:
+
+```sh
+cd harness && uv run --frozen pytest --collect-only -q \
+  src/zeta/tools/agent/tests/test_agent.py \
+  src/zeta/tools/agent_send/tests/test_agent_send.py \
+  tests/test_agent_integration.py \
+  src/zeta/tools/agent/tests/test_agent_output.py tests/test_agent_output_tui.py \
+  src/zeta/tools/agent/tests/test_automations.py \
+  src/zeta/tools/automation/tests/test_automation.py \
+  tests/test_automations_integration.py \
+  src/zeta/tools/agent/tests/test_session.py tests/test_session_integration.py \
+  src/zeta/tools/agent/tests/test_session_resilience.py \
+  tests/test_session_resilience_integration.py \
+  src/zeta/tools/agent/tests/test_session_safety.py \
+  src/zeta/tools/exec/tests/test_session_safety.py \
+  tests/test_session_safety_integration.py tests/test_session_shutdown.py \
+  src/zeta/tools/memory/tests/test_memory_tools.py \
+  tests/test_memory_tools_integration.py \
+  src/zeta/tools/read/tests/test_read_images.py \
+  tests/test_read_images_integration.py \
+  src/zeta/tools/read/tests/test_read.py src/zeta/tools/bash/tests/test_bash.py \
+  src/zeta/tools/exec/tests/test_exec.py src/zeta/tools/edit/tests/test_edit.py \
+  src/zeta/tools/write/tests/test_write.py tests/test_tools_integration.py \
+  src/zeta/tools/todo/tests/test_todo.py tests/test_todo_persistence.py \
+  tests/test_todo_tui.py src/zeta/tools/fetch/tests/test_fetch.py \
+  src/zeta/tools/websearch/tests/test_websearch.py \
+  src/zeta/tools/skill/tests/test_skill_tool.py tests/test_skills.py \
+  src/zeta/tools/route/tests/test_route_evals.py tests/test_evals.py \
+  src/zeta/tools/bash/tests/test_bash_safety.py \
+  src/zeta/tools/exec/tests/test_exec_safety.py tests/test_safety.py \
+  src/zeta/tools/exec/tests/test_exec_commands.py tests/test_commands.py \
+  src/zeta/tools/zeta_background/tests/test_background.py \
+  src/zeta/tools/_shared/tests/test_process.py tests/test_background_integration.py
+```
+
+Run the targeted post-move tests and wheel build:
+
+```sh
 cd harness && uv run --frozen pytest -q \
   src/zeta/tools/agent/tests src/zeta/tools/agent_send/tests \
   src/zeta/tools/automation/tests src/zeta/tools/browser/tests \
@@ -686,8 +740,16 @@ Then make these exact moves:
 - `harness/src/zeta/loop.py` ->
   `harness/src/zeta/runtime/loop.py`.
 
+The chosen sequence is `execution.py`, then the CLI import rewrite,
+then `headless.py`, then `loop.py`.
+Before moving `headless.py`, rewrite the current `zeta/cli.py` lazy import
+from `.headless` to `.runtime.headless`. This keeps the current CLI importer
+valid after `headless.py` moves. When `cli.py` moves in 4b, change that import
+to `..runtime.headless` for `cli/main.py`.
+
 Update `tools/registry.py`, `tools/memory/__init__.py`,
-`tools/route/__init__.py`, and `tests/test_agent.py` as listed in the
+`tools/route/__init__.py`, and
+`src/zeta/tools/agent/tests/test_agent.py` as listed in the
 stage-4 importer inventory below.
 Move `headless.py` after `execution.py`, updating its runtime driver import.
 Move `loop.py` last among runtime children, updating
@@ -695,18 +757,26 @@ Move `loop.py` last among runtime children, updating
 Keep `zeta.execution` and
 `zeta.loop` as re-export shims until their importer counts reach zero.
 
-Before each child move, run a fresh process. Immediately after each move run:
+Before each child move, run a fresh process. Immediately after `execution.py`
+moves, run:
 
 ```sh
 cd harness && PYTHONPATH=src python -c 'import zeta.runtime.execution'
-cd harness && PYTHONPATH=src python -c 'import zeta.runtime.headless'
-cd harness && PYTHONPATH=src python -c 'import zeta.runtime.loop'
-cd harness && PYTHONPATH=src python -c 'import zeta.runtime; from zeta.runtime import compose_runtime'
 cd harness && PYTHONPATH=src python -c 'import zeta.tools.registry'
 ```
 
-Use the command matching the moved child before a later test process loads the
-runtime package.
+Immediately after `headless.py` moves, run:
+
+```sh
+cd harness && PYTHONPATH=src python -c 'import zeta.cli; import zeta.runtime.headless'
+```
+
+Immediately after `loop.py` moves, run:
+
+```sh
+cd harness && PYTHONPATH=src python -c 'import zeta.runtime.loop'
+cd harness && PYTHONPATH=src python -c 'import zeta.runtime; from zeta.runtime import compose_runtime'
+```
 
 #### 4b. Move the remaining loose modules
 
@@ -770,66 +840,89 @@ Use the same `__getattr__` behavior and preserve `__all__ = ["TUIApp", "main"]`.
 Verify `import zeta.tui` alone does not import `zeta.tui.app` or `zeta.cli`;
 then verify `from zeta.tui import TUIApp, main` in a separate fresh process.
 
-The complete stage-4 importer rewrite inventory is below. Each file list is
-exhaustive for the old import shown.
+The complete stage-4 importer rewrite inventory is below. It was regenerated
+from the current importer grep and the stage-3 destination table. Split source
+files are represented by every destination that retains the importer.
 
 - `agent_background` -> `agent.background`: `agent/receipt.py` and
   `agent/runner.py`, `from .agent_background` -> `from .background`;
   `runtime/loop.py`, `from .agent_background` -> `from ..agent.background`;
-  `tests/test_agent.py`, `tests/test_agent_output.py`, and
-  `tests/test_session_shutdown.py`, `from zeta.agent_background` ->
-  `from zeta.agent.background`.
+  `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`, and
+  `tests/test_agent_integration.py`, plus
+  `src/zeta/tools/agent/tests/test_agent_output.py`,
+  `tests/test_agent_output_tui.py`, `tests/test_session_shutdown.py`, and
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`, all
+  `from zeta.agent_background` -> `from zeta.agent.background`.
 - `agent_budget` -> `agent.budget`: `agent/runner.py`, `from .agent_budget` ->
   `from .budget`; `runtime/loop.py`, `from .agent_budget` ->
-  `from ..agent.budget`; `tests/test_agent.py`, `from zeta.agent_budget` ->
+  `from ..agent.budget`; `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`, and
+  `tests/test_agent_integration.py`, `from zeta.agent_budget` ->
   `from zeta.agent.budget`.
 - `agent_receipt` -> `agent.receipt`: `agent/background.py` and
   `agent/runner.py`, `from .agent_receipt` -> `from .receipt`;
   `runtime/loop.py`, `from .agent_receipt` -> `from ..agent.receipt`;
   `core/store.py`, `tui/agent_card.py`, and `tui/render.py`, `from
   ..agent_receipt` -> `from ..agent.receipt`; `tools/agent/__init__.py`,
-  `from ...agent_receipt` -> `from ...agent.receipt`; tests
-  `test_agent_output.py` and `test_tool_ergonomics.py`, `from
-  zeta.agent_receipt` -> `from zeta.agent.receipt`.
+  `from ...agent_receipt` -> `from ...agent.receipt`;
+  `src/zeta/tools/agent/tests/test_agent_output.py`,
+  `tests/test_agent_output_tui.py`, and `tests/test_tool_ergonomics.py`,
+  `from zeta.agent_receipt` -> `from zeta.agent.receipt`.
 - `agent_runner` -> `agent.runner`: `runtime/loop.py`, `from .agent_runner` ->
-  `from ..agent.runner`; tests `test_agent.py` and `test_agents.py`, all
+  `from ..agent.runner`; `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`,
+  `tests/test_agent_integration.py`, and `tests/test_agents.py`, all
   `zeta.agent_runner` imports and monkeypatch strings -> `zeta.agent.runner`.
   Their `from zeta import agent_runner` imports become `from zeta.agent import
   runner as agent_runner`.
 - `execution` -> `runtime.execution`: `tools/memory/__init__.py` and
   `tools/route/__init__.py`, `from ...execution` ->
   `from ...runtime.execution`; `tools/registry.py`, `from ..execution` ->
-  `from ..runtime.execution`; `tests/test_agent.py`, `import zeta.execution as
-  execution_module` -> `import zeta.runtime.execution as execution_module`.
+  `from ..runtime.execution`; `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`, and
+  `tests/test_agent_integration.py`, `import zeta.execution as execution_module`
+  -> `import zeta.runtime.execution as execution_module`.
 - `headless` -> `runtime.headless`: `cli/main.py`, `from .headless` ->
-  `from ..runtime.headless`; tests `test_headless.py`,
-  `test_session_shutdown.py`, and `test_stream_watchdog.py`, all
+  `from ..runtime.headless`; tests `tests/test_headless.py`,
+  `tests/test_session_shutdown.py`, and `tests/test_stream_watchdog.py`, all
   `zeta.headless` imports and monkeypatch strings -> `zeta.runtime.headless`.
 - `images` -> `media.images`: `protocol/types.py`, `from .images` ->
   `from ..media.images`; `tools/read/__init__.py`, `from ...images` ->
   `from ...media.images`; `providers/anthropic_payload.py`,
   `providers/codex_payload.py`, `server/ergonomics.py`, and `tui/composer.py`,
-  `from ..images` -> `from ..media.images`; tests `test_anthropic.py` and
-  `test_read_images.py`, `from zeta.images` -> `from zeta.media.images`.
+  `from ..images` -> `from ..media.images`;
+  `src/zeta/tools/read/tests/test_read_images.py`,
+  `tests/test_read_images_integration.py`, and `tests/test_anthropic.py`,
+  `from zeta.images` -> `from zeta.media.images`.
 - `model_catalog` -> `models.catalog`: `agent/runner.py`, `from
   .model_catalog` -> `from ..models.catalog`; `providers/__init__.py`,
   `providers/factory.py`, `server/ergonomics.py`, `server/model_selection.py`,
   `skills/agent_catalog.py`, and `tui/models.py`, `from ..model_catalog` ->
   `from ..models.catalog`; `tools/agent/__init__.py`, `from ...model_catalog` ->
-  `from ...models.catalog`; tests `test_agent.py`, `test_model_picker.py`, and
-  `test_server.py`, `from zeta.model_catalog` -> `from zeta.models.catalog`.
+  `from ...models.catalog`; `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`,
+  `tests/test_agent_integration.py`, `tests/test_model_picker.py`, and
+  `tests/test_server.py`, `from zeta.model_catalog` ->
+  `from zeta.models.catalog`.
 - `persistence` -> `tui.persistence`: `tui/app.py`, `from ..persistence` ->
-  `from .persistence`; tests `test_session_safety.py` and `test_tui.py`,
+  `from .persistence`; `src/zeta/tools/agent/tests/test_session_safety.py`,
+  `src/zeta/tools/exec/tests/test_session_safety.py`,
+  `tests/test_session_safety_integration.py`, and `tests/test_tui.py`,
   `from zeta.persistence` -> `from zeta.tui.persistence`.
 - `session_cli` -> `cli.session`: `cli/main.py`, both `from .session_cli` forms
-  -> `from .session`; `tests/test_session_resilience.py`, `from zeta import
+  -> `from .session`; `src/zeta/tools/agent/tests/test_session_resilience.py`
+  and `tests/test_session_resilience_integration.py`, `from zeta import
   session_cli` -> `from zeta.cli import session as session_cli`.
 - `settings` -> `config.settings`: `automations/authoring.py`,
   `runtime/composition.py`, `runtime/unattended.py`, `server/runtime.py`,
   `tui/app.py`, and `tui/bootstrap.py`, each `from ..settings` -> `from
-  ..config.settings`; tests `test_jev_compaction.py`, `test_memory_tools.py`,
-  `test_router_mode.py`, `test_safety.py`, `test_settings.py`, and
-  `test_stream_watchdog.py`, `from zeta.settings` -> `from zeta.config.settings`.
+  ..config.settings`; tests `tests/test_jev_compaction.py`,
+  `src/zeta/tools/memory/tests/test_memory_tools.py`,
+  `tests/test_memory_tools_integration.py`, `tests/test_router_mode.py`,
+  `tests/test_safety.py`, `tests/test_settings.py`, and
+  `tests/test_stream_watchdog.py`,
+  `from zeta.settings` -> `from zeta.config.settings`.
 - `submission` and `submission_pipeline`: `submission/pipeline.py`, `from
   .submission` -> `from .model` and `from .types` -> `from
   ..protocol.types`; `tui/app.py`, `from ..submission_pipeline` -> `from
@@ -856,18 +949,33 @@ exhaustive for the old import shown.
   `from ..runtime.loop`; `runtime/cleanup.py`, `runtime/composition.py`,
   `runtime/driver.py`, and `runtime/unattended.py`, each `from ..loop` ->
   `from .loop`; `server/runtime.py` and `tui/app.py`, `from ..loop` ->
-  `from ..runtime.loop`; tests `conftest.py`, `test_agent.py`,
-  `test_agent_output.py`, `test_agent_status.py`, `test_agents.py`,
-  `test_anthropic.py`, `test_checkpoint.py`, `test_codex.py`,
-  `test_command_menu.py`, `test_commands.py`, `test_evals.py`,
-  `test_headless.py`, `test_jev_compaction.py`, `test_loop.py`, `test_mcp.py`,
-  `test_mcp_oauth.py`, `test_model_picker.py`, `test_plan_mode.py`,
-  `test_read_images.py`, `test_router_auto.py`, `test_router_mode.py`,
-  `test_selection.py`, `test_server.py`, `test_session_shutdown.py`,
-  `test_slash.py`, `test_stream_watchdog.py`, `test_theme_and_keys.py`,
-  `test_todo.py`, `test_tree.py`, `test_user_tool_discovery.py`, and
-  `test_workspace_snapshots.py`, all `zeta.loop` imports and monkeypatch
-  strings -> `zeta.runtime.loop`.
+  `from ..runtime.loop`; `tests/zeta_test_plugin.py`,
+  `tests/test_agent_status.py`, and all of `tests/test_agents.py`,
+  `tests/test_anthropic.py`, `tests/test_checkpoint.py`,
+  `tests/test_codex.py`, `tests/test_command_menu.py`,
+  `tests/test_headless.py`, `tests/test_jev_compaction.py`, `tests/test_loop.py`,
+  `tests/test_mcp.py`, `tests/test_mcp_oauth.py`, `tests/test_model_picker.py`,
+  `tests/test_plan_mode.py`, `tests/test_read_images.py`,
+  `tests/test_router_auto.py`, `tests/test_router_mode.py`,
+  `tests/test_selection.py`, `tests/test_server.py`, `tests/test_slash.py`,
+  `tests/test_stream_watchdog.py`, `tests/test_theme_and_keys.py`,
+  `tests/test_tree.py`, `tests/test_user_tool_discovery.py`, and
+  `tests/test_workspace_snapshots.py`, all `zeta.loop` imports and monkeypatch
+  strings -> `zeta.runtime.loop`; split sources map as follows:
+  `test_agent.py` -> `src/zeta/tools/agent/tests/test_agent.py`,
+  `src/zeta/tools/agent_send/tests/test_agent_send.py`, and
+  `tests/test_agent_integration.py`; `test_agent_output.py` ->
+  `src/zeta/tools/agent/tests/test_agent_output.py` and
+  `tests/test_agent_output_tui.py`; `test_commands.py` ->
+  `src/zeta/tools/exec/tests/test_exec_commands.py` and `tests/test_commands.py`;
+  `test_evals.py` -> `src/zeta/tools/route/tests/test_route_evals.py` and
+  `tests/test_evals.py`; `test_session_shutdown.py` ->
+  `src/zeta/tools/agent_send/tests/test_agent_send.py` and
+  `tests/test_session_shutdown.py`; `test_todo.py` ->
+  `src/zeta/tools/todo/tests/test_todo.py`, `tests/test_todo_persistence.py`,
+  and `tests/test_todo_tui.py`; `test_read_images.py` ->
+  `src/zeta/tools/read/tests/test_read_images.py` and
+  `tests/test_read_images_integration.py`.
 
 For `types`, update the following 62 source importers from their current
 relative `types` path to `protocol.types`; the new relative form is shown by
@@ -904,39 +1012,64 @@ source directory:
   `tools/zeta_background/__init__.py`: their current root-relative `types`
   import changes to the same depth under `protocol.types`.
 
-The 54 test importer files are these post-stage-3 destinations. In each case,
-`from zeta.types` becomes `from zeta.protocol.types`:
+The post-stage-3 test importer destinations are these. In each case,
+`from zeta.types` becomes `from zeta.protocol.types`. Split source files list
+every destination that retains the importer:
 
 ```text
 src/zeta/tools/agent/tests/test_agent.py,
+src/zeta/tools/agent_send/tests/test_agent_send.py,
+tests/test_agent_integration.py,
 src/zeta/tools/agent/tests/test_agent_output.py,
+tests/test_agent_output_tui.py,
 src/zeta/tools/agent/tests/test_agent_status.py,
 src/zeta/tools/agent/tests/test_agents.py,
 tests/test_anthropic.py, tests/test_approval.py, tests/test_attachments.py,
 src/zeta/tools/agent/tests/test_automations.py,
+src/zeta/tools/automation/tests/test_automation.py,
+tests/test_automations_integration.py,
 src/zeta/tools/zeta_background/tests/test_background.py,
+src/zeta/tools/_shared/tests/test_process.py,
+tests/test_background_integration.py,
 src/zeta/tools/calendar/tests/test_calendar_tools.py, tests/test_checkpoint.py,
-tests/test_codex.py, tests/test_commands.py, tests/test_context.py,
-tests/test_evals.py, tests/test_headless.py, tests/test_hooks.py,
+tests/test_codex.py, tests/test_context.py,
+src/zeta/tools/exec/tests/test_exec_commands.py, tests/test_commands.py,
+tests/test_evals.py, src/zeta/tools/route/tests/test_route_evals.py,
+tests/test_headless.py, tests/test_hooks.py,
 tests/test_jev_compaction.py, tests/test_loop.py, tests/test_mcp.py,
 tests/test_mcp_oauth.py, src/zeta/tools/memory/tests/test_memory_tools.py,
+tests/test_memory_tools_integration.py,
 tests/test_plan_mode.py, tests/test_project_context.py,
 src/zeta/tools/read/tests/test_read_images.py,
+tests/test_read_images_integration.py,
 tests/test_router_auto.py, tests/test_router_mode.py,
 src/zeta/tools/bash/tests/test_bash_safety.py,
+src/zeta/tools/exec/tests/test_exec_safety.py,
+tests/test_safety.py,
+src/zeta/tools/bash/tests/test_bash.py, src/zeta/tools/exec/tests/test_exec.py,
+src/zeta/tools/edit/tests/test_edit.py, src/zeta/tools/write/tests/test_write.py,
 src/zeta/tools/_shared/tests/test_sandbox.py, tests/test_selection.py,
-tests/test_server.py, tests/test_server_login.py, tests/test_session.py,
+tests/test_server.py, tests/test_server_login.py,
 tests/test_session_lifecycle.py,
+src/zeta/tools/agent/tests/test_session.py, tests/test_session_integration.py,
 src/zeta/tools/agent/tests/test_session_resilience.py,
+tests/test_session_resilience_integration.py,
+src/zeta/tools/agent/tests/test_session_safety.py,
+src/zeta/tools/exec/tests/test_session_safety.py,
 tests/test_session_safety_integration.py,
-src/zeta/tools/agent_send/tests/test_agent_send.py, tests/test_skills.py,
+tests/test_session_shutdown.py,
+tests/test_skills.py,
+src/zeta/tools/skill/tests/test_skill_tool.py,
 tests/test_slash.py, tests/test_steering.py, tests/test_store.py,
 tests/test_stream_watchdog.py, src/zeta/tools/todo/tests/test_todo.py,
+tests/test_todo_persistence.py, tests/test_todo_tui.py,
+src/zeta/tools/fetch/tests/test_fetch.py,
+src/zeta/tools/websearch/tests/test_websearch.py,
+src/zeta/tools/read/tests/test_read.py,
 tests/test_tool_discovery.py, tests/test_tool_ergonomics.py,
 tests/test_tool_result_shape.py, tests/test_tools_integration.py,
 tests/test_transcript_paint.py, tests/test_tree.py, tests/test_tui.py,
 tests/test_types.py, tests/test_user_tool_discovery.py,
-src/zeta/tools/websearch/tests/test_websearch.py,
 tests/test_workspace_snapshots.py
 ```
 
