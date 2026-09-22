@@ -1,0 +1,175 @@
+from __future__ import annotations
+
+import copy
+from pathlib import Path
+
+import pytest
+import yaml
+
+from jmap.presets import (
+    PresetUsageError,
+    PresetValidationError,
+    load_preset,
+    resolve_chunker,
+    resolve_preset,
+    validate_preset,
+)
+
+ROOT = Path(__file__).parents[1]
+PRESETS = ROOT / "jmap" / "presets"
+PLAN = ROOT / "docs" / "superpowers" / "plans" / "2026-09-22-jmap-v1.md"
+BUILTINS = ("jgrep", "jfilter", "diff-risk-heat")
+
+
+def test_builtins_have_expected_metadata_and_batteries() -> None:
+    expected = {
+        "jgrep": ("para", ("line", "para", "file"), 1, {"noul"}),
+        "jfilter": ("record", ("record",), 1, {"noul"}),
+        "diff-risk-heat": ("hunk", ("hunk",), 9, {"noul", "score"}),
+    }
+    for name in BUILTINS:
+        preset = resolve_preset(name)
+        assert (
+            preset.default_chunker,
+            preset.compatible_chunkers,
+            len(preset.questions),
+            {question["type"] for question in preset.questions.values()},
+        ) == expected[name]
+        assert preset.version == "1"
+        assert preset.model == "jev-1.13.0"
+        assert preset.chunking["limits"] == {
+            "focus_bytes": 16384,
+            "context_field_bytes": 4096,
+            "state_bytes": 32768,
+        }
+        assert preset.data["output"]["fields"] == [
+            "record_type",
+            "state_ref",
+            "source_ref",
+            "answers",
+            "error",
+            "missing_questions",
+            "coverage",
+            "coverage_counts",
+            "coverage_reasons",
+            "meta",
+        ]
+
+
+def test_builtins_match_the_plan_blocks_byte_for_byte() -> None:
+    plan = PLAN.read_text(encoding="utf-8")
+    for name in BUILTINS:
+        marker = f"`jmap/jmap/presets/{name}.yml`:\n\n```yaml\n"
+        block = plan.split(marker, 1)[1].split("\n```", 1)[0] + "\n"
+        assert (PRESETS / f"{name}.yml").read_text(encoding="utf-8") == block
+
+
+@pytest.mark.parametrize("missing", [
+    "schema",
+    "name",
+    "version",
+    "model",
+    "chunking",
+    "compatible_chunkers",
+    "questions",
+    "thresholds",
+    "output",
+])
+def test_validation_requires_every_top_level_field(missing: str) -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    del data[missing]
+    with pytest.raises(PresetValidationError, match="required"):
+        validate_preset(data)
+
+
+def test_validation_rejects_unknown_fields_and_alias_models() -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    data["unexpected"] = True
+    with pytest.raises(PresetValidationError, match="unknown"):
+        validate_preset(data)
+
+    data = copy.deepcopy(data)
+    data.pop("unexpected")
+    data["model"] = "jev-latest"
+    with pytest.raises(PresetValidationError, match="pinned"):
+        validate_preset(data)
+
+
+@pytest.mark.parametrize(
+    "change, message",
+    [
+        (
+            lambda data: data["questions"]["matches_query"].update(criteria={}),
+            "true and false",
+        ),
+        (
+            lambda data: data["questions"]["matches_query"].update(type="other"),
+            "one of",
+        ),
+        (lambda data: data["compatible_chunkers"].append("other"), "unknown"),
+        (
+            lambda data: data["thresholds"]["matches_query"].update(
+                fail_at_least=0.5
+            ),
+            "exactly one",
+        ),
+        (
+            lambda data: data["thresholds"]["matches_query"].update(
+                keep_at_least=2
+            ),
+            "0 to 1",
+        ),
+    ],
+)
+def test_validation_rejects_invalid_question_or_threshold_data(change, message) -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    change(data)
+    with pytest.raises(PresetValidationError, match=message):
+        validate_preset(data)
+
+
+def test_lookup_order_is_explicit_then_cwd_then_builtin_then_user(
+    tmp_path, monkeypatch
+) -> None:
+    content = (PRESETS / "jgrep.yml").read_text(encoding="utf-8")
+    cwd = tmp_path / "cwd"
+    builtins = tmp_path / "builtins"
+    user = tmp_path / "user"
+    for directory in (cwd, builtins, user):
+        directory.mkdir()
+        (directory / "jgrep.yml").write_text(content, encoding="utf-8")
+    explicit = tmp_path / "explicit.yml"
+    explicit.write_text(content, encoding="utf-8")
+    monkeypatch.setenv("JMAP_PRESETS", str(user))
+
+    assert resolve_preset("jgrep", explicit_path=explicit).path == explicit.resolve()
+    assert resolve_preset("jgrep", cwd=cwd, package_dir=builtins).path == (
+        cwd / "jgrep.yml"
+    ).resolve()
+    (cwd / "jgrep.yml").unlink()
+    assert resolve_preset("jgrep", cwd=cwd, package_dir=builtins).path == (
+        builtins / "jgrep.yml"
+    ).resolve()
+    (builtins / "jgrep.yml").unlink()
+    assert resolve_preset("jgrep", cwd=cwd, package_dir=builtins).path == (
+        user / "jgrep.yml"
+    ).resolve()
+
+
+def test_incompatible_chunker_is_usage_error_with_allowed_set() -> None:
+    preset = resolve_preset("jgrep")
+    with pytest.raises(PresetUsageError, match="line, para, file") as error:
+        resolve_chunker(preset, "record")
+    assert error.value.exit_code == 64
+    assert resolve_chunker(preset) == "para"
+    assert resolve_chunker(preset, "file") == "file"
+
+
+def test_duplicate_yaml_keys_are_rejected(tmp_path) -> None:
+    path = tmp_path / "duplicate.yml"
+    path.write_text(
+        """schema: jmap.preset/v1\nschema: jmap.preset/v1\n""",
+        encoding="utf-8",
+    )
+    with pytest.raises(PresetValidationError, match="duplicate"):
+        load_preset(path)
