@@ -534,6 +534,7 @@ zeta/protocol/
   types.py              # types.py
 
 zeta/runtime/
+  __init__.py            # lazy exports; no eager composition or registry imports
   execution.py          # execution.py
   headless.py           # headless.py
   loop.py               # loop.py
@@ -559,7 +560,10 @@ The grouping follows the import graph:
 - `models/` owns provider model metadata and lookup.
 - `protocol/` owns shared message, content, stream, and tool types.
 - `runtime/` contains the loop, tool execution context, headless driver, and
-  tool-registry setup. It aligns with the existing runtime package.
+  tool-registry setup. It aligns with the existing runtime package. Its
+  `__init__.py` must stay lazy: it cannot eagerly import `composition`, which
+  imports `tools.registry`, or any child that imports the registry. Preserve
+  the current public names with module-level lazy attribute loading if needed.
 - `submission/` contains the immutable submission value and its pipeline.
 - `tui/persistence.py` is used only by the TUI application and its tests.
 
@@ -601,6 +605,31 @@ old modules as explicit re-export shims while source and tests migrate. Run
 the import-boundary tests after each update. Do not create two independent
 implementations. The shim must import the one new implementation.
 
+The runtime package requires a dependency-safe move sequence. First replace
+`zeta/runtime/__init__.py` with a lazy package initializer. It may define
+`__all__` and a module-level `__getattr__`, but it must not import
+`composition`, `tools.registry`, `execution`, or `loop` during package import.
+Then move `execution.py` to `zeta.runtime.execution`, update the registry and
+its other importers, and keep `zeta.execution` as a re-export shim. Move
+`headless.py` and `tool_setup.py` next. Move `loop.py` last among the runtime
+children, update `composition` and its other importers, and keep
+`zeta.loop` as a re-export shim until the importer count is zero. Remove the
+shims only after a repository search confirms that no importer remains.
+
+After each runtime-child move, run the relevant import-boundary checks in a
+fresh process. At minimum, run each command from a new Python process:
+
+```sh
+PYTHONPATH=src python -c 'import zeta.runtime.execution'
+PYTHONPATH=src python -c 'import zeta.runtime.loop'
+PYTHONPATH=src python -c 'import zeta.runtime; from zeta.runtime import compose_runtime'
+PYTHONPATH=src python -c 'import zeta.tools.registry'
+```
+
+The first two checks must run immediately after their moves, before any test
+session imports `zeta.runtime`. A warm pytest process can hide this cycle by
+leaving the package partially initialized in `sys.modules`.
+
 ## 6. test co-location mechanics
 
 ### 6.1 discovery
@@ -611,15 +640,25 @@ source tree to pytest's search paths:
 ```toml
 [tool.pytest.ini_options]
 testpaths = ["tests", "src/zeta/tools"]
-addopts = ["--import-mode=importlib"]
+pythonpath = ["tests", "src"]
+addopts = ["--import-mode=importlib", "-p", "zeta_test_plugin"]
 asyncio_mode = "auto"
 ```
 
 Pytest still uses `harness/` as `rootdir` because `pyproject.toml` remains at
-that level. The existing `tests/` tree remains discoverable. No `pythonpath`
-change is needed when running through `uv run`, because the project is
-installed as an editable package. Tests import the installed package with
-absolute imports, for example `from zeta.tools.read import IMAGE_MAX_BYTES`.
+that level. The existing `tests/` tree remains discoverable. The `pythonpath`
+entry makes the shared plugin importable in every collection tree. Move the
+body of `harness/tests/conftest.py` to
+`harness/tests/zeta_test_plugin.py`; this plugin owns the HOME isolation,
+network block, terminal defaults, live-home guard, and `stock_router_mode`
+fixture. The old `harness/tests/conftest.py` becomes a one-line compatibility
+loader containing `pytest_plugins = ["zeta_test_plugin"]`. The global `-p`
+load is the authoritative path, so tests under both `harness/tests/` and
+`harness/src/zeta/tools/**/tests/` receive the same fixtures. Do not add a
+second source-tree conftest or copy the fixture code.
+
+Tests import the installed package with absolute imports, for example
+`from zeta.tools.read import IMAGE_MAX_BYTES`.
 
 Do not add `__init__.py` files to test directories. The explicit importlib
 mode avoids test module-name collisions when several tool directories contain
@@ -657,7 +696,7 @@ tools/browser/tests/       test_browser_adapter.py, test_browser_catalog.py,
 tools/calendar/tests/      test_calendar_tools.py
 tools/memory/tests/        memory portions of test_memory_tools.py
 tools/read/tests/          read portions of test_read_images.py and test_tools.py
-tools/todo/tests/          test_todo.py
+tools/todo/tests/          tool-handler portions of test_todo.py
 tools/websearch/tests/     websearch portions of test_webtools.py
 tools/fetch/tests/         fetch portions of test_webtools.py
 tools/skill/tests/         skill assertions from test_skills.py:77-105
@@ -674,8 +713,34 @@ tools/_shared/tests/       sandbox and process helper portions of test_sandbox.p
 
 Mixed integration tests stay in `harness/tests`. Examples are loop/router,
 MCP, session lifecycle, TUI, import boundaries, and provider tests. Move
-single-owner files whole, such as `test_agent_output.py`,
-`test_agent_status.py`, and `test_todo.py`. Split mixed files by ownership:
+single-owner files whole only when every test follows the same owner. Keep
+`test_agent_status.py` as an agent-owned file. Split mixed files by the
+behavior under test:
+
+- `test_agent_output.py` sends all agent lifecycle and `agent_output` handler
+  tests to `tools/agent/tests/test_agent_output.py`. The test
+  `test_foreground_receipt_shows_lifecycle_stats` calls `tui.render` and
+  moves to `harness/tests/test_agent_output_tui.py`.
+- `test_todo.py` sends the tool-handler, schema, validation, mutation, and
+  transcript tests through `test_todo_empty_list_clears_state_and_does_not_pollute_transcript`
+  to `tools/todo/tests/test_todo.py`. The store-only test
+  `test_todo_items_persist_across_store_resume` moves to
+  `harness/tests/test_todo_persistence.py`. All `TodoWidget` and `TUIApp`
+  rendering, layout, status, truncation, pinning, and terminal-size tests
+  move to `harness/tests/test_todo_tui.py`.
+- `test_import_boundaries.py` stays whole at
+  `harness/tests/test_import_boundaries.py`. It scans the complete `src/zeta`
+  tree, starts fresh subprocess imports, and checks forbidden dependencies;
+  it is a cross-cutting boundary suite, not a tool test.
+
+Use this ownership rule for future mixed files: place a test with the
+smallest behavior owner when it tests one tool's public contract; keep it in
+`harness/tests` when it tests TUI behavior, persistence shared by multiple
+layers, import boundaries, or integration across tools. Split a file when
+different tests have different owners. A test's imports do not decide its
+owner; the behavior and contract under test do.
+
+The remaining mixed files split by the same owner rule:
 `test_agent.py` sends its agent assertions to `tools/agent/tests/` and its
 `agent_send` assertions at lines 3159-3317 to `tools/agent_send/tests/`;
 `test_session_shutdown.py` sends its `agent_send` test at line 356 to
@@ -687,7 +752,7 @@ owner rule. Splitting changes file location and imports, not assertions.
 ### 6.3 packaging
 
 Because Hatchling packages `src/zeta`, test files under `src/zeta/tools/`
-would otherwise be candidates for the wheel. Add an explicit wheel exclusion:
+would otherwise be candidates for the wheel. Add an explicit test exclusion:
 
 ```toml
 [tool.hatch.build.targets.wheel]
@@ -805,19 +870,27 @@ then the complete suite. Run `uv build` and inspect the wheel contents.
 
 ### stage 4: group loose top-level modules
 
-Move the 16 loose modules to the proposed `agent`, `cli`, `config`, `media`,
-`models`, `protocol`, `runtime`, `submission`, and `tui` locations. Update
-all in-repo importers. Keep temporary re-export shims for `loop`, `settings`,
-and `types` until their importer counts reach zero. Preserve the `zeta.cli`
-package exports and `zeta.cli:main` entry point.
+First make `zeta.runtime.__init__` lazy and verify that a fresh process can
+import the current runtime package and its public exports. Then move
+`execution.py`, update `tools.registry` and every other importer, and run a
+fresh-process import of `zeta.runtime.execution` and `zeta.tools.registry`.
+Move `headless.py` and `tool_setup.py` next. Move `loop.py` last among runtime
+children, update `runtime.composition` and every other importer, and run a
+fresh-process import of `zeta.runtime.loop`. Only after these checks pass may
+the other loose modules move to the proposed `agent`, `cli`, `config`,
+`media`, `models`, `protocol`, `submission`, and `tui` locations. Keep
+temporary re-export shims for `loop`, `settings`, and `types` until their
+importer counts reach zero. Preserve the `zeta.cli` package exports and
+`zeta.cli:main` entry point.
 
-Risk: import cycles and high fan-out breakage, especially around `types`,
-`loop`, and `settings`.
+Risk: import cycles and high fan-out breakage, especially around the lazy
+runtime initializer, `types`, `loop`, and `settings`.
 
 Verification: import-boundary tests, CLI parser and entry-point tests, all
 agent/runtime/provider/server/TUI suites, package import smoke tests, and the
-full `uv run --frozen pytest -q` suite. Remove a shim only after a repository
-search shows no remaining importer.
+full `uv run --frozen pytest -q` suite. Run the runtime import checks from
+separate Python processes, not only from the warm pytest process. Remove a
+shim only after a repository search shows no remaining importer.
 
 Arc-3 tasks 5-12 are paused pending this reorg. Tasks that add browser
 handlers, including task 12's real Playwright adapter, must use
@@ -869,9 +942,12 @@ This design was reviewed against the ticket requirements before handoff:
   helper patch-seam changes enumerated;
 - `agent_send` registration remains manual and its ordering invariant is
   checked by the parity gate;
-- `agent_send` and `skill` test ownership, including mixed-file splits, is
-  explicit;
-- pytest discovery, src layout, and wheel exclusion mechanics are specified;
+- `agent_send`, `skill`, agent-output, todo, and boundary-test ownership,
+  including mixed-file splits, is explicit;
+- pytest discovery, the shared plugin and its fixtures, src layout, and wheel
+  exclusion mechanics are specified;
+- the runtime initializer is lazy before `execution.py` or `loop.py` moves;
+  the move sequence and fresh-process import checks are explicit;
 - `pkgutil`, the leading-underscore skip, `.agent` sorting, and synchronous
   registration are preserved;
 - migration stages include risks and targeted verification;
