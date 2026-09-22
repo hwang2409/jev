@@ -15,12 +15,13 @@ from jmap.answers import (
     ScoreAnswer,
 )
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
-from jmap.presets import PresetValidationError, resolve_preset
+from jmap.presets import PresetUsageError, PresetValidationError, resolve_preset
 from jmap.runner import (
     FakeJudge,
     Runner,
     State,
     StateAdmission,
+    StateLimits,
     StateRejection,
     admit_states,
 )
@@ -62,9 +63,8 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         calls.append((state_arg, questions_arg, model_arg))
         return FakeJudge()(state_arg, questions_arg, model_arg)
 
-    result = Runner(judge, model="jev-9.9.9").run(
+    result = Runner(judge).run(
         [State("stdin#L1", "launch")],
-        max_chunks=0,
         preset=preset,
         chunker="file",
     )
@@ -78,6 +78,43 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "chunker": "file",
         "cache": "not_applicable",
     }
+
+
+def test_runner_rejects_questions_with_a_preset() -> None:
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    with pytest.raises(PresetUsageError, match="questions"):
+        Runner(judge).run(
+            [State("stdin#L1", "launch")],
+            {"matches": {"type": "noul"}},
+            preset="jgrep",
+        )
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("runner_kwargs", "run_kwargs", "message"),
+    [
+        ({"model": "jev-9.9.9"}, {}, "model"),
+        ({"limits": StateLimits(focus_bytes=1)}, {}, "limits"),
+        ({}, {"preset_version": "2"}, "preset_version"),
+        ({}, {"max_chunks": 1}, "max_chunks"),
+        ({}, {"chunker": "record"}, "incompatible"),
+        ({}, {"chunking": {"by": "line"}}, "chunking"),
+    ],
+)
+def test_runner_rejects_conflicting_loose_preset_values(
+    runner_kwargs, run_kwargs, message
+) -> None:
+    with pytest.raises(PresetUsageError, match=message):
+        Runner(FakeJudge(), **runner_kwargs).run(
+            [State("stdin#L1", "launch")], preset="jgrep", **run_kwargs
+        )
 
 
 def test_invalid_preset_is_validated_before_processing(tmp_path: Path) -> None:
@@ -152,8 +189,7 @@ def test_runner_emits_jsonl_then_terminal_coverage_and_flushes_each_record() -> 
     stdout = FlushCapture()
     result = Runner(FakeJudge()).run_jsonl(
         [State("stdin#L1", "launch")],
-        {"matches": {"type": "noul"}},
-        stdout,
+        stdout=stdout,
         preset="jgrep",
         chunker="para",
     )
@@ -165,6 +201,16 @@ def test_runner_emits_jsonl_then_terminal_coverage_and_flushes_each_record() -> 
     assert stdout.flush_count == 2
 
 
+def test_run_jsonl_rejects_questions_with_a_preset() -> None:
+    with pytest.raises(PresetUsageError, match="questions"):
+        Runner(FakeJudge()).run_jsonl(
+            [State("stdin#L1", "launch")],
+            {"matches": {"type": "noul"}},
+            io.StringIO(),
+            preset="jgrep",
+        )
+
+
 def test_runner_emits_partial_result_and_operational_exit() -> None:
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -173,7 +219,6 @@ def test_runner_emits_partial_result_and_operational_exit() -> None:
         {"matches": {"type": "noul"}, "risk": {"type": "score"}},
         stdout=stdout,
         stderr=stderr,
-        preset="jgrep",
         chunker="para",
     )
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
@@ -197,7 +242,6 @@ def test_runner_emits_exact_partial_json() -> None:
         [State("stdin#L1", "launch")],
         {"matches": {"type": "noul"}, "risk": {"type": "score"}},
         stdout=stdout,
-        preset="jgrep",
         chunker="para",
     )
 
@@ -208,7 +252,7 @@ def test_runner_emits_exact_partial_json() -> None:
             "answers": {"matches": {"type": "noul", "noul": 0.5}},
             "missing_questions": ["risk"],
             "meta": {
-                "preset": "jgrep",
+                "preset": "jmap",
                 "preset_version": "1",
                 "model": "jev-1.13.0",
                 "chunker": "para",
@@ -228,7 +272,7 @@ def test_runner_emits_exact_partial_json() -> None:
             },
             "coverage_reasons": ["partial_answer"],
             "meta": {
-                "preset": "jgrep",
+                "preset": "jmap",
                 "preset_version": "1",
                 "model": "jev-1.13.0",
                 "chunker": "para",
@@ -247,7 +291,6 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
         {"matches": {"type": "noul"}},
         max_chunks=2,
         stdout=stdout,
-        preset="jgrep",
         chunker="para",
     )
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
@@ -272,7 +315,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
             },
         },
         "meta": {
-            "preset": "jgrep",
+            "preset": "jmap",
             "preset_version": "1",
             "model": "jev-1.13.0",
             "chunker": "para",
@@ -434,7 +477,6 @@ def test_runner_keeps_jsonl_on_stdout_and_human_warnings_on_stderr() -> None:
         max_chunks=1,
         stdout=stdout,
         stderr=stderr,
-        preset="jgrep",
         chunker="para",
     )
 
@@ -455,7 +497,6 @@ def test_runner_pretty_output_and_filter_do_not_hide_errors_or_coverage() -> Non
         stderr=stderr,
         output_format="pretty",
         result_filter=lambda record: False,
-        preset="jgrep",
         chunker="para",
     )
 

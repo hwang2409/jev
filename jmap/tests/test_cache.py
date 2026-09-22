@@ -258,7 +258,6 @@ def test_failed_response_is_never_published(tmp_path) -> None:
     runner.run(
         [State("stdin#L1", "focus")],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -275,7 +274,6 @@ def test_partial_response_is_never_published(tmp_path) -> None:
     runner.run(
         [State("stdin#L1", "focus")],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -291,7 +289,6 @@ def test_incomplete_runtime_chunking_cannot_reach_cache(tmp_path) -> None:
         Runner(FakeJudge()).run(
             [State("stdin#L1", "focus")],
             QUESTIONS,
-            preset="jgrep",
             chunker="para",
             cache_store=store,
             chunking={"by": "para", "context_paragraphs": 0},
@@ -310,7 +307,6 @@ def test_implicitly_partial_response_is_never_published(tmp_path) -> None:
         runner.run(
             [State("stdin#L1", "focus")],
             QUESTIONS,
-            preset="jgrep",
             chunker="para",
             cache_store=store,
             chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -337,7 +333,6 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     first = Runner(judge).run(
         [state],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -345,7 +340,6 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     second = Runner(lambda *_: (_ for _ in ()).throw(AssertionError("cache miss"))).run(
         [state],
         QUESTIONS,
-        preset="jgrep",
         chunker="para",
         cache_store=store,
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
