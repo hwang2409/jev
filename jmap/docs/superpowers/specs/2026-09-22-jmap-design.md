@@ -550,6 +550,7 @@ Required fields are `schema`, `name`, `version`, `model`, `chunking`,
 `compatible_chunkers`, `questions`, `thresholds`, and `output`. `model` is a
 pinned resolved version, not an alias. A preset version changes whenever its
 questions, criteria, chunking, thresholds, or output meaning changes.
+Question IDs must not be the reserved policy keywords `any`, `all`, or `not`.
 
 `compatible_chunkers` is a required list whose values come from the `--by`
 vocabulary: `line`, `para`, `hunk`, `file`, and `record`. If `--by` is
