@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import string
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from os import PathLike
 from typing import Any, Protocol, TextIO
@@ -286,6 +288,7 @@ class Runner:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
+        concurrency: int = 1,
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
         policy: str | Policy | None = None,
@@ -293,6 +296,8 @@ class Runner:
     ) -> RunResult:
         if policy is not None and require_states < 0:
             raise PolicyError("require_states must be non-negative")
+        if concurrency <= 0:
+            raise ValueError("concurrency must be a positive integer")
         loaded_preset = self._load_preset(self.preset if preset is None else preset)
         if loaded_preset is None:
             if questions is _UNSET or questions is None:
@@ -388,12 +393,9 @@ class Runner:
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
 
-        def write(record: CanonicalRecord, visible: bool = True) -> None:
-            records.append(record)
-            if stdout is not None and visible:
-                emit_jsonl(record, stdout)
-
-        for state in admission.admitted:
+        def judge_state(
+            state: State,
+        ) -> tuple[TypedResponse, RecordMeta]:
             state_meta = meta
             preimage = None
             if cache_store is not None:
@@ -408,38 +410,55 @@ class Runner:
                 )
                 cached = cache_store.get(cache_key(preimage), runtime_questions)
                 if cached is not None:
-                    response = cached.response
-                    state_meta = RecordMeta(
-                        runtime_name,
-                        runtime_version,
-                        runtime_model,
-                        runtime_chunker,
-                        "hit",
+                    return (
+                        cached.response,
+                        RecordMeta(
+                            runtime_name,
+                            runtime_version,
+                            runtime_model,
+                            runtime_chunker,
+                            "hit",
+                        ),
                     )
-                else:
-                    state_meta = RecordMeta(
-                        runtime_name,
-                        runtime_version,
-                        runtime_model,
-                        runtime_chunker,
-                        "miss",
-                    )
-                    response = None
-            else:
-                response = None
+                state_meta = RecordMeta(
+                    runtime_name,
+                    runtime_version,
+                    runtime_model,
+                    runtime_chunker,
+                    "miss",
+                )
 
-            if response is None:
-                try:
-                    response = self.judge_fn(state, runtime_questions, runtime_model)
-                except Exception:
-                    response = ErrorResponse("request failed")
-                if (
-                    cache_store is not None
-                    and preimage is not None
-                    and isinstance(response, JudgeResponse)
-                    and response.complete
-                ):
-                    cache_store.publish(preimage, response)
+            try:
+                response = self.judge_fn(state, runtime_questions, runtime_model)
+            except Exception:
+                response = ErrorResponse("request failed")
+            if (
+                cache_store is not None
+                and preimage is not None
+                and isinstance(response, JudgeResponse)
+                and response.complete
+            ):
+                cache_store.publish(preimage, response)
+            return response, state_meta
+
+        def write(record: CanonicalRecord, visible: bool = True) -> None:
+            records.append(record)
+            if stdout is not None and visible:
+                emit_jsonl(record, stdout)
+
+        admitted = admission.admitted
+        if concurrency == 1 or len(admitted) <= 1:
+            judged = [judge_state(state) for state in admitted]
+        else:
+            with ThreadPoolExecutor(max_workers=concurrency) as executor:
+                judged = list(executor.map(judge_state, admitted))
+
+        pretty_template = (
+            loaded_preset.data["output"]["pretty_template"]
+            if loaded_preset is not None
+            else None
+        )
+        for state, (response, state_meta) in zip(admitted, judged):
             responses.append(response)
             record = _response_record(state.state_ref, response, state_meta)
             visible = not isinstance(record, ResultRecord) or result_filter is None
@@ -452,7 +471,7 @@ class Runner:
                 and visible
                 and stderr is not None
             ):
-                emit_pretty(record, stderr)
+                emit_pretty(record, stderr, pretty_template)
 
         for record in _rejection_records(admission, meta):
             write(record)
@@ -773,9 +792,34 @@ def emit_jsonl(record: CanonicalRecord, stdout: TextIO) -> None:
     stdout.flush()
 
 
-def emit_pretty(record: ResultRecord, stderr: TextIO) -> None:
-    answers = json.dumps(
-        record.to_dict()["answers"], ensure_ascii=False, sort_keys=True
-    )
-    stderr.write(f"{record.state_ref}\t{answers}\n")
+def emit_pretty(
+    record: ResultRecord, stderr: TextIO, template: str | None = None
+) -> None:
+    if template is None:
+        rendered = json.dumps(
+            record.to_dict()["answers"], ensure_ascii=False, sort_keys=True
+        )
+    else:
+        rendered = _render_pretty_template(record.to_dict(), template)
+    stderr.write(rendered + "\n")
     stderr.flush()
+
+
+def _render_pretty_template(payload: Mapping[str, Any], template: str) -> str:
+    formatter = string.Formatter()
+    output: list[str] = []
+    for literal, field_name, format_spec, conversion in formatter.parse(template):
+        output.append(literal)
+        if field_name is None:
+            continue
+        value: Any = payload
+        for part in field_name.split("."):
+            if not isinstance(value, Mapping) or part not in value:
+                raise ValueError(
+                    f"pretty template references unknown field {field_name!r}"
+                )
+            value = value[part]
+        if conversion:
+            value = formatter.convert_field(value, conversion)
+        output.append(format(value, format_spec))
+    return "".join(output).replace(r"\t", "\t")

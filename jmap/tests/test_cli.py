@@ -5,7 +5,11 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
+
+import pytest
 
 from jmap.answers import JudgeResponse, NoulAnswer
 from jmap.cache import CacheStore
@@ -65,7 +69,171 @@ def test_compatible_by_override_and_filter_keep(tmp_path: Path) -> None:
     assert code == 0
     assert [record["record_type"] for record in records] == ["result", "coverage"]
     assert records[0]["meta"]["chunker"] == "line"
-    assert "stdin#L1" in stderr
+    assert stderr == "stdin#L1\t0.9\n"
+
+
+def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
+    class BlockingStdin:
+        def read(self):
+            raise AssertionError("stdin should not be read")
+
+    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    stderr = io.StringIO()
+    code = main(
+        ["run", "--preset", "jgrep", "--query", "launch"],
+        stdin=BlockingStdin(),
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 2
+    assert "JEV_API_KEY is not set" in stderr.getvalue()
+
+
+def test_jgrep_uses_the_preset_context_paragraph_setting(tmp_path: Path) -> None:
+    states = []
+
+    def judge(state, *_args):
+        states.append(state)
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    code, records, _ = _invoke(
+        ["run", "--preset", "jgrep", "--query", "launch"],
+        input_text="first\n\nsecond\n\nthird\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert len(records) == 4
+    assert [state.context["surrounding"] for state in states] == [[], [], []]
+
+
+@pytest.mark.parametrize(
+    ("argv", "message"),
+    [
+        (["run", "--preset", "jgrep"], "missing required parameter 'query'"),
+        (
+            ["run", "--preset", "jgrep", "--query", "launch", "--predicate", "p"],
+            "unknown parameter 'predicate'",
+        ),
+        (["run", "--preset", "jfilter"], "missing required parameter 'predicate'"),
+        (
+            ["run", "--preset", "jfilter", "--predicate", "p", "--query", "q"],
+            "unknown parameter 'query'",
+        ),
+        (
+            ["run", "--preset", "diff-risk-heat", "--query", "q"],
+            "unknown parameter 'query'",
+        ),
+    ],
+)
+def test_preset_parameters_are_validated_before_processing(argv, message) -> None:
+    stderr = io.StringIO()
+    code = main(
+        argv,
+        stdin=io.StringIO("input\n"),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        judge_fn=_judge,
+    )
+
+    assert code == 64
+    assert message in stderr.getvalue()
+
+
+def test_jgrep_accepts_query_option_without_positional_query(tmp_path: Path) -> None:
+    code, records, _ = _invoke(
+        ["jgrep", "--query", "launch"],
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert records[-1]["record_type"] == "coverage"
+
+
+def test_stdin_invalid_utf8_matches_file_input(tmp_path: Path) -> None:
+    path = tmp_path / "input.txt"
+    raw = b"ok\xff\n"
+    path.write_bytes(raw)
+    stdin = io.TextIOWrapper(io.BytesIO(raw), encoding="utf-8", errors="strict")
+    stdin_states = []
+    file_states = []
+
+    def stdin_judge(state, *_args):
+        stdin_states.append(state)
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    def file_judge(state, *_args):
+        file_states.append(state)
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    assert (
+        main(
+            ["run", "--preset", "jgrep", "--query", "x", "--by", "line"],
+            stdin=stdin,
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            judge_fn=stdin_judge,
+            cache_store=CacheStore(tmp_path / "stdin-cache"),
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "run",
+                "--preset",
+                "jgrep",
+                "--query",
+                "x",
+                "--by",
+                "line",
+                "--input",
+                str(path),
+            ],
+            stdin=io.StringIO(),
+            stdout=io.StringIO(),
+            stderr=io.StringIO(),
+            judge_fn=file_judge,
+            cache_store=CacheStore(tmp_path / "file-cache"),
+        )
+        == 0
+    )
+    assert stdin_states[0].focus == file_states[0].focus == "ok\ufffd"
+
+
+def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) -> None:
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def judge(state, *_args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    code, records, _ = _invoke(
+        ["jgrep", "launch", "--by", "line", "--concurrency", "2"],
+        input_text="one\ntwo\nthree\nfour\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert max_active == 2
+    assert [record["state_ref"] for record in records[:-1]] == [
+        "stdin#L1",
+        "stdin#L2",
+        "stdin#L3",
+        "stdin#L4",
+    ]
 
 
 def test_incompatible_by_is_usage_error_without_coverage() -> None:
@@ -84,6 +252,8 @@ def test_gate_uses_require_states_and_jsonl_stdout() -> None:
             "gate",
             "--preset",
             "jgrep",
+            "--query",
+            "launch",
             "--policy",
             "any(matches_query.noul >= 0.75)",
             "--require-states",

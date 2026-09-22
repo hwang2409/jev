@@ -50,14 +50,14 @@ def _parser() -> argparse.ArgumentParser:
     run.add_argument("paths", nargs="*", help="file paths when --by file is used")
 
     jgrep = commands.add_parser("jgrep", help="run the jgrep preset")
-    jgrep.add_argument("query", help="natural-language query")
+    jgrep.add_argument("query", nargs="?", help="natural-language query")
     jgrep.add_argument("--query", dest="query_option")
     jgrep.set_defaults(short_preset="jgrep")
     _add_judgment_options(jgrep, include_query=False, include_predicate=False)
     jgrep.add_argument("paths", nargs="*", help="file paths when --by file is used")
 
     jfilter = commands.add_parser("jfilter", help="run the jfilter preset")
-    jfilter.add_argument("predicate", help="natural-language predicate")
+    jfilter.add_argument("predicate", nargs="?", help="natural-language predicate")
     jfilter.add_argument("--predicate", dest="predicate_option")
     jfilter.set_defaults(short_preset="jfilter")
     _add_judgment_options(jfilter, include_query=False, include_predicate=False)
@@ -200,21 +200,23 @@ def _judgment_command(
         predicate = predicate_option
 
     effective_preset = _with_max_chunks(preset, args.max_chunks)
+    _validate_preset_parameters(effective_preset, query, predicate)
+    if judge_fn is None and not os.environ.get("JEV_API_KEY"):
+        raise _OperationalError(
+            "JEV_API_KEY is not set; set it before running a judgment command"
+        )
     limits = StateLimits(**effective_preset.chunking["limits"])
     states, rejections = _form_states(
         args,
         stdin,
         by,
         limits,
+        effective_preset.chunking,
         query=query,
         predicate=predicate,
     )
 
     if judge_fn is None:
-        if not os.environ.get("JEV_API_KEY"):
-            raise _OperationalError(
-                "JEV_API_KEY is not set; set it before running a judgment command"
-            )
         client = TypeSafeClient()
         active_judge = client
     else:
@@ -234,6 +236,7 @@ def _judgment_command(
             "result_filter": result_filter,
             "rejections": rejections,
             "cache_store": cache_store or CacheStore(),
+            "concurrency": args.concurrency,
         }
         if args.command == "gate":
             run_kwargs["policy"] = args.policy
@@ -267,6 +270,7 @@ def _form_states(
     stdin: TextIO,
     by: str,
     limits: StateLimits,
+    chunking: Mapping[str, object],
     *,
     query: str | None,
     predicate: str | None,
@@ -290,10 +294,14 @@ def _form_states(
     if args.input is not None:
         value: str | bytes = args.input.read_bytes()
     else:
-        value = stdin.read()
+        value = _read_stdin_bytes(stdin)
     chunk_kwargs: dict[str, object] = {
         "limits": limits,
     }
+    if by == "line":
+        chunk_kwargs["adjacent_lines"] = chunking.get("context_lines", 1)
+    elif by == "para":
+        chunk_kwargs["adjacent_paragraphs"] = chunking.get("context_paragraphs", 1)
     if by == "record":
         chunk_kwargs["state_ref_field"] = args.state_ref
     if by in {"line", "para", "file", "record"}:
@@ -301,6 +309,35 @@ def _form_states(
         chunk_kwargs["predicate"] = predicate
     result = chunk_input(by, value, **chunk_kwargs)
     return result.formed, result.rejections
+
+
+def _read_stdin_bytes(stdin: TextIO) -> str | bytes:
+    binary = getattr(stdin, "buffer", None)
+    return binary.read() if binary is not None else stdin.read()
+
+
+def _validate_preset_parameters(
+    preset: Preset, query: str | None, predicate: str | None
+) -> None:
+    required: set[str] = set()
+    for question in preset.questions.values():
+        for field in question["instructions"]["state_fields"]:
+            if field.startswith("context."):
+                parameter = field.removeprefix("context.")
+                if parameter in {"query", "predicate"}:
+                    required.add(parameter)
+
+    values = {"query": query, "predicate": predicate}
+    for parameter, value in values.items():
+        if value is not None and parameter not in required:
+            raise _UsageError(
+                f"unknown parameter '{parameter}' for preset '{preset.name}'"
+            )
+    for parameter in sorted(required):
+        if values[parameter] is None:
+            raise _UsageError(
+                f"missing required parameter '{parameter}' for preset '{preset.name}'"
+            )
 
 
 def _result_filter(
