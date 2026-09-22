@@ -81,9 +81,13 @@ No co-located test directory gets an `__init__.py`.
 - Run fresh-process import checks. A warm pytest process is not cycle evidence.
 - Compare pre-stage and post-stage collection counts, ordered tool names, and
   ordered schemas.
-- Before each stage, capture its normalized collection listing in
-  `/tmp/reorg-stage<N>-collection-before.txt`. The generated gate diffs it
-  against the post-stage listing and fails on drift.
+- Before each stage, capture its sorted pytest node-id listing in
+  `/tmp/reorg-stage<N>-collection-before.txt`. Keep only node-id lines and
+  diff that listing against the post-stage listing. Ignore summaries, timing,
+  warnings, and other non-node-id output.
+- For targeted behavior parity, record the exact pre-stage failure set. The
+  post-stage gate passes only when the failure set is identical. A new,
+  missing, or changed failure requires investigation.
 - Workers run only the generated targeted tests. The orchestrator runs the
   full harness suite once per PR.
 - Use `uv run --frozen` for pytest commands. Run `uv build` only in stage 3.
@@ -162,14 +166,18 @@ gate runs before and after the task:
   tests/test_browser_prefilter.py)
 ```
 
-The stage-1 structural gate is the cold-import command above, this full
-collection check, and the targeted test command above:
+The stage-1 structural gate is the cold-import command above, the deterministic
+node-id collection check, and the targeted test command above. Record the
+pre-stage targeted failure set. The targeted gate passes only when the
+post-stage failure set matches it exactly:
 
 ```sh
 (cd harness && uv run --frozen pytest --collect-only -q)
 ```
 
-Record the `collected <N> items` line for the pre-stage and post-stage runs.
+Do not compare `collected <N> items` lines or other volatile collection output.
+Compare sorted node-id lines only. Report the exact pre-stage and post-stage
+targeted failure sets.
 
 Also run the current agent, route, and registry tests when those packages
 change. Record collection count, ordered tool names, and ordered schemas.
