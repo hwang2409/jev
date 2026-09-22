@@ -362,6 +362,12 @@ class Runner:
                 )
             runtime_max_chunks = preset_max_chunks
 
+        compiled_policy = None
+        if policy is not None:
+            if loaded_preset is None:
+                raise PresetUsageError("a gate policy requires a preset")
+            compiled_policy = compile_policy(policy, loaded_preset)
+
         if output_format not in {"jsonl", "pretty"}:
             raise ValueError("output format must be jsonl or pretty")
         if not states and not rejections:
@@ -493,10 +499,7 @@ class Runner:
             stderr.flush()
         gate_result = None
         exit_code = 2 if coverage == "partial" else 0
-        if policy is not None:
-            if loaded_preset is None:
-                raise PresetUsageError("a gate policy requires a preset")
-            compiled_policy = compile_policy(policy, loaded_preset)
+        if compiled_policy is not None:
             result_records = tuple(
                 record for record in records if isinstance(record, ResultRecord)
             )

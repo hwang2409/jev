@@ -16,6 +16,7 @@ from jmap.answers import (
     ScoreAnswer,
 )
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
+from jmap.gates import PolicySyntaxError
 from jmap.presets import (
     Preset,
     PresetUsageError,
@@ -153,6 +154,27 @@ def test_runner_gate_honors_custom_required_state_count() -> None:
     assert result.exit_code == 2
     assert result.gate_result is not None
     assert result.gate_result.reason == "too few judged states"
+
+
+def test_runner_validates_policy_before_judging_or_writing() -> None:
+    calls = []
+    stdout = io.StringIO()
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    with pytest.raises(PolicySyntaxError) as error:
+        Runner(judge).run_gate(
+            [State("stdin#L1", "launch")],
+            "any(matches_query.noul >=)",
+            preset="jgrep",
+            stdout=stdout,
+        )
+
+    assert error.value.exit_code == 64
+    assert calls == []
+    assert stdout.getvalue() == ""
 
 
 def test_runner_rejects_questions_with_a_preset() -> None:

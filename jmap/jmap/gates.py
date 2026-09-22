@@ -25,7 +25,7 @@ class PolicyValidationError(PolicyError):
 
 
 LiteralValue = float | int | str | bool
-ComparisonOperator = Literal[">=", ">", "<=", "<", "==", "!=", "in"]
+ComparisonOperator = Literal[">=", ">", "<=", "<", "==", "!="]
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,7 +33,7 @@ class Comparison:
     question_id: str
     answer_field: str
     operator: ComparisonOperator
-    value: LiteralValue | tuple[LiteralValue, ...]
+    value: LiteralValue
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,9 +78,12 @@ _TOKEN = re.compile(
     r"|(?P<number>(?:0|[1-9][0-9]*)(?:\.[0-9]+)?)"
     r"|(?P<string>'(?:\\.|[^'\\])*'|\"(?:\\.|[^\"\\])*\")"
     r"|(?P<operator>>=|<=|==|!=|>|<)"
-    r"|(?P<punct>[().{},])"
+    r"|(?P<punct>[().])"
     r"|(?P<word>[A-Za-z_][A-Za-z0-9_]*)"
 )
+
+# Maximum recursive nesting for `not` and parenthesized predicates.
+MAX_POLICY_DEPTH = 64
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,15 +98,27 @@ def parse_policy(source: str) -> Policy:
         raise PolicySyntaxError("policy must be a non-empty string")
     tokens = _tokenize(source)
     parser = _Parser(tokens, source)
+    if not (parser._peek_word("any") or parser._peek_word("all")):
+        parser._error(
+            "policy must have exactly one outer any(...) or all(...) wrapper"
+        )
+    operator = parser._take().value
+    parser._expect_punct("(")
     expression = parser.parse_expression()
-    parser.expect_end()
-    return Policy(source, expression)
+    parser._expect_punct(")")
+    if parser.index != len(tokens):
+        parser._error(
+            "policy must contain exactly one outer aggregate wrapper",
+            tokens[parser.index],
+        )
+    return Policy(source, Aggregate(operator, expression))  # type: ignore[arg-type]
 
 
 def compile_policy(source: str | Policy, preset: Preset | Mapping[str, Any]) -> Policy:
     policy = parse_policy(source) if isinstance(source, str) else source
     if not isinstance(policy, Policy):
         raise TypeError("policy must be a policy expression or Policy")
+    _validate_policy_shape(policy.expression)
     data = preset.data if isinstance(preset, Preset) else validate_preset(preset)
     _validate_expression(policy.expression, data)
     return policy
@@ -117,6 +132,7 @@ def evaluate_policy(
         policy = parse_policy(policy)
     if not isinstance(policy, Policy):
         raise TypeError("policy must be a policy expression or Policy")
+    _validate_policy_shape(policy.expression)
     return _evaluate(policy.expression, records)
 
 
@@ -150,6 +166,7 @@ class _Parser:
         self.tokens = tokens
         self.source = source
         self.index = 0
+        self.depth = 0
 
     def parse_expression(self) -> Expression:
         return self.parse_or()
@@ -168,20 +185,24 @@ class _Parser:
 
     def parse_not(self) -> Expression:
         if self._accept_word("not"):
-            return Not(self.parse_not())
+            self._enter_depth()
+            try:
+                return Not(self.parse_not())
+            finally:
+                self.depth -= 1
         return self.parse_primary()
 
     def parse_primary(self) -> Expression:
         if self._accept_punct("("):
-            expression = self.parse_expression()
-            self._expect_punct(")")
-            return expression
+            self._enter_depth()
+            try:
+                expression = self.parse_expression()
+                self._expect_punct(")")
+                return expression
+            finally:
+                self.depth -= 1
         if self._peek_word("any") or self._peek_word("all"):
-            operator = self._take().value
-            self._expect_punct("(")
-            expression = self.parse_expression()
-            self._expect_punct(")")
-            return Aggregate(operator, expression)  # type: ignore[arg-type]
+            self._error("aggregate wrappers must be the outer policy expression")
         return self.parse_comparison()
 
     def parse_comparison(self) -> Comparison:
@@ -189,10 +210,7 @@ class _Parser:
         self._expect_punct(".")
         answer_field = self._expect_kind("word").value
         operator_token = self._take()
-        if operator_token.kind == "word" and operator_token.value == "in":
-            operator: ComparisonOperator = "in"
-            value: LiteralValue | tuple[LiteralValue, ...] = self.parse_set()
-        elif operator_token.kind == "operator" and operator_token.value in {
+        if operator_token.kind == "operator" and operator_token.value in {
             ">=",
             ">",
             "<=",
@@ -222,35 +240,6 @@ class _Parser:
         if token.kind == "word" and token.value in {"true", "false"}:
             return token.value == "true"
         self._error("expected a number, quoted string, true, or false", token)
-
-    def parse_set(self) -> tuple[LiteralValue, ...]:
-        self._expect_punct("{")
-        values: list[LiteralValue] = []
-        if self._accept_punct("}"):
-            self._error("membership set must not be empty")
-        while True:
-            token = self._take()
-            if token.kind == "word":
-                values.append(token.value)
-            elif token.kind == "string":
-                try:
-                    value = ast.literal_eval(token.value)
-                except (SyntaxError, ValueError) as exc:
-                    raise PolicySyntaxError(
-                        self._message("invalid quoted string", token)
-                    ) from exc
-                if not isinstance(value, str):
-                    self._error("membership values must be strings", token)
-                values.append(value)
-            else:
-                self._error("membership values must be strings", token)
-            if self._accept_punct("}"):
-                return tuple(values)
-            self._expect_punct(",")
-
-    def expect_end(self) -> None:
-        if self.index != len(self.tokens):
-            self._error("unexpected token", self.tokens[self.index])
 
     def _take(self) -> _Token:
         if self.index == len(self.tokens):
@@ -290,6 +279,11 @@ class _Parser:
             and self.tokens[self.index].kind == "word"
             and self.tokens[self.index].value == value
         )
+
+    def _enter_depth(self) -> None:
+        self.depth += 1
+        if self.depth > MAX_POLICY_DEPTH:
+            self._error(f"policy nesting exceeds maximum depth {MAX_POLICY_DEPTH}")
 
     def _error(self, message: str, token: _Token | None = None) -> None:
         raise PolicySyntaxError(self._message(message, token))
@@ -346,8 +340,7 @@ def _validate_comparison(comparison: Comparison, preset: Mapping[str, Any]) -> N
         _validate_choice_comparison(comparison)
         return
     if (
-        comparison.operator == "in"
-        or isinstance(comparison.value, bool)
+        isinstance(comparison.value, bool)
         or not isinstance(comparison.value, (int, float))
     ):
         raise PolicyValidationError(
@@ -366,18 +359,35 @@ def _validate_comparison(comparison: Comparison, preset: Mapping[str, Any]) -> N
 
 
 def _validate_choice_comparison(comparison: Comparison) -> None:
-    if comparison.operator == "in":
-        if not comparison.value or not all(
-            isinstance(value, str) for value in comparison.value
-        ):
-            raise PolicyValidationError("choice membership requires string values")
-        return
     if comparison.operator not in {"==", "!="} or not isinstance(
         comparison.value, str
     ):
         raise PolicyValidationError(
-            "choice fields support string equality or membership"
+            "choice fields support string equality or inequality"
         )
+
+
+def _validate_policy_shape(expression: Expression) -> None:
+    if not isinstance(expression, Aggregate):
+        raise PolicySyntaxError(
+            "policy must have exactly one outer any(...) or all(...) wrapper"
+        )
+    if _contains_aggregate(expression.expression):
+        raise PolicySyntaxError(
+            "aggregate wrappers must be the outer policy expression"
+        )
+
+
+def _contains_aggregate(expression: Expression) -> bool:
+    if isinstance(expression, Aggregate):
+        return True
+    if isinstance(expression, Not):
+        return _contains_aggregate(expression.expression)
+    if isinstance(expression, Boolean):
+        return _contains_aggregate(expression.left) or _contains_aggregate(
+            expression.right
+        )
+    return False
 
 
 def _evaluate(expression: Expression, records: Sequence[ResultRecord]) -> bool:
@@ -393,8 +403,6 @@ def _evaluate_one(expression: Expression, record: ResultRecord) -> bool:
         if answer is None:
             raise PolicyError(f"missing answer {expression.question_id!r}")
         actual = _answer_value(answer)
-        if expression.operator == "in":
-            return actual in expression.value
         return _compare(actual, expression.operator, expression.value)
     if isinstance(expression, Not):
         return not _evaluate_one(expression.expression, record)

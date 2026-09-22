@@ -6,6 +6,7 @@ import pytest
 
 from jmap.answers import ChoiceAnswer, NoulAnswer, RecordMeta, ResultRecord, ScoreAnswer
 from jmap.gates import (
+    MAX_POLICY_DEPTH,
     Aggregate,
     Boolean,
     GateResult,
@@ -54,12 +55,15 @@ def _record(**answers: object) -> ResultRecord:
 
 
 def test_parser_uses_not_and_and_or_precedence_and_left_associativity() -> None:
-    parsed = parse_policy("not a.noul >= 0.75 and b.noul < 0.75 or c.noul == 0.75")
-    assert isinstance(parsed.expression, Boolean)
-    assert parsed.expression.operator == "or"
-    assert isinstance(parsed.expression.left, Boolean)
-    assert parsed.expression.left.operator == "and"
-    assert isinstance(parsed.expression.left.left, Not)
+    parsed = parse_policy(
+        "any(not a.noul >= 0.75 and b.noul < 0.75 or c.noul == 0.75)"
+    )
+    assert isinstance(parsed.expression, Aggregate)
+    assert isinstance(parsed.expression.expression, Boolean)
+    assert parsed.expression.expression.operator == "or"
+    assert isinstance(parsed.expression.expression.left, Boolean)
+    assert parsed.expression.expression.left.operator == "and"
+    assert isinstance(parsed.expression.expression.left.left, Not)
 
     mixed = parse_policy(
         "any(a.choice == 'true' or b.choice == 'true' and c.choice == 'true')"
@@ -89,6 +93,15 @@ def test_parser_uses_not_and_and_or_precedence_and_left_associativity() -> None:
         ],
     ) is False
 
+    left_associative = parse_policy(
+        "any(a.noul >= 0.75 or b.noul >= 0.75 or c.noul >= 0.75)"
+    )
+    assert isinstance(left_associative.expression, Aggregate)
+    assert isinstance(left_associative.expression.expression, Boolean)
+    assert left_associative.expression.expression.operator == "or"
+    assert isinstance(left_associative.expression.expression.left, Boolean)
+    assert left_associative.expression.expression.left.operator == "or"
+
 
 @pytest.mark.parametrize(
     "source",
@@ -106,13 +119,41 @@ def test_parser_rejects_syntax_outside_the_frozen_grammar(source: str) -> None:
     assert error.value.exit_code == 64
 
 
-def test_parser_accepts_numeric_string_boolean_and_membership_literals() -> None:
-    assert parse_policy("a.noul == 0.75")
-    assert parse_policy("a.choice == 'yes'")
-    assert parse_policy("a.choice == true")
-    parsed = parse_policy("a.choice in {yes, 'maybe'}")
-    comparison = parsed.expression
-    assert comparison.value == ("yes", "maybe")
+def test_parser_accepts_numeric_string_and_boolean_literals() -> None:
+    assert parse_policy("any(a.noul == 0.75)")
+    assert parse_policy("any(a.choice == 'yes')")
+    assert parse_policy("any(a.choice == true)")
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "a.noul >= 0.75",
+        "not any(a.noul >= 0.75)",
+        "any(any(a.noul >= 0.75))",
+        "any(a.noul >= 0.75) and a.noul >= 0.75",
+        "(any(a.noul >= 0.75))",
+    ],
+)
+def test_parser_requires_one_outer_aggregate(source: str) -> None:
+    with pytest.raises(PolicySyntaxError, match="outer|exactly one"):
+        parse_policy(source)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "any(" + "not " * (MAX_POLICY_DEPTH + 1) + "a.noul >= 0.75)",
+        "any("
+        + "(" * (MAX_POLICY_DEPTH + 1)
+        + "a.noul >= 0.75"
+        + ")" * (MAX_POLICY_DEPTH + 1)
+        + ")",
+    ],
+)
+def test_parser_rejects_overdeep_input(source: str) -> None:
+    with pytest.raises(PolicySyntaxError, match="maximum depth"):
+        parse_policy(source)
 
 
 def test_compile_rejects_unknown_fields_cross_type_and_unpinned_thresholds() -> None:
@@ -142,10 +183,10 @@ def test_spec_worked_policy_examples_compile(source: str, preset_name: str) -> N
     assert compile_policy(source, resolve_preset(preset_name)).source == source
 
 
-def test_typed_thresholds_and_choice_membership_evaluate_without_formatting() -> None:
+def test_typed_thresholds_and_choice_equality_evaluate_without_formatting() -> None:
     preset = _choice_preset()
     policy = compile_policy(
-        "any(matches_query.noul >= 0.75 and kind.choice in {yes, maybe})", preset
+        "any(matches_query.noul >= 0.75 and kind.choice == 'yes')", preset
     )
     record = _record(matches_query=NoulAnswer(0.8), kind=ChoiceAnswer("yes"))
     assert evaluate_policy(policy, [record]) is True
@@ -161,14 +202,23 @@ def test_typed_thresholds_and_choice_membership_evaluate_without_formatting() ->
     assert evaluate_policy(score_policy, [score_record]) is True
 
 
-def test_vacuous_any_and_all_and_require_states_fail_closed_by_default() -> None:
-    preset = resolve_preset("jgrep")
-    any_policy = compile_policy("any(matches_query.noul >= 0.75)", preset)
-    all_policy = compile_policy("all(matches_query.noul >= 0.75)", preset)
-    assert evaluate_policy(any_policy, []) is False
-    assert evaluate_policy(all_policy, []) is True
-    assert evaluate_gate(any_policy, []).exit_code == 2
-    assert evaluate_gate(all_policy, [], required_states=0).exit_code == 1
+@pytest.mark.parametrize(
+    ("wrapper", "required_states", "expected_exit"),
+    [("any", 0, 0), ("any", 1, 2), ("all", 0, 1), ("all", 1, 2)],
+)
+def test_vacuous_aggregate_results_respect_required_states(
+    wrapper: str, required_states: int, expected_exit: int
+) -> None:
+    policy = compile_policy(
+        f"{wrapper}(matches_query.noul >= 0.75)", resolve_preset("jgrep")
+    )
+    result = evaluate_gate(policy, [], required_states=required_states)
+    assert result.exit_code == expected_exit
+
+
+def test_choice_threshold_comparison_is_a_policy_type_error() -> None:
+    with pytest.raises(PolicyValidationError, match="choice fields"):
+        compile_policy("any(kind.choice >= 1)", _choice_preset())
 
 
 @pytest.mark.parametrize(
