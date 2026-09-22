@@ -19,26 +19,71 @@ SHELL_TOOLS = frozenset({"bash", "exec", "run_background"})
 _logger = logging.getLogger(__name__)
 
 # Layer 0 is a proof gate. It never tries to enumerate every shell spelling.
-# The table records the only accepted classifications and their evidence.
-#
-#   deny: certain-dangerous evidence; Jev is not consulted.
-#   escalate: the input is not fully analyzable; Jev cannot grant a bypass.
-#   analyzable: every grammar, wrapper, expansion, and path condition passed.
+# The table records every reason returned by layer0_classify and its class.
 _LAYER0_RULES = (
-    ("deny", "privilege_escalation", "sudo, doas, or pkexec"),
+    ("deny", "sudo", "sudo, doas, pkexec, or privileged AppleScript"),
     ("deny", "credential_file_read", "a plausible credential path argument"),
     ("deny", "destructive_system_path", "a destructive target at a system prefix"),
     ("deny", "pipe_to_shell", "a pipeline executes a shell"),
+    ("deny", "root_scope_expansion", "a destructive system-path expansion"),
+    ("deny", "rm_root", "a destructive root target"),
+    (
+        "deny",
+        "recursive_permission_change_outside_cwd",
+        "a recursive permission change outside the workspace",
+    ),
+    ("deny", "history_or_shell_profile_write", "a history or shell profile write"),
+    ("deny", "system_path_redirection", "a redirection target at a system prefix"),
+    ("deny", "system_path_glob", "a resolved glob at a system prefix"),
+    ("deny", "launchctl_load_unload", "launchctl load or unload"),
+    ("deny", "crontab_write", "a crontab file or stdin write"),
+    ("deny", "mount", "the mount command"),
+    ("deny", "iptables", "the iptables command"),
+    ("deny", "chsh", "the chsh command"),
+    ("deny", "process_termination", "broad process termination"),
+    ("deny", "git_config_persistence", "a persistent git config setting"),
     ("escalate", "parse_error", "lexing or the small grammar fails"),
+    ("escalate", "command_substitution", "command substitution appears"),
+    ("escalate", "compound_command", "a compound command appears"),
     ("escalate", "nested_shell", "a shell, interpreter, or shell payload appears"),
     ("escalate", "unresolved_expansion", "a variable or path cannot be resolved"),
+    (
+        "escalate",
+        "destructive_target_unresolved",
+        "a destructive command has no resolved target",
+    ),
+    ("escalate", "rm_unresolved_target", "rm has an unresolved target"),
     (
         "escalate",
         "destructive_target_outside_workspace",
         "a destructive target is not scoped",
     ),
+    (
+        "escalate",
+        "recursive_permission_change_outside_cwd",
+        "a recursive permission change is outside the workspace",
+    ),
+    ("escalate", "root_scope_expansion", "a workspace-scoped expansion is unresolved"),
+    ("escalate", "defaults_write", "defaults write changes persistent settings"),
+    ("escalate", "docker_privileged", "docker run gains host privileges"),
+    ("escalate", "network_upload", "a network command uploads a local file"),
+    ("escalate", "security_password", "security reads a password with -w"),
+    ("escalate", "ssh_host_key_checking", "ssh disables host-key checking"),
+    ("escalate", "systemctl_stop_disable", "systemctl stops or disables a unit"),
+    ("escalate", "route_add", "route add changes network routing"),
     ("analyzable", "", "a simple command or list passed every positive check"),
 )
+_LAYER0_OUTCOMES = frozenset(
+    (classification, reason) for classification, reason, _evidence in _LAYER0_RULES
+)
+
+
+def _layer0_result(classification: str, reason: str | None) -> tuple[str, str | None]:
+    key = (classification, reason or "")
+    if key not in _LAYER0_OUTCOMES:
+        raise RuntimeError(f"undocumented layer-0 outcome: {key}")
+    return classification, reason
+
 
 # ANALYZABLE requires all of the following: clean lexing with this grammar;
 # simple commands joined only by ;, &&, ||, or |; recursively resolved wrappers;
@@ -71,10 +116,11 @@ _SHELL_RESERVED_WORDS = frozenset(
         "while",
     }
 )
-_INTERPRETER_NAMES = frozenset({"awk", "node", "perl", "php", "ruby"})
+_INTERPRETER_NAMES = frozenset({"awk", "node", "osascript", "perl", "php", "ruby"})
 _COMMAND_WRAPPERS = frozenset(
     {"env", "nice", "nohup", "setsid", "stdbuf", "time", "timeout", "command", "xargs"}
 )
+_RUN_WRAPPERS = frozenset({"hatch", "pipenv", "pipx", "poetry", "uv"})
 _LIST_OPERATORS = frozenset({";", "&&", "||", "|"})
 _REDIRECTION_OPERATORS = frozenset({"<", ">", ">>", "<>"})
 _SYNTAX_OPERATORS = frozenset({"&", "(", ")"})
@@ -96,6 +142,7 @@ _SYSTEM_PREFIXES = (
 _DESTRUCTIVE_NAMES = frozenset(
     {"chmod", "chown", "dd", "mkfs", "mv", "rm", "rmdir", "shred", "truncate"}
 )
+_PRIVILEGE_ESCALATORS = frozenset({"doas", "pkexec", "runas", "su", "sudo"})
 _XARGS_OPTION_ARGUMENTS = frozenset(
     {
         "-E",
@@ -110,6 +157,26 @@ _XARGS_OPTION_ARGUMENTS = frozenset(
         "--replace",
         "--eof",
     }
+)
+_CREDENTIAL_NAMES = frozenset(
+    {
+        ".netrc",
+        ".npmrc",
+        ".pgpass",
+        ".pypirc",
+        "authorized_keys",
+        "known_hosts",
+        "logins.json",
+        "shadow",
+        "sudoers",
+    }
+)
+_CREDENTIAL_DIRECTORY_NAMES = frozenset(
+    {".azure", ".docker", ".gcloud", ".gnupg", ".kube"}
+)
+_WRITE_ONLY_CREDENTIAL_NAMES = frozenset({"authorized_keys", "known_hosts"})
+_WRITE_COMMANDS = frozenset(
+    {"cp", "install", "mv", "rsync", "scp", "tee", "touch", "truncate", "write"}
 )
 
 
@@ -340,13 +407,31 @@ def _resolved_argv(segment: tuple[str, ...]) -> tuple[int, str] | None:
                 if word.startswith("-") and word != "-":
                     index += 1
                     continue
-                return _resolved_argv(segment[index:])
+                return _resolved_argv_from(segment, index)
             return (len(segment), "echo")
+        if name in _RUN_WRAPPERS:
+            index += 1
+            while index < len(segment) and segment[index] != "run":
+                index += 1
+            if index >= len(segment):
+                return None
+            return _resolved_argv_from(segment, index + 1)
         if name in _COMMAND_WRAPPERS - {"xargs"}:
             index = _skip_options(segment, index, name)
             continue
         return index, name
     return None
+
+
+def _resolved_argv_from(segment: tuple[str, ...], start: int) -> tuple[int, str] | None:
+    """Resolve a wrapped command while preserving its outer argv index."""
+
+    suffix = segment[start:]
+    resolved = _resolved_argv(suffix)
+    if resolved is None:
+        return None
+    index, name = resolved
+    return start + index, name
 
 
 def _assignment_only(segment: tuple[str, ...]) -> bool:
@@ -373,22 +458,34 @@ def _inside(path_text: str, cwd: Path) -> bool:
 
 def _system_path(text: str, cwd: Path) -> bool:
     raw = text.casefold()
+    normalized_raw = os.path.normpath(raw)
     if raw in {"/", "~"}:
         return True
-    normalized_raw = os.path.normpath(raw)
     if any(
         normalized_raw == prefix or normalized_raw.startswith(f"{prefix}/")
         for prefix in _SYSTEM_PREFIXES
     ):
         return True
-    resolved = str(_path_value(text, cwd)).casefold()
+    resolved_path = _path_value(text, cwd)
+    try:
+        resolved_path.relative_to(cwd)
+    except ValueError:
+        pass
+    else:
+        return False
+    resolved = str(resolved_path).casefold()
+    resolved_prefixes = tuple(
+        str(Path(prefix).resolve()).casefold()
+        for prefix in _SYSTEM_PREFIXES
+        if prefix != "/var"
+    )
     return any(
         resolved == prefix or resolved.startswith(f"{prefix}/")
-        for prefix in _SYSTEM_PREFIXES
+        for prefix in resolved_prefixes
     )
 
 
-def _credential_path(text: str, cwd: Path) -> bool:
+def _credential_path(text: str, cwd: Path, *, write: bool = False) -> bool:
     if text.startswith("-"):
         return False
     value = text.partition("=")[2] if "=" in text else text
@@ -402,8 +499,17 @@ def _credential_path(text: str, cwd: Path) -> bool:
     resolved = _path_value(value, cwd)
     parts = {part.casefold() for part in resolved.parts}
     name = resolved.name.casefold()
+    if name in _WRITE_ONLY_CREDENTIAL_NAMES and not write:
+        return False
+    normalized_value = os.path.normpath(value.casefold())
+    in_sudoers_directory = normalized_value.startswith("/etc/sudoers.d/") or str(
+        resolved
+    ).casefold().startswith("/etc/sudoers.d/")
     return bool(
         {".ssh", ".aws"} & parts
+        or _CREDENTIAL_DIRECTORY_NAMES & parts
+        or name in _CREDENTIAL_NAMES
+        or in_sudoers_directory
         or name.endswith(".pem")
         or "keychain" in name
         or "login.keychain" in name
@@ -447,14 +553,17 @@ def _destructive_reason(
         for argument in arguments
     )
     for target in targets:
-        if target in {"/*", "~/*"}:
+        normalized_target = os.path.normpath(target)
+        if normalized_target in {"/*", "~/*"}:
+            return "deny", "rm_root"
+        if normalized_target in {"/", "~"}:
             return "deny", "rm_root"
         if _GLOB.search(target) and (target.startswith(("/", "~")) or name == "dd"):
             if _system_path(target, cwd):
                 return "deny", "root_scope_expansion"
             return "escalate", "root_scope_expansion"
         if _system_path(target, cwd):
-            if target in {"/", "~"}:
+            if normalized_target in {"/", "~"}:
                 return "deny", "rm_root"
             if recursive_permission:
                 return "deny", "recursive_permission_change_outside_cwd"
@@ -504,11 +613,145 @@ def _credential_reason(parsed: _ParsedShell, cwd: Path) -> str | None:
         index, name = argv
         arguments = segment[index + 1 :]
         git_add = name == "git" and arguments and arguments[0] == "add"
+        writes_paths = name in _WRITE_COMMANDS
         for argument in arguments:
             if git_add and argument.endswith(".pem") and _inside(argument, cwd):
                 continue
-            if _credential_path(argument, cwd):
+            if _credential_path(argument, cwd, write=writes_paths):
                 return "credential_file_read"
+    for operator, target in parsed.redirections:
+        if _credential_path(target, cwd, write=operator in {">", ">>", "<>"}):
+            return "credential_file_read"
+    return None
+
+
+def _network_upload(arguments: tuple[str, ...]) -> bool:
+    for index, argument in enumerate(arguments):
+        if argument in {"-d", "--data", "--data-binary", "-F", "--form"}:
+            if index + 1 >= len(arguments):
+                continue
+            value = arguments[index + 1]
+            if argument in {"-F", "--form"}:
+                if "=@" in value:
+                    return True
+            elif value.startswith("@"):
+                return True
+        if argument.startswith(("-d@", "--data=@", "--data-binary=@")):
+            return True
+        if argument.startswith(("-F", "--form")) and "=@" in argument:
+            return True
+        if argument in {"--upload-file", "--post-file"}:
+            return index + 1 < len(arguments)
+        if argument.startswith(("--upload-file=", "--post-file=")):
+            return True
+    return False
+
+
+def _git_config_sets_persistent_value(arguments: tuple[str, ...]) -> bool:
+    if not arguments or arguments[0] != "config":
+        return False
+    read_options = {
+        "--get",
+        "--get-all",
+        "--get-regexp",
+        "--list",
+        "-l",
+        "--name-only",
+    }
+    if any(argument in read_options for argument in arguments):
+        return False
+    write_options = {"--add", "--replace-all", "--unset", "--unset-all"}
+    has_write_option = any(argument in write_options for argument in arguments)
+    for index, argument in enumerate(arguments[1:], start=1):
+        if argument.startswith("-"):
+            continue
+        key = argument.casefold()
+        if key not in {
+            "core.hookspath",
+            "core.fsmonitor",
+            "core.editor",
+        } and not key.startswith("alias."):
+            continue
+        return has_write_option or index + 1 < len(arguments)
+    return False
+
+
+def _special_shape_reason(parsed: _ParsedShell) -> str | None:
+    for segment in parsed.segments:
+        resolved = _resolved_argv(segment)
+        if resolved is None:
+            continue
+        index, name = resolved
+        arguments = segment[index + 1 :]
+        if name == "launchctl" and any(
+            argument.casefold() in {"load", "unload"} for argument in arguments
+        ):
+            return "launchctl_load_unload"
+        if name == "crontab":
+            option_argument = False
+            for argument in arguments:
+                if option_argument:
+                    option_argument = False
+                    continue
+                if argument in {"-u", "--user"}:
+                    option_argument = True
+                    continue
+                if argument == "-" or not argument.startswith("-"):
+                    return "crontab_write"
+        if name in {"mount", "iptables", "chsh"}:
+            return name
+        if name in {"kill", "killall", "pkill"} and any(
+            argument in {"-1", "."} for argument in arguments
+        ):
+            return "process_termination"
+        if name == "git" and _git_config_sets_persistent_value(arguments):
+            return "git_config_persistence"
+        if name == "defaults" and "write" in {
+            argument.casefold() for argument in arguments
+        }:
+            return "defaults_write"
+        if name == "docker" and "run" in arguments:
+            for argument_index, argument in enumerate(arguments):
+                if argument in {"--privileged", "--net=host", "--network=host"}:
+                    return "docker_privileged"
+                if (
+                    argument in {"--net", "--network"}
+                    and argument_index + 1 < len(arguments)
+                    and arguments[argument_index + 1].casefold() == "host"
+                ):
+                    return "docker_privileged"
+        if name in {"curl", "wget"} and _network_upload(arguments):
+            return "network_upload"
+        if (
+            name == "security"
+            and arguments
+            and arguments[0]
+            in {
+                "find-generic-password",
+                "find-internet-password",
+            }
+            and "-w" in arguments
+        ):
+            return "security_password"
+        if name == "ssh" and any(
+            argument.casefold() == "-ostricthostkeychecking=no"
+            for argument in arguments
+        ):
+            return "ssh_host_key_checking"
+        if name == "ssh":
+            for argument_index, argument in enumerate(arguments[:-1]):
+                if argument == "-o" and arguments[argument_index + 1].casefold() == (
+                    "stricthostkeychecking=no"
+                ):
+                    return "ssh_host_key_checking"
+        if name == "systemctl" and any(
+            argument.casefold() in {"stop", "disable"} for argument in arguments
+        ):
+            return "systemctl_stop_disable"
+        if name == "route" and any(
+            argument.casefold() == "add" for argument in arguments
+        ):
+            return "route_add"
     return None
 
 
@@ -537,13 +780,21 @@ def _shell_reason(parsed: _ParsedShell) -> str | None:
             return "nested_shell"
         if name in _SHELL_RESERVED_WORDS:
             return "nested_shell"
+        if name == "osascript":
+            script = " ".join(segment[_index + 1 :]).casefold()
+            if (
+                "do shell script" in script
+                and "with administrator privileges" in script
+            ):
+                return "sudo"
+            return "nested_shell"
         if (
             name in _SHELL_INTERPRETERS
             or name in _INTERPRETER_NAMES
             or name.startswith("python")
         ):
             return "nested_shell"
-        if name in {"sudo", "doas", "pkexec"}:
+        if name in _PRIVILEGE_ESCALATORS:
             return "sudo"
     return None
 
@@ -564,17 +815,17 @@ def layer0_classify(
             command,
             re.IGNORECASE,
         ):
-            return "deny", "pipe_to_shell"
+            return _layer0_result("deny", "pipe_to_shell")
         if parse_error == "process_substitution":
-            return "escalate", "nested_shell"
-        return "escalate", parse_error or "parse_error"
+            return _layer0_result("escalate", "nested_shell")
+        return _layer0_result("escalate", parse_error or "parse_error")
     raw_shell_reason = _shell_reason(parsed)
     if raw_shell_reason == "sudo":
-        return "deny", "sudo"
+        return _layer0_result("deny", "sudo")
     if raw_shell_reason == "pipe_to_shell":
-        return "deny", raw_shell_reason
+        return _layer0_result("deny", raw_shell_reason)
     if raw_shell_reason is not None:
-        return "escalate", raw_shell_reason
+        return _layer0_result("escalate", raw_shell_reason)
     for segment in parsed.segments:
         resolved = _resolved_argv(segment)
         if resolved is None:
@@ -583,18 +834,20 @@ def layer0_classify(
         if name not in _DESTRUCTIVE_NAMES:
             continue
         for target in _destructive_targets(name, segment[index + 1 :]):
+            if os.path.normpath(target) in {"/", "~", "/*", "~/*"}:
+                return _layer0_result("deny", "rm_root")
             if _system_path(target, cwd_path):
-                if target in {"/", "~", "/*", "~/*"}:
-                    return "deny", "rm_root"
                 if name in {"chmod", "chown"} and any(
                     argument == "--recursive"
                     or (argument.startswith("-") and "R" in argument)
                     for argument in segment[index + 1 :]
                 ):
-                    return "deny", "recursive_permission_change_outside_cwd"
+                    return _layer0_result(
+                        "deny", "recursive_permission_change_outside_cwd"
+                    )
                 if _GLOB.search(target):
-                    return "deny", "root_scope_expansion"
-                return "deny", "destructive_system_path"
+                    return _layer0_result("deny", "root_scope_expansion")
+                return _layer0_result("deny", "destructive_system_path")
     parsed, _resolved_environment, expansion_error = _resolve_segments(
         parsed, environment
     )
@@ -602,33 +855,50 @@ def layer0_classify(
         if expansion_error == "unresolved_expansion" and re.search(
             r"(?:^|[;|&])\s*(?:env\s+)?rm\b", command
         ):
-            return "escalate", "rm_unresolved_target"
-        return "escalate", expansion_error or "unresolved_expansion"
+            return _layer0_result("escalate", "rm_unresolved_target")
+        return _layer0_result("escalate", expansion_error or "unresolved_expansion")
+    special_reason = _special_shape_reason(parsed)
+    if special_reason is not None:
+        return _layer0_result(
+            "deny"
+            if special_reason
+            in {
+                "launchctl_load_unload",
+                "crontab_write",
+                "mount",
+                "iptables",
+                "chsh",
+                "process_termination",
+                "git_config_persistence",
+            }
+            else "escalate",
+            special_reason,
+        )
     shell_reason = _shell_reason(parsed)
     if shell_reason == "sudo":
-        return "deny", "sudo"
+        return _layer0_result("deny", "sudo")
     if shell_reason == "pipe_to_shell":
-        return "deny", shell_reason
+        return _layer0_result("deny", shell_reason)
     if shell_reason is not None:
-        return "escalate", shell_reason
+        return _layer0_result("escalate", shell_reason)
     for segment in parsed.segments:
         resolved = _resolved_argv(segment)
         if resolved is None:
             if _assignment_only(segment):
                 continue
-            return "escalate", "parse_error"
+            return _layer0_result("escalate", "parse_error")
         index, name = resolved
         destructive = _destructive_reason(name, segment[index + 1 :], cwd_path)
         if destructive is not None:
-            return destructive
+            return _layer0_result(*destructive)
     reason = _profile_reason(parsed)
     if reason is not None:
-        return "deny", reason
+        return _layer0_result("deny", reason)
     for _operator, target in parsed.redirections:
         if _system_path(target, cwd_path):
-            return "escalate", "system_path_redirection"
+            return _layer0_result("deny", "system_path_redirection")
         if _GLOB.search(target):
-            return "escalate", "unresolved_expansion"
+            return _layer0_result("escalate", "unresolved_expansion")
     for segment in parsed.segments:
         resolved = _resolved_argv(segment)
         if resolved is None:
@@ -638,11 +908,11 @@ def layer0_classify(
             _GLOB.search(argument) and _system_path(argument, cwd_path)
             for argument in segment[index + 1 :]
         ):
-            return "escalate", "system_path_glob"
+            return _layer0_result("deny", "system_path_glob")
     reason = _credential_reason(parsed, cwd_path)
     if reason is not None:
-        return "deny", reason
-    return "analyzable", None
+        return _layer0_result("deny", reason)
+    return _layer0_result("analyzable", None)
 
 
 def layer0_reason(command: str, cwd: str | Path) -> str | None:
