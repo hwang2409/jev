@@ -307,38 +307,63 @@ contract is limited to built-in tools and external project tools.
 
 ### 3.1 one package per tool
 
-Every registered tool gets this shape:
+Every discovered tool gets one of these shapes:
 
+Simple tool:
 ```text
 tools/<name>/
-  __init__.py       # stable package API and register(registry)
-  impl.py           # current handler logic, moved without behavior changes
+  __init__.py       # implementation, stable API, and register(registry)
   tests/
     test_<name>.py  # tool-private tests after stage 3
 ```
 
-The design recommends a thin `__init__.py` plus `impl.py` for every tool,
-including simple tools such as `read`. This gives every tool the same import
-and discovery shape. It keeps registration separate from handler logic. It
-also leaves room for a private helper module without turning `__init__.py`
-into a second implementation file.
-
-`__init__.py` re-exports names that existing callers use. For example, the
-target shape is:
-
-```python
-from .impl import IMAGE_MAX_BYTES, register, read_file
-
-__all__ = ["IMAGE_MAX_BYTES", "read_file", "register"]
+Multi-module tool:
+```text
+tools/<name>/
+  __init__.py       # stable package API and register(registry)
+  <internal>.py     # only when the tool has multiple real modules
+  tests/
+    test_<name>.py  # tool-private tests after stage 3
 ```
 
-The exact public names come from the current module. The example is
+Simple tools move their current implementation directly into `__init__.py`.
+The reorganization does not add a thin wrapper or a mandatory `impl.py`.
+This preserves existing module-global patch seams, including the seams used
+by calendar, memory, read, write, and exec tests. An internal module appears
+only when the tool genuinely has multiple modules.
+
+For a multi-module tool, `__init__.py` re-exports names that existing callers
+use. For example:
+
+```python
+from .adapter import BrowserTimeoutError
+from .catalog import SnapshotCatalogBuilder
+
+__all__ = ["BrowserTimeoutError", "SnapshotCatalogBuilder", "register"]
+```
+
+The exact public names come from the current modules. The example is
 illustrative. It does not add a new API.
 
 The module-level path `zeta.tools.<name>` remains the package path. Existing
 imports such as `from zeta.tools.exec import run_exec_macro` continue to work
-through re-exports. New tests may import private implementation details from
-`zeta.tools.<name>.impl` only when the test owns that detail.
+because simple tool implementations remain in `__init__.py`.
+
+The only planned tool-internal split is the browser foundation. Its tests
+change `zeta.tools.browser_adapter` imports to
+`zeta.tools.browser.adapter`, and `zeta.tools.browser_catalog` imports to
+`zeta.tools.browser.catalog`. Any monkeypatch target for those old modules
+changes to the matching submodule. The shared `process` and `sandbox` helper
+moves also update every test import: `test_tools.py`, `test_background.py`,
+`test_sandbox.py`, and `test_session_safety.py` use
+`zeta.tools._shared.process` or `zeta.tools._shared.sandbox`.
+
+No patch-seam changes are needed for the simple tools. In particular,
+`test_calendar_tools.py` keeps patching `zeta.tools.calendar`;
+`test_memory_tools.py` keeps patching `zeta.tools.memory`, and
+`test_router_auto.py` keeps importing it; the read, write, and exec imports
+and patch targets in `test_tools.py`, `test_read_images.py`, `test_commands.py`,
+`test_safety.py`, and `test_session_safety.py` remain on their package paths.
 
 ### 3.2 representative before and after layouts
 
@@ -351,7 +376,6 @@ tools/read.py
 after:
 tools/read/
   __init__.py
-  impl.py
   tests/
     test_read.py
 ```
@@ -367,7 +391,6 @@ tools/_sandbox.py
 after:
 tools/bash/
   __init__.py
-  impl.py
   tests/
     test_bash.py
 tools/_shared/
@@ -377,9 +400,9 @@ tools/_shared/
   user_discovery.py
 ```
 
-`bash/impl.py` imports `.._shared.process` and `.._shared.sandbox`.
-`exec/impl.py` uses the same shared modules. The helpers are not copied into
-each tool directory.
+`bash/__init__.py` imports `.._shared.process` and `.._shared.sandbox`.
+`exec/__init__.py` uses the same shared modules. The helpers are not copied
+into each tool directory.
 
 The existing browser foundation:
 
@@ -402,13 +425,15 @@ tools/browser/
     test_prefilter.py
 ```
 
-`tools/browser/__init__.py` will own the future browser `register()` function.
-Until browser handlers exist, it may expose only the foundation types and no
-registration. Arc-3 tasks 5-11 add the handlers under this package. The
-adapter and catalog remain separate modules because they are different seams,
-not one large handler implementation.
+`tools/browser/__init__.py` will own the future browser `register()` function
+and re-export its internal modules. Until browser handlers exist, it may
+expose only the foundation types and no registration. Arc-3 tasks 5-12 add
+the handlers under this package. Task 12, the real Playwright adapter, builds
+in `tools/browser/` with co-located browser tests. The adapter and catalog
+remain separate modules because they are different seams, not one large
+handler implementation.
 
-The other registered tools use the same shape:
+The other registered tools use the simple package shape:
 
 ```text
 agent/         calendar/       edit/       exec/
@@ -417,12 +442,11 @@ skill/         todo/           websearch/ write/
 automation/    zeta_background/
 ```
 
-`agent_send/` remains a separate tool directory. Its package exposes a
-compatibility `register()` wrapper around the current `register_send()` logic.
-`agent.py` stops manually registering it only after the discovery test proves
-that the package registration produces the same registry definition. The
-wrapper keeps `register_send` available for the transition. This is registry
-wiring, not handler behavior.
+`agent_send/` remains a separate support package, but it is not a discovered
+tool package. It keeps its implementation and `register_send()` in
+`__init__.py`. `agent.register()` continues to call `register_send()` after
+registering `agent`, `agent_status`, and `agent_output`. This preserves the
+current registration order without a discovery wrapper.
 
 `plan_mode/` is not a tool. It moves with framework support in stage 2 rather
 than becoming a fake discovered tool.
@@ -608,10 +632,11 @@ Tool-private tests use the public package path when possible:
 from zeta.tools.read import read_file
 ```
 
-They use a package's `impl` path only for a private seam that the test owns:
+Tests use an internal module path only for a private seam that the test owns,
+such as the browser foundation:
 
 ```python
-from zeta.tools.read.impl import _bounded_read
+from zeta.tools.browser.adapter import FakeBrowserAdapter
 ```
 
 Relative imports from co-located tests are not required. This keeps test
@@ -624,6 +649,8 @@ The tool-only portions of the current tests move as follows:
 ```text
 tools/agent/tests/         agent portions of test_agent.py, test_agent_output.py,
                            test_agent_status.py
+tools/agent_send/tests/    agent_send portions of test_agent.py and
+                           test_session_shutdown.py
 tools/automation/tests/    test_automations.py tool portions
 tools/browser/tests/       test_browser_adapter.py, test_browser_catalog.py,
                            test_browser_prefilter.py
@@ -633,6 +660,7 @@ tools/read/tests/          read portions of test_read_images.py and test_tools.p
 tools/todo/tests/          test_todo.py
 tools/websearch/tests/     websearch portions of test_webtools.py
 tools/fetch/tests/         fetch portions of test_webtools.py
+tools/skill/tests/         skill assertions from test_skills.py:77-105
 tools/route/tests/         route-only portions of router tests
 tools/bash/tests/          bash portions of test_tools.py and test_safety.py
 tools/exec/tests/          exec portions of test_tools.py, test_commands.py,
@@ -645,9 +673,16 @@ tools/_shared/tests/       sandbox and process helper portions of test_sandbox.p
 ```
 
 Mixed integration tests stay in `harness/tests`. Examples are loop/router,
-MCP, session lifecycle, TUI, import boundaries, and provider tests. A mixed
-file is split only when that is needed to put tool-private assertions beside
-their owner. Splitting changes file location and imports, not assertions.
+MCP, session lifecycle, TUI, import boundaries, and provider tests. Move
+single-owner files whole, such as `test_agent_output.py`,
+`test_agent_status.py`, and `test_todo.py`. Split mixed files by ownership:
+`test_agent.py` sends its agent assertions to `tools/agent/tests/` and its
+`agent_send` assertions at lines 3159-3317 to `tools/agent_send/tests/`;
+`test_session_shutdown.py` sends its `agent_send` test at line 356 to
+`tools/agent_send/tests/` and keeps shutdown integration in `harness/tests`.
+`test_skills.py` is also split: only lines 77-105 move to
+`tools/skill/tests/`. The other mixed files listed above split by the same
+owner rule. Splitting changes file location and imports, not assertions.
 
 ### 6.3 packaging
 
@@ -676,8 +711,11 @@ The target preserves discovery in these ways:
 2. Each real tool directory has `tools/<name>/__init__.py`. `pkgutil` reports
    it as the name `<name>`, and `importlib.import_module` loads
    `zeta.tools.<name>`.
-3. The package `__init__.py` exposes a synchronous `register(registry)`.
-   The registry calls the same contract as before.
+3. Each discovered tool package `__init__.py` exposes a synchronous
+   `register(registry)`. The registry calls the same contract as before.
+   `agent_send` is the explicit exception: it is a support package without
+   `register()` and is registered by `agent.register()` through
+   `register_send()`.
 4. The `.agent` sort special-case remains unchanged. The discovered name is
    still exactly `zeta.tools.agent`, so the sort key still places it after
    other names.
@@ -691,6 +729,11 @@ The target preserves discovery in these ways:
 7. `test_tool_discovery.py` gains a package fixture. It must prove that a
    directory containing `__init__.py` and `register()` is discovered, that
    `_shared` is ignored, and that the sorted `.agent` special-case remains.
+8. The registration-order invariant is unchanged: `agent.register()` adds
+   `agent`, `agent_status`, `agent_output`, then `agent_send`. Because
+   `ToolRegistry.schemas` preserves insertion order, the parity gate records
+   ordered tool names and ordered schemas. It compares both lists before and
+   after each stage and fails if this sequence or any later entry changes.
 
 The external user-tool loader is separate. It still loads a user file and
 requires its own callable `register(registry)`. Moving the internal helper to
@@ -706,11 +749,20 @@ configuration change.
 
 ### stage 1: convert registered tool modules to packages
 
-Convert the 13 single-file registered tools to directories with thin
-`__init__.py` files and `impl.py` implementations. Move the browser foundation
-to `tools/browser/`. Keep tests in `harness/tests` for this stage, updating
-only imports that must change for browser and package internals. Preserve
-public imports with re-exports.
+Convert the 13 single-file registered tools to directories, moving each
+implementation directly into `__init__.py`. Use internal modules only for
+tools with multiple real modules. Move the browser foundation to
+`tools/browser/`. Keep tests in `harness/tests` for this stage, updating only
+imports that must change for browser and shared helper internals.
+
+The four existing package directories are covered explicitly. `automation/`
+and `zeta_background/` already conform: their implementation and
+`register()` are in `__init__.py`, so stage 1 verifies and keeps that shape.
+`agent_send/` keeps its implementation and `register_send()` in `__init__.py`
+but remains the non-discovered registration exception; stage 2 verifies its
+order-preserving call from `agent.register()`. `plan_mode/` is framework
+support, not a registered tool; stage 2 moves it to `zeta.agent.plan_mode`
+without applying the discovered-tool shape.
 
 Risk: a missing re-export or a package whose `register()` is not visible will
 change tool discovery or break private test imports.
@@ -725,8 +777,9 @@ before and after.
 Create `tools/_shared/`, move the three shared helpers, and update all source
 and test imports. Move agent presets and plan mode to `zeta.agent`; move tool
 setup to `zeta.runtime.tool_setup`. Keep `registry.py` at
-`zeta.tools.registry`. Normalize `agent_send` with a `register()` wrapper only
-after its registry output matches the current explicit registration.
+`zeta.tools.registry`. Keep `agent_send` out of discovery and retain the
+explicit `agent.register()` call to `register_send()` after the other agent
+tools.
 
 Risk: relative import depth, circular imports, and accidental discovery of
 support files.
@@ -766,16 +819,17 @@ agent/runtime/provider/server/TUI suites, package import smoke tests, and the
 full `uv run --frozen pytest -q` suite. Remove a shim only after a repository
 search shows no remaining importer.
 
-Arc-3 tasks 5-11 are paused pending this reorg. Tasks that add browser
-handlers must use `tools/browser/`, its package `register()` contract, and
-co-located browser tests. Do not resume those tasks against the old flat
+Arc-3 tasks 5-12 are paused pending this reorg. Tasks that add browser
+handlers, including task 12's real Playwright adapter, must use
+`tools/browser/`, its package `register()` contract, and co-located browser
+tests. Do not resume those tasks against the old flat
 `browser_adapter.py` and `browser_catalog.py` paths.
 
 ## 9. risks, rollback, and parity gate
 
 Primary risks are:
 
-- a tool package imports the wrong `impl` path and fails during discovery;
+- a tool package imports the wrong internal module and fails during discovery;
 - a support package is discovered as a tool or a real tool lacks `register()`;
 - re-export omissions break private consumers or monkeypatch string targets;
 - `types`, `loop`, or `settings` create a cycle after grouping;
@@ -791,8 +845,8 @@ format changes are part of this reorg. A rollback must leave the old
 The explicit behavior-parity gate is:
 
 ```text
-before stage: targeted suite is green; record collected test count and tool schemas
-after stage: the same targeted suite is green; compare collected count and schemas
+before stage: targeted suite is green; record collected test count, ordered tool names, and ordered schemas
+after stage: the same targeted suite is green; compare counts, names, and schemas in order
 stage exit: full targeted harness suite is green; no test assertion changed
 ```
 
@@ -808,7 +862,15 @@ This design was reviewed against the ticket requirements before handoff:
 - source and test import coupling is mapped with distinct importer counts;
 - existing package-directory behavior and the `register()` exceptions are
   recorded;
-- browser foundation placement and arc-3 pause are explicit;
+- browser foundation placement and the arc-3 task 5-12 pause are explicit;
+- the real Playwright adapter is assigned to `tools/browser/` with co-located
+  tests;
+- simple tools keep implementation in `__init__.py`, with browser and shared
+  helper patch-seam changes enumerated;
+- `agent_send` registration remains manual and its ordering invariant is
+  checked by the parity gate;
+- `agent_send` and `skill` test ownership, including mixed-file splits, is
+  explicit;
 - pytest discovery, src layout, and wheel exclusion mechanics are specified;
 - `pkgutil`, the leading-underscore skip, `.agent` sorting, and synchronous
   registration are preserved;
