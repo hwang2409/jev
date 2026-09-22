@@ -32,6 +32,7 @@ from ..core.approval import (
     ApprovalRequest,
 )
 from ..core.approval import canceled_result as _canceled_result
+from ..core.safety import SafetyTier
 from ..core.store import ConversationStore
 from ..execution import (
     ToolExecutionContext,
@@ -422,6 +423,7 @@ class ToolRegistry:
         memory_config: str | None = None,
         register_builtin: bool = True,
         enforce_approvals: bool = False,
+        safety_tier: SafetyTier | None = None,
         skill_catalog: SkillCatalog,
         agent_catalog: AgentCatalog | None = None,
     ) -> None:
@@ -460,7 +462,10 @@ class ToolRegistry:
             self.abort_signal = abort_signal
             self._abort_registry = abort_signal.registry
         self.approval_policy = approval_policy
-        self._approval_gate = ApprovalGate(self.approval_policy, self.pre_execute_hook)
+        self.safety_tier = safety_tier
+        self._approval_gate = ApprovalGate(
+            self.approval_policy, self.pre_execute_hook, self.safety_tier
+        )
         if self.approval_policy is not None and approval_store is not None:
             self.approval_policy.bind_store(approval_store)
         self.max_output_chars = max_output_chars
@@ -611,9 +616,17 @@ class ToolRegistry:
         )
         clone.bash_cwd = store.bash_cwd
         clone.abort_signal = clone._abort_registry.new_generation()
+        if self.safety_tier is not None:
+            clone.safety_tier = SafetyTier(
+                cwd=clone.cwd,
+                headless=self.safety_tier.headless,
+                task_excerpt=self.safety_tier.task_excerpt,
+                telemetry=self.safety_tier.telemetry,
+            )
         clone._approval_gate = ApprovalGate(
             clone.approval_policy,
             clone.pre_execute_hook,
+            clone.safety_tier,
         )
         clone._agent_runner = None
         clone.agent_catalog = self.agent_catalog
@@ -694,6 +707,23 @@ class ToolRegistry:
                 {name: tool.approval_subject for name, tool in self._tools.items()}
             )
 
+    def set_safety_task_excerpt(self, task_excerpt: str) -> None:
+        if self.safety_tier is not None:
+            self.safety_tier.set_task_excerpt(task_excerpt)
+
+    def set_safety_headless(self, headless: bool) -> None:
+        if self.safety_tier is not None:
+            self.safety_tier.set_headless(headless)
+
+    def _safety_cwd(self, tool_name: str, arguments: dict[str, object]) -> str:
+        if self.safety_tier is None:
+            return str(self.cwd)
+        if tool_name == "bash" and not arguments.get("cwd"):
+            base_cwd = self.bash_cwd
+        else:
+            base_cwd = str(self.cwd)
+        return self.safety_tier.command_cwd(arguments, base_cwd=base_cwd)
+
     def prepare_approval(self, tool_call: ToolCall) -> ApprovalRequest | None:
         if self.approval_policy is None:
             return None
@@ -773,6 +803,12 @@ class ToolRegistry:
             )
             if abort_result is not None:
                 return finalize(abort_result)
+        safety_cwd = (
+            self._safety_cwd(tool_call.name, arguments)
+            if self.safety_tier is not None
+            and self.safety_tier.applies(tool_call.name)
+            else None
+        )
         gate_result, execution_signal = await self._approval_gate.run(
             tool_call,
             arguments,
@@ -784,6 +820,7 @@ class ToolRegistry:
                 and (_skip_approval or not definition.requires_approval)
             ),
             persist_request=_persist_approval,
+            safety_cwd=safety_cwd,
         )
         if gate_result is not None:
             denied = gate_result.content == "tool execution denied"

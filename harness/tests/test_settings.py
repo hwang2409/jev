@@ -55,6 +55,27 @@ def test_memory_injection_defaults_off_and_cli_can_enable() -> None:
     assert enabled.memory_injection is True
 
 
+def test_safety_tier_defaults_off_and_cli_can_enable() -> None:
+    default = resolve(
+        Settings(),
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+    )
+    enabled = resolve(
+        Settings(),
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+        cli_safety_tier=True,
+    )
+
+    assert default.safety_tier is False
+    assert enabled.safety_tier is True
+
+
 def test_global_and_project_merge_with_project_wins(tmp_path: Path) -> None:
     home = tmp_path / "home"
     project = tmp_path / "project"

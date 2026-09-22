@@ -11,6 +11,7 @@ from typing import Any
 from ..core.approval import ApprovalDecision, ApprovalPolicy
 from ..core.hooks import load_hooks_for_provider
 from ..core.project_context import ProjectContext, discover_repo_root
+from ..core.safety import SafetyTier
 from ..core.session import OpenedSession, SessionManager
 from ..core.slash import resolve_session_budget
 from ..loop import AgentLoop
@@ -111,11 +112,13 @@ def compose_runtime(
         completion_callback = on_completion_success or (lambda: manager.touch(metadata))
         policy = ApprovalPolicy(
             store=opened.store,
-            default=metadata.approval_mode or (ApprovalDecision.ALLOW if config.yolo else ApprovalDecision.ASK),
+            default=metadata.approval_mode
+            or (ApprovalDecision.ALLOW if config.yolo else ApprovalDecision.ASK),
             always_allow=config.approval_allow,
             always_deny=config.approval_deny,
             always_ask=config.approval_ask,
         )
+
         loop_kwargs: dict[str, Any] = {
             "approval_policy": policy,
             "hooks": load_hooks_for_provider(home, provider),
@@ -131,9 +134,15 @@ def compose_runtime(
         }
         if max_turns is not None and max_turns > 0:
             loop_kwargs["max_turns"] = max_turns
+        safety_tier = (
+            SafetyTier(cwd=opened.store.cwd)
+            if config.safety_tier and config.yolo
+            else None
+        )
         registry = ToolRegistry(
             opened.store.cwd,
             memory_config=config.memory_config,
+            safety_tier=safety_tier,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
@@ -145,6 +154,8 @@ def compose_runtime(
             skill_catalog=skill_catalog,
             **loop_kwargs,
         )
+        if safety_tier is not None:
+            safety_tier.set_telemetry(loop.publish_usage_event)
         if metadata.plan_mode:
             loop.set_plan_mode(True)
         repo_root = discover_repo_root(Path(metadata.cwd))

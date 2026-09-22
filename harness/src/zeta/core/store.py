@@ -574,6 +574,9 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                         raise ValueError(
                             "approval request tool_call must be an object"
                         )
+                    label = request.get("label")
+                    if label is not None and type(label) is not str:
+                        raise ValueError("approval request label must be a string")
                     parsed_tool_call = ToolCall.from_dict(tool_call)
                     anchored_call = next(
                         (
@@ -950,7 +953,9 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
     def append_message_with_approval_requests(
         self,
         message: Message,
-        approval_requests: Iterable[tuple[str, ToolCall]] = (),
+        approval_requests: Iterable[
+            tuple[str, ToolCall] | tuple[str, ToolCall, str | None]
+        ] = (),
         *,
         parent_id: str | None = None,
     ) -> ConversationEntry:
@@ -961,9 +966,18 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
             for block in message.content
             if isinstance(block, ToolUseContent)
         }
-        for request_id, tool_call in approval_requests:
+        for request in approval_requests:
+            if len(request) == 2:
+                request_id, tool_call = request
+                label = None
+            elif len(request) == 3:
+                request_id, tool_call, label = request
+            else:
+                raise ValueError("approval request must contain two or three fields")
             if type(request_id) is not str or not request_id:
                 raise ValueError("approval request id must be a nonempty string")
+            if label is not None and type(label) is not str:
+                raise ValueError("approval request label must be a string")
             normalized_tool_call = ToolCall.from_dict(tool_call.to_dict())
             if request_id in request_ids:
                 raise ValueError(f"duplicate approval request: {request_id}")
@@ -972,12 +986,13 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                     "approval request must match an anchored tool call"
                 )
             request_ids.add(request_id)
-            request_data.append(
-                {
-                    "request_id": request_id,
-                    "tool_call": normalized_tool_call.to_dict(),
-                }
-            )
+            request_entry = {
+                "request_id": request_id,
+                "tool_call": normalized_tool_call.to_dict(),
+            }
+            if label is not None:
+                request_entry["label"] = label
+            request_data.append(request_entry)
         data: dict[str, Any] = {"message": message.to_dict()}
         if request_data:
             data["approval_requests"] = request_data
@@ -1028,6 +1043,10 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
                 if existing_request["tool_call"] != request["tool_call"]:
                     raise ConversationIntegrityError(
                         f"approval request tool call mismatch: {request['request_id']}"
+                    )
+                if existing_request.get("label") != request.get("label"):
+                    raise ConversationIntegrityError(
+                        f"approval request label mismatch: {request['request_id']}"
                     )
             append_data = copy.deepcopy(data)
             if missing_requests:
@@ -1197,6 +1216,17 @@ class ConversationStore(AgentStateMixin, CheckpointForkMixin):
             for request_id, (tool_call, decision) in self.approval_states().items()
             if decision is None
         ]
+
+    def approval_labels(self) -> dict[str, str]:
+        labels: dict[str, str] = {}
+        for entry in self.replay():
+            if entry.type != "message":
+                continue
+            for request in entry.data.get("approval_requests", []):
+                label = request.get("label")
+                if isinstance(label, str):
+                    labels[request["request_id"]] = label
+        return labels
 
     def compaction_marker_count(self) -> int:
         return sum(entry.type == "compaction" for entry in self.replay())
