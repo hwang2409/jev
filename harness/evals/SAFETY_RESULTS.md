@@ -66,3 +66,9 @@ most-benign `SafetyScoreResult`. dangerous rows must still stop at layer 0.
 it does not run the full agent-loop live smoke. that path needs a real
 `ANTHROPIC_API_KEY` and remains pending Henry. the default eval never calls
 the network and never executes a corpus command.
+
+the corpus is a regression guard, not an independent adversarial dataset. its
+rows are derived from the JEV-54 safety-tier test suite and the six review-round
+verdicts (`source` values `round1`..`round6`), so the categories map 1:1 to the
+shell shapes layer 0 already handles. recall = 1.0 confirms the merged classifier
+still covers every known shape; it is not a discovery of new coverage.
