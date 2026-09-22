@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..agent_presets import PLAN_PRESET
+from ..presets import PLAN_PRESET
 
 # Plan mode and the plan sub-agent mean the same thing by "read-only", so they
 # share one definition rather than keeping two that can drift apart.

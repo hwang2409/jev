@@ -67,12 +67,12 @@ from .skills import SkillCatalog
 from .skills.agent_catalog import AgentCatalog
 from .tools import ToolHandler, ToolRegistry, ToolStreamPublisher
 from .tools.agent import MAX_AGENT_RESULT_BYTES, agent_result
-from .tools.agent_presets import (
+from .agent.presets import (
     compose_system_prompt,
 )
-from .tools.loop_setup import select_tool_registry
+from .runtime.tool_setup import select_tool_registry
 from .tools.memory import _memory_search
-from .tools.plan_mode import (
+from .agent.plan_mode import (
     PLAN_MODE_PREAMBLE,
     PLAN_MODE_TOOLS,
 )

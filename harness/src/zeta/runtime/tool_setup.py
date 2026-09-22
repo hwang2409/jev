@@ -8,7 +8,7 @@ from ..core.store import ConversationStore
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
 from ..types import ToolSchema
-from .registry import ToolHandler, ToolRegistry
+from ..tools.registry import ToolHandler, ToolRegistry
 
 
 def select_tool_registry(

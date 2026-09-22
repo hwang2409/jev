@@ -7,7 +7,7 @@ import os
 from typing import TypedDict
 
 from ...types import StructuredToolResult
-from .._sandbox import _path_from_fd, open_target
+from .._shared.sandbox import _path_from_fd, open_target
 from ..registry import (
     AbortSignal,
     ToolRegistry,

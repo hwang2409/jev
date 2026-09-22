@@ -18,7 +18,7 @@ from ..loop import AgentLoop
 from ..settings import ResolvedConfig
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
-from ..tools._user_discovery import ExternalToolDiscovery, apply_external_tools
+from ..tools._shared.user_discovery import ExternalToolDiscovery, apply_external_tools
 from ..tools.registry import ToolRegistry
 from ..types import CompletionBackend, StreamEvent
 

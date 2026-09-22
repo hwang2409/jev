@@ -25,7 +25,7 @@ from zeta.mcp import MCPMount
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.tools.agent import ChildApprovalPolicy, send_to_run
-from zeta.tools.agent_presets import (
+from zeta.agent.presets import (
     AGENT_PRESETS,
     GENERAL_PRESET,
 )
@@ -2849,7 +2849,7 @@ async def test_max_turns_bounded_by_hard_cap_constant() -> None:
 
     assert type(MAX_AGENT_TURN_CAP) is int
     assert MAX_AGENT_TURN_CAP >= 100
-    from zeta.tools.agent_presets import AGENT_PRESETS
+    from zeta.agent.presets import AGENT_PRESETS
 
     assert MAX_AGENT_TURN_CAP >= max(
         preset.turn_cap for preset in AGENT_PRESETS.values()
@@ -2919,7 +2919,7 @@ class _RunCommands(AgentRunCommandMixin):
 
 
 def test_run_preset_is_registered_with_a_long_cap(tmp_path: Path) -> None:
-    from zeta.tools.agent_presets import AGENT_PRESETS, RUN_PRESET
+    from zeta.agent.presets import AGENT_PRESETS, RUN_PRESET
 
     assert RUN_PRESET.turn_cap == 150
     assert RUN_PRESET.tool_names is None

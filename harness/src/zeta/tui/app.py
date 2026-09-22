@@ -44,7 +44,7 @@ from ..settings import (
     load_settings,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_settings
 )
 from ..submission_pipeline import SubmissionPipeline
-from ..tools._user_discovery import ExternalToolDiscovery
+from ..tools._shared.user_discovery import ExternalToolDiscovery
 from ..tools.exec import trusted_macro_display
 from ..types import (
     CompletionBackend,

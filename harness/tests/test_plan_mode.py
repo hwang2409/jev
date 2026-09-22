@@ -16,7 +16,7 @@ from zeta.core.store import ConversationStore
 from zeta.loop import AgentLoop
 from zeta.mcp.prompt_commands import SlashModelInput
 from zeta.skills import SkillCatalog
-from zeta.tools.plan_mode import PLAN_MODE_PREAMBLE, PLAN_MODE_TOOLS
+from zeta.agent.plan_mode import PLAN_MODE_PREAMBLE, PLAN_MODE_TOOLS
 from zeta.tui.app import create_app
 from zeta.tui.render import format_status
 from zeta.types import StreamEvent, TextContent, ToolCall
