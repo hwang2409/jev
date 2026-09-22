@@ -153,9 +153,9 @@ zeta.tools.agent               agent_runner.py, loop.py, tui/agent_card.py  test
                                (3)                                           test_agent_status.py, test_automations.py,
                                                                             test_session.py, test_session_resilience.py,
                                                                             test_session_safety.py (7)
-zeta.tools.agent_presets       agent_runner.py, loop.py, skills/agent_catalog.py, test_agent.py (1)
+zeta.tools.agent_presets       agent_runner.py, loop.py, skills/agent_catalog.py,
                                tools/agent.py, tools/plan_mode/__init__.py,
-                               tui/agent_card.py (6)
+                               tui/agent_card.py (6)                        test_agent.py (1)
 zeta.tools.bash                dynamic discovery only (0)                  none (0)
 zeta.tools.browser_adapter     tools/browser_catalog.py (1)                test_browser_adapter.py, test_browser_catalog.py (2)
 zeta.tools.browser_catalog     none (0)                                     test_browser_catalog.py, test_browser_prefilter.py (2)
@@ -164,25 +164,40 @@ zeta.tools.edit                dynamic discovery only (0)                  none 
 zeta.tools.exec                submission_pipeline.py, tui/app.py,         test_commands.py, test_safety.py,
                                tui/render.py, tui/slash_handlers/           test_session_safety.py, test_tools.py (4)
                                command_runtime.py (4)
-zeta.tools.fetch               tools/websearch.py (1)                      none (0)
+zeta.tools.fetch               tools/websearch.py (1)                      test_webtools.py (1)
 zeta.tools.loop_setup          loop.py (1)                                  none (0)
-zeta.tools.memory             loop.py, tools/route.py (2)                  test_router_auto.py (1)
+zeta.tools.memory              loop.py, tools/route.py (2)                  test_memory_tools.py, test_router_auto.py (2)
 zeta.tools.read                none (0)                                     test_read_images.py, test_sandbox.py, test_tools.py (3)
 zeta.tools.registry            27 source files; see the full list below    test_calendar_tools.py, test_evals.py,
                                                                             test_router_auto.py, test_router_mode.py,
                                                                             test_tool_ergonomics.py,
                                                                             test_tool_result_shape.py (6)
-zeta.tools.route                loop.py (1)                                  test_memory_tools.py, test_router_auto.py,
-                                                                            test_router_mode.py (3)
+zeta.tools.route                loop.py (1)                                  test_evals.py, test_memory_tools.py,
+                                                                            test_router_auto.py, test_router_mode.py (4)
 zeta.tools.skill               dynamic discovery only (0)                  none (0)
-zeta.tools.todo                dynamic discovery only (0)                  none (0)
-zeta.tools.websearch           dynamic discovery only (0)                  none (0)
+zeta.tools.todo                 dynamic discovery only (0)                  test_todo.py (1)
+zeta.tools.websearch            dynamic discovery only (0)                  test_webtools.py (1)
 zeta.tools.write               none (0)                                     test_tools.py (1)
 zeta.tools.agent_send          tools/agent.py (1)                           test_agent.py, test_session_shutdown.py (2)
 zeta.tools.automation          dynamic discovery only (0)                  none (0)
 zeta.tools.plan_mode           loop.py (1)                                  test_plan_mode.py (1)
 zeta.tools.zeta_background     dynamic discovery only (0)                  none (0)
 ```
+
+Rebuild this inventory at implementation time with these exact searches:
+
+```sh
+rg -n --glob '*.py' 'from zeta\.|import zeta\.|from zeta\.tools\.' harness/src harness/tests
+rg -n --glob '*.py' '^\s*(from|import) ' harness/src harness/tests
+rg -n --glob '*.py' 'from zeta import ' harness/src harness/tests
+```
+
+Count each distinct importer file after resolving relative imports and
+`from zeta import <module>` aliases to the module they import. The first
+search covers dotted absolute importers. The second search covers relative
+source imports and verifies the complete import surface. The third search
+covers root-package aliases, including `agent_runner` and `session_cli`.
+Update this table from the output, not from memory or a prior table.
 
 The registry source importer list is:
 
@@ -224,8 +239,16 @@ agent_budget         zeta.agent.budget             agent_runner.py, loop.py (2) 
 agent_receipt        zeta.agent.receipt            agent_background.py, agent_runner.py,             test_agent_output.py, test_tool_ergonomics.py (2)
                                                      core/store.py, loop.py, tools/agent.py,
                                                      tui/agent_card.py, tui/render.py (7)
-agent_runner         zeta.agent.runner             loop.py (1)                                        test_agent.py (1)
-cli                  zeta.cli.main                tui/__init__.py, tui/app.py (2)                   17 test files
+agent_runner         zeta.agent.runner             loop.py (1)                                        test_agent.py, test_agents.py (2)
+cli                  zeta.cli.main                tui/__init__.py, tui/app.py (2)                   test_automations.py, test_cli.py,
+                                                                                                      test_headless.py, test_hooks.py,
+                                                                                                      test_jev_compaction.py, test_login.py,
+                                                                                                      test_plan_mode.py, test_project_context.py,
+                                                                                                      test_router_mode.py, test_safety.py,
+                                                                                                      test_server.py, test_session.py,
+                                                                                                      test_session_lifecycle.py, test_session_safety.py,
+                                                                                                      test_session_shutdown.py, test_settings.py,
+                                                                                                      test_tui.py (17)
 execution            zeta.runtime.execution       tools/memory.py, tools/registry.py,               test_agent.py (1)
                                                      tools/route.py (3)
 headless             zeta.runtime.headless        cli.py (1)                                         test_headless.py, test_session_shutdown.py,
@@ -233,16 +256,31 @@ headless             zeta.runtime.headless        cli.py (1)                    
 images               zeta.media.images            providers/anthropic_payload.py,                   test_anthropic.py, test_read_images.py (2)
                                                      providers/codex_payload.py, server/ergonomics.py,
                                                      tools/read.py, tui/composer.py, types.py (6)
-loop                 zeta.runtime.loop            zeta/__init__.py, agent_runner.py, core/loop.py,   31 test files
+loop                 zeta.runtime.loop            zeta/__init__.py, agent_runner.py, core/loop.py,
                                                      runtime/cleanup.py, runtime/composition.py,
                                                      runtime/driver.py, runtime/unattended.py,
-                                                     server/runtime.py, tui/app.py (9)
+                                                     server/runtime.py, tui/app.py (9)                conftest.py, test_agent.py,
+                                                                                                      test_agent_output.py, test_agent_status.py,
+                                                                                                      test_agents.py, test_anthropic.py,
+                                                                                                      test_checkpoint.py, test_codex.py,
+                                                                                                      test_command_menu.py, test_commands.py,
+                                                                                                      test_evals.py, test_headless.py,
+                                                                                                      test_jev_compaction.py, test_loop.py,
+                                                                                                      test_mcp.py, test_mcp_oauth.py,
+                                                                                                      test_model_picker.py, test_plan_mode.py,
+                                                                                                      test_read_images.py, test_router_auto.py,
+                                                                                                      test_router_mode.py, test_selection.py,
+                                                                                                      test_server.py, test_session_shutdown.py,
+                                                                                                      test_slash.py, test_stream_watchdog.py,
+                                                                                                      test_theme_and_keys.py, test_todo.py,
+                                                                                                      test_tree.py, test_user_tool_discovery.py,
+                                                                                                      test_workspace_snapshots.py (31)
 model_catalog        zeta.models.catalog          agent_runner.py, providers/__init__.py,             test_agent.py, test_model_picker.py,
                                                      providers/factory.py, server/ergonomics.py,       test_server.py (3)
                                                      server/model_selection.py, skills/agent_catalog.py,
                                                      tools/agent.py, tui/models.py (8)
 persistence          zeta.tui.persistence          tui/app.py (1)                                     test_session_safety.py, test_tui.py (2)
-session_cli          zeta.cli.session             cli.py (1)                                          none (0)
+session_cli          zeta.cli.session             cli.py (1)                                          test_session_resilience.py (1)
 settings             zeta.config.settings         automations/authoring.py, runtime/composition.py,   test_jev_compaction.py, test_memory_tools.py,
                                                      runtime/unattended.py, server/runtime.py,         test_router_mode.py, test_safety.py,
                                                      tui/app.py, tui/bootstrap.py (6)                  test_settings.py, test_stream_watchdog.py (6)
@@ -400,9 +438,24 @@ tools/_shared/
   user_discovery.py
 ```
 
-`bash/__init__.py` imports `.._shared.process` and `.._shared.sandbox`.
-`exec/__init__.py` uses the same shared modules. The helpers are not copied
-into each tool directory.
+Stage 1 runs before `_shared/` exists. The moved package initializers therefore
+use interim parent imports: `bash/__init__.py` and `exec/__init__.py` use
+`from .._process` and `from .._sandbox`; `memory/__init__.py` uses
+`from .._process`; and `read`, `write`, and `edit` use `from .._sandbox`.
+The package initializers for `agent`, `calendar`, `fetch`, `route`, `skill`,
+`todo`, and `websearch` use `from ..registry` for the registry and `route`
+uses `from ..calendar` and `from ..memory`. `websearch` uses `from ..fetch`.
+The `agent` package uses `from ..agent_presets` and `from ..agent_send` for
+the support packages that remain at the tools root during stage 1.
+The browser catalog uses `from .adapter` after the browser move.
+
+Stage 2 creates `_shared/` and rewrites every interim helper import to
+`from .._shared.process`, `from .._shared.sandbox`, or the matching
+`_shared.user_discovery` path. The root `registry.py` changes its helper
+imports from `._process` and `._sandbox` to `._shared.process` and
+`._shared.sandbox`. No stage may
+leave a moved package importing a helper at the wrong relative depth.
+The helpers are not copied into each tool directory.
 
 The existing browser foundation:
 
@@ -504,7 +557,7 @@ The target groups are:
 
 ```text
 zeta/agent/
-  __init__.py
+  __init__.py          # empty or lazy before any child move
   background.py       # agent_background.py
   budget.py           # agent_budget.py
   receipt.py          # agent_receipt.py
@@ -513,24 +566,24 @@ zeta/agent/
   plan_mode.py        # tools/plan_mode/
 
 zeta/cli/
-  __init__.py         # compatibility exports and console entry point
+  __init__.py         # lazy compatibility exports and console entry point
   main.py             # cli.py
   session.py          # session_cli.py
 
 zeta/config/
-  __init__.py
+  __init__.py         # empty or lazy before settings.py moves
   settings.py          # settings.py
 
 zeta/media/
-  __init__.py
+  __init__.py         # empty or lazy before images.py moves
   images.py            # images.py
 
 zeta/models/
-  __init__.py
+  __init__.py         # empty or lazy before catalog.py moves
   catalog.py            # model_catalog.py
 
 zeta/protocol/
-  __init__.py
+  __init__.py         # empty or lazy before types.py moves
   types.py              # types.py
 
 zeta/runtime/
@@ -541,7 +594,7 @@ zeta/runtime/
   tool_setup.py         # tools/loop_setup.py
 
 zeta/submission/
-  __init__.py
+  __init__.py         # empty or lazy before child moves
   model.py              # submission.py
   pipeline.py           # submission_pipeline.py
 
@@ -576,6 +629,45 @@ During the stage 4 transition, each old module may be a re-export shim. The
 shim is removed after the importer count reaches zero. The package root keeps
 the current `zeta` re-exports for names that it currently exposes.
 
+The package-initializer invariant for every move is: no module moves under a
+package until that package's `__init__.py` is lazy, or the package is proven
+cycle-free with the newcomer. This prevents a package initializer from
+eagerly loading a module that imports the newcomer back through the package.
+The audit is:
+
+```text
+stage 1  tools/agent, bash, browser/{adapter,catalog}, calendar, edit, exec,
+         fetch, memory, read, route, skill, todo, websearch, write
+         gate: zeta.tools.__init__ imports only registry. Registry does not
+         import discovered children during package import. Each new tool
+         package has an import-free __init__ until its implementation is
+         moved into it. Result: cycle-free with the newcomer.
+
+stage 2  tools/_shared/{process,sandbox,user_discovery}
+         gate: _shared/__init__.py is empty. Result: cycle-free.
+
+stage 2  zeta.agent/{presets,plan_mode}
+         gate: agent/__init__.py is empty or lazy before either move.
+         Result: cycle-free.
+
+stage 2  zeta.runtime/tool_setup
+         gate: runtime/__init__.py becomes lazy before this move. Result:
+         cycle-free; this is the runtime child that exposed the old cycle.
+
+stage 4  zeta.agent/{background,budget,receipt,runner};
+         zeta.cli/{main,session}; zeta.config/settings; zeta.media/images;
+         zeta.models/catalog; zeta.protocol/types;
+         zeta.runtime/{execution,headless,loop};
+         zeta.submission/{model,pipeline}; zeta.tui/persistence
+         gate: each new grouping initializer is empty or lazy before its
+         first child moves. runtime remains lazy. zeta.tui is audited as
+         cycle-free because its initializer has no eager child imports.
+         Result: every listed move passes the invariant.
+```
+
+`zeta.runtime.tool_setup` is a stage 2 move. Stage 4 does not move it again;
+stage 4 only verifies it before moving the other runtime children.
+
 ### 5.1 move table and risk decisions
 
 ```text
@@ -584,7 +676,7 @@ agent_background             zeta.agent_background ->                   6       
                               zeta.agent.background
 agent_budget                 zeta.agent_budget -> zeta.agent.budget     3                move in stage 4
 agent_receipt                zeta.agent_receipt -> zeta.agent.receipt   9                move in stage 4
-agent_runner                 zeta.agent_runner -> zeta.agent.runner     2                move in stage 4
+agent_runner                 zeta.agent_runner -> zeta.agent.runner     3                move in stage 4
 cli                          zeta.cli module -> zeta.cli.main           19               move as package; keep __init__ export
 execution                    zeta.execution -> zeta.runtime.execution   4                move in stage 4
 headless                     zeta.headless -> zeta.runtime.headless     4                move in stage 4
@@ -592,7 +684,7 @@ images                       zeta.images -> zeta.media.images            8      
 loop                         zeta.loop -> zeta.runtime.loop             40               high risk; shim first, move last
 model_catalog                zeta.model_catalog -> zeta.models.catalog   11               move in stage 4
 persistence                  zeta.persistence -> zeta.tui.persistence    3                move with TUI imports
-session_cli                  zeta.session_cli -> zeta.cli.session        1                move with CLI package
+session_cli                  zeta.session_cli -> zeta.cli.session        2                move with CLI package
 settings                     zeta.settings -> zeta.config.settings      12               high risk; shim first
 submission                   zeta.submission -> zeta.submission.model    2                move with pipeline
 submission_pipeline          zeta.submission_pipeline ->                1                move with submission package
@@ -611,10 +703,11 @@ The runtime package requires a dependency-safe move sequence. First replace
 `composition`, `tools.registry`, `execution`, or `loop` during package import.
 Then move `execution.py` to `zeta.runtime.execution`, update the registry and
 its other importers, and keep `zeta.execution` as a re-export shim. Move
-`headless.py` and `tool_setup.py` next. Move `loop.py` last among the runtime
-children, update `composition` and its other importers, and keep
-`zeta.loop` as a re-export shim until the importer count is zero. Remove the
-shims only after a repository search confirms that no importer remains.
+`headless.py` next. `tool_setup.py` was already moved in stage 2 after the
+lazy initializer change. Move `loop.py` last among the runtime children,
+update `composition` and its other importers, and keep `zeta.loop` as a
+re-export shim until the importer count is zero. Remove the shims only after
+a repository search confirms that no importer remains.
 
 After each runtime-child move, run the relevant import-boundary checks in a
 fresh process. At minimum, run each command from a new Python process:
@@ -687,9 +780,11 @@ The tool-only portions of the current tests move as follows:
 
 ```text
 tools/agent/tests/         agent portions of test_agent.py, test_agent_output.py,
-                           test_agent_status.py
-tools/agent_send/tests/    agent_send portions of test_agent.py and
-                           test_session_shutdown.py
+                           test_agent_status.py, test_agents.py,
+                           test_automations.py, test_session.py,
+                           test_session_resilience.py, test_session_safety.py
+tools/agent_send/tests/    direct agent_send/send_to_run tests from test_agent.py
+                           and test_session_shutdown.py
 tools/automation/tests/    test_automations.py tool portions
 tools/browser/tests/       test_browser_adapter.py, test_browser_catalog.py,
                            test_browser_prefilter.py
@@ -700,7 +795,7 @@ tools/todo/tests/          tool-handler portions of test_todo.py
 tools/websearch/tests/     websearch portions of test_webtools.py
 tools/fetch/tests/         fetch portions of test_webtools.py
 tools/skill/tests/         skill assertions from test_skills.py:77-105
-tools/route/tests/         route-only portions of router tests
+tools/route/tests/         route-only portions of test_evals.py and router tests
 tools/bash/tests/          bash portions of test_tools.py and test_safety.py
 tools/exec/tests/          exec portions of test_tools.py, test_commands.py,
                            test_safety.py, and test_session_safety.py
@@ -740,11 +835,36 @@ layers, import boundaries, or integration across tools. Split a file when
 different tests have different owners. A test's imports do not decide its
 owner; the behavior and contract under test do.
 
-The remaining mixed files split by the same owner rule:
-`test_agent.py` sends its agent assertions to `tools/agent/tests/` and its
-`agent_send` assertions at lines 3159-3317 to `tools/agent_send/tests/`;
-`test_session_shutdown.py` sends its `agent_send` test at line 356 to
-`tools/agent_send/tests/` and keeps shutdown integration in `harness/tests`.
+Rebuild direct send ownership with this content search:
+
+```sh
+rg -n --glob 'test_*.py' 'agent_send|send_to_run' harness/tests
+```
+
+The direct `agent_send` or `send_to_run` tests in `test_agent.py` move to
+`tools/agent_send/tests/`: `test_agent_send_waits_for_blocked_append_before_cancellation`,
+`test_tool_registry_reports_agent_send_result_after_cleanup_cancellation`,
+`test_agent_send_aborts_before_append_when_store_lock_is_held`,
+`test_agent_send_reports_when_the_run_just_closed`,
+`test_a_follow_up_reaches_the_run_at_its_next_turn`,
+`test_send_to_run_rejects_unknown_and_finished_runs`, and
+`test_send_to_run_rejects_non_run_children`. The direct send assertion in
+`test_recovery_and_send_release_borrowed_child_stores` moves to the same
+owner, while its session shutdown and lease-recovery assertions stay central.
+
+The later run-lifecycle tests `test_a_queued_prompt_stays_out_of_the_run_context`,
+`test_a_run_with_an_empty_queue_finishes_normally`, and
+`test_runs_and_send_commands_drive_a_live_run` stay agent-owned because they
+test `AgentLoop` lifecycle or slash-command integration, not the direct
+`agent_send` contract. This behavior-owner rule also applies to later tests
+that mention a run without calling `send_to_run` directly.
+
+The session and CLI lifecycle portions of `test_session_resilience.py` stay in
+`harness/tests`; its `from zeta import session_cli` alias is an importer count,
+not a tool-ownership signal.
+
+The remaining mixed files split by the same owner rule. `test_agent.py` sends
+its other agent assertions to `tools/agent/tests/`.
 `test_skills.py` is also split: only lines 77-105 move to
 `tools/skill/tests/`. The other mixed files listed above split by the same
 owner rule. Splitting changes file location and imports, not assertions.
@@ -818,7 +938,7 @@ Convert the 13 single-file registered tools to directories, moving each
 implementation directly into `__init__.py`. Use internal modules only for
 tools with multiple real modules. Move the browser foundation to
 `tools/browser/`. Keep tests in `harness/tests` for this stage, updating only
-imports that must change for browser and shared helper internals.
+imports that must change for browser internals and the interim relative depth.
 
 The four existing package directories are covered explicitly. `automation/`
 and `zeta_background/` already conform: their implementation and
@@ -832,6 +952,11 @@ without applying the discovered-tool shape.
 Risk: a missing re-export or a package whose `register()` is not visible will
 change tool discovery or break private test imports.
 
+Importability: after each file becomes a package, rewrite its relative imports
+to the stage-1 parent paths from section 3.2. Run a fresh process import of
+each changed `zeta.tools.<name>` package before the next move. No stage-1
+import may reference `_shared`; that package does not exist yet.
+
 Verification: `test_tool_discovery.py`, all current tool-specific files,
 browser adapter/catalog/prefilter tests, and then `uv run --frozen pytest -q`.
 Run a registry smoke check that compares discovered tool names and schemas
@@ -839,15 +964,24 @@ before and after.
 
 ### stage 2: move helpers and framework support
 
-Create `tools/_shared/`, move the three shared helpers, and update all source
-and test imports. Move agent presets and plan mode to `zeta.agent`; move tool
-setup to `zeta.runtime.tool_setup`. Keep `registry.py` at
-`zeta.tools.registry`. Keep `agent_send` out of discovery and retain the
-explicit `agent.register()` call to `register_send()` after the other agent
-tools.
+First replace `zeta/runtime/__init__.py` with the lazy initializer required by
+section 5.1. Verify it in a fresh process before moving any child under
+`zeta.runtime`. Then create `tools/_shared/`, move the three shared helpers,
+and rewrite all source and test imports. Create the empty or lazy
+`zeta.agent/__init__.py`, then move agent presets and plan mode to
+`zeta.agent`. Move tool setup to `zeta.runtime.tool_setup` only after the
+runtime initializer change, and update `loop.py` to import
+`zeta.runtime.tool_setup`. Keep `registry.py` at `zeta.tools.registry`.
+Keep `agent_send` out of discovery and retain the explicit `agent.register()`
+call to `register_send()` after the other agent tools.
 
 Risk: relative import depth, circular imports, and accidental discovery of
 support files.
+
+Importability: run fresh processes after the lazy initializer, helper rewrite,
+agent moves, and tool-setup move. At minimum, verify `import zeta.runtime`,
+`import zeta.runtime.tool_setup`, `import zeta.loop`, and
+`import zeta.tools.registry`. A warm process is not valid evidence.
 
 Verification: background, sandbox, user-tool-discovery, agent, plan-mode,
 route, registry, and import-boundary tests. Assert `_shared` does not appear
@@ -864,17 +998,22 @@ test exclusion.
 Risk: pytest collection gaps, duplicate test module names, and accidental test
 inclusion in the wheel.
 
+Importability: this stage moves tests only. It must not change source import
+depth or runtime package initialization. Run collection in importlib mode
+before and after each ownership split.
+
 Verification: `uv run --frozen pytest --collect-only -q` and compare collected
 node counts with the pre-move baseline. Run every moved test by its new path,
 then the complete suite. Run `uv build` and inspect the wheel contents.
 
 ### stage 4: group loose top-level modules
 
-First make `zeta.runtime.__init__` lazy and verify that a fresh process can
-import the current runtime package and its public exports. Then move
-`execution.py`, update `tools.registry` and every other importer, and run a
-fresh-process import of `zeta.runtime.execution` and `zeta.tools.registry`.
-Move `headless.py` and `tool_setup.py` next. Move `loop.py` last among runtime
+The lazy `zeta.runtime.__init__` and `zeta.runtime.tool_setup` move are
+complete in stage 2. First verify those paths in a fresh process. Then move
+`execution.py`, updating `tools.registry` and every other importer for its
+new relative depth. Run a fresh-process import of
+`zeta.runtime.execution` and `zeta.tools.registry`. Move `headless.py` next,
+updating its runtime driver import. Move `loop.py` last among runtime
 children, update `runtime.composition` and every other importer, and run a
 fresh-process import of `zeta.runtime.loop`. Only after these checks pass may
 the other loose modules move to the proposed `agent`, `cli`, `config`,
@@ -885,6 +1024,10 @@ importer counts reach zero. Preserve the `zeta.cli` package exports and
 
 Risk: import cycles and high fan-out breakage, especially around the lazy
 runtime initializer, `types`, `loop`, and `settings`.
+
+Importability: create each target package initializer before moving its first
+child. Update relative imports at the target depth before each move. Run a
+fresh Python process for every moved child, then run the boundary suite.
 
 Verification: import-boundary tests, CLI parser and entry-point tests, all
 agent/runtime/provider/server/TUI suites, package import smoke tests, and the
@@ -933,6 +1076,10 @@ This design was reviewed against the ticket requirements before handoff:
 
 - current tree, tools, support files, and other subpackages are enumerated;
 - source and test import coupling is mapped with distinct importer counts;
+- the inventory is reproducible with the recorded `rg` commands and includes
+  aliases such as `from zeta import agent_runner`;
+- seven stale count cells were corrected: five tool test counts and the
+  `agent_runner` and `session_cli` move-row counts;
 - existing package-directory behavior and the `register()` exceptions are
   recorded;
 - browser foundation placement and the arc-3 task 5-12 pause are explicit;
@@ -942,12 +1089,18 @@ This design was reviewed against the ticket requirements before handoff:
   helper patch-seam changes enumerated;
 - `agent_send` registration remains manual and its ordering invariant is
   checked by the parity gate;
+- direct `agent_send` and `send_to_run` tests are found by content, including
+  the two later run-lifecycle contract tests, while broader lifecycle tests
+  stay agent-owned by the behavior-owner rule;
 - `agent_send`, `skill`, agent-output, todo, and boundary-test ownership,
   including mixed-file splits, is explicit;
 - pytest discovery, the shared plugin and its fixtures, src layout, and wheel
   exclusion mechanics are specified;
-- the runtime initializer is lazy before `execution.py` or `loop.py` moves;
-  the move sequence and fresh-process import checks are explicit;
+- the runtime initializer is lazy before `tool_setup.py`, `execution.py`, or
+  `loop.py` moves; the stage order and fresh-process import checks are
+  explicit;
+- every moved module has a package-initializer cycle audit, and each stage
+  states the relative import depth that is valid at that point;
 - `pkgutil`, the leading-underscore skip, `.agent` sorting, and synchronous
   registration are preserved;
 - migration stages include risks and targeted verification;
