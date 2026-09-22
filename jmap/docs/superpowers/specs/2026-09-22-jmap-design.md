@@ -550,6 +550,7 @@ Required fields are `schema`, `name`, `version`, `model`, `chunking`,
 `compatible_chunkers`, `questions`, `thresholds`, and `output`. `model` is a
 pinned resolved version, not an alias. A preset version changes whenever its
 questions, criteria, chunking, thresholds, or output meaning changes.
+Question IDs must not be the reserved policy keywords `any`, `all`, or `not`.
 
 `compatible_chunkers` is a required list whose values come from the `--by`
 vocabulary: `line`, `para`, `hunk`, `file`, and `record`. If `--by` is
@@ -570,7 +571,7 @@ The `thresholds` map has one entry per thresholded question. Each entry has
 `fail_at_least` values are integer level indexes from 0 to 3. `keep_at_least`
 is for a positive filter; `fail_at_least` is for a gate failure condition.
 Choice fields, if added by an extension, use equality in policy and do not use
-numeric thresholds. Membership is not part of the v1 policy grammar.
+numeric thresholds.
 
 ### 4.2 lookup rules
 

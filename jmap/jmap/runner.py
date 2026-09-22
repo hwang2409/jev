@@ -26,6 +26,7 @@ from .answers import (
     TypedResponse,
 )
 from .cache import CacheStore, build_cache_preimage, cache_key
+from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
     Preset,
     PresetUsageError,
@@ -225,6 +226,7 @@ class RunResult:
     records: tuple[CanonicalRecord, ...] = ()
     coverage_reasons: tuple[CoverageReason, ...] = ()
     exit_code: int = 0
+    gate_result: GateResult | None = None
 
 
 _DEFAULT_MODEL = "jev-1.13.0"
@@ -286,7 +288,11 @@ class Runner:
         output_format: str = "jsonl",
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
+        policy: str | Policy | None = None,
+        require_states: int = 1,
     ) -> RunResult:
+        if policy is not None and require_states < 0:
+            raise PolicyError("require_states must be non-negative")
         loaded_preset = self._load_preset(self.preset if preset is None else preset)
         if loaded_preset is None:
             if questions is _UNSET or questions is None:
@@ -355,6 +361,12 @@ class Runner:
                     chunking, resolved_chunking, loaded_preset.name
                 )
             runtime_max_chunks = preset_max_chunks
+
+        compiled_policy = None
+        if policy is not None:
+            if loaded_preset is None:
+                raise PresetUsageError("a gate policy requires a preset")
+            compiled_policy = compile_policy(policy, loaded_preset)
 
         if output_format not in {"jsonl", "pretty"}:
             raise ValueError("output format must be jsonl or pretty")
@@ -485,7 +497,20 @@ class Runner:
                     f"coverage reasons: {', '.join(reasons)}\n"
                 )
             stderr.flush()
+        gate_result = None
         exit_code = 2 if coverage == "partial" else 0
+        if compiled_policy is not None:
+            result_records = tuple(
+                record for record in records if isinstance(record, ResultRecord)
+            )
+            gate_result = evaluate_gate(
+                compiled_policy,
+                result_records,
+                judged_states=stats.judged,
+                coverage_reasons=reasons,
+                required_states=require_states,
+            )
+            exit_code = gate_result.exit_code
         return RunResult(
             admission,
             tuple(responses),
@@ -493,6 +518,23 @@ class Runner:
             tuple(records),
             reasons,
             exit_code,
+            gate_result,
+        )
+
+    def run_gate(
+        self,
+        states: Sequence[State],
+        policy: str | Policy,
+        *,
+        require_states: int = 1,
+        **kwargs: Any,
+    ) -> RunResult:
+        """Run a finite judgment and apply a typed failure-condition policy."""
+        return self.run(
+            states,
+            policy=policy,
+            require_states=require_states,
+            **kwargs,
         )
 
     @staticmethod

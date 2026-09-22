@@ -16,6 +16,7 @@ from jmap.answers import (
     ScoreAnswer,
 )
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
+from jmap.gates import PolicySyntaxError
 from jmap.presets import (
     Preset,
     PresetUsageError,
@@ -85,6 +86,95 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "chunker": "file",
         "cache": "not_applicable",
     }
+
+
+@pytest.mark.parametrize("noul", [0.5, 0.9])
+def test_runner_gate_sets_failure_exit_for_complete_typed_results(noul: float) -> None:
+    def judge(*_):
+        return JudgeResponse({"matches_query": NoulAnswer(noul)})
+
+    result = Runner(judge).run_gate(
+        [State("stdin#L1", "launch")],
+        "any(matches_query.noul >= 0.75)",
+        preset="jgrep",
+    )
+
+    assert result.gate_result is not None
+    assert result.gate_result.failed is (noul == 0.9)
+    assert result.exit_code == (1 if noul == 0.9 else 0)
+    assert result.records[-1].to_dict()["coverage"] == "complete"
+
+
+def test_runner_gate_fails_closed_for_partial_results() -> None:
+    result = Runner(FakeJudge(mode="incomplete")).run_gate(
+        [State("stdin#L1", "launch")],
+        "any(matches_query.noul < 0.75)",
+        preset="jgrep",
+    )
+
+    assert result.exit_code == 2
+    assert result.gate_result is not None
+    assert result.gate_result.fail_closed is True
+
+
+def test_runner_gate_fails_closed_for_operational_errors() -> None:
+    result = Runner(FakeJudge(mode="error")).run_gate(
+        [State("stdin#L1", "launch")],
+        "any(matches_query.noul < 0.75)",
+        preset="jgrep",
+    )
+
+    assert result.exit_code == 2
+    assert result.gate_result is not None
+    assert result.gate_result.reason == "incomplete coverage"
+
+
+@pytest.mark.parametrize("reason", ["context_limit", "scan_cap"])
+def test_runner_gate_fails_closed_for_unvisited_states(reason: str) -> None:
+    result = Runner(FakeJudge()).run_gate(
+        [State("stdin#L1", "launch")],
+        "any(matches_query.noul < 0.75)",
+        preset="jgrep",
+        rejections=(StateRejection("stdin#L2", reason, "not visited"),),
+    )
+
+    assert result.exit_code == 2
+    assert result.gate_result is not None
+    assert result.gate_result.fail_closed is True
+
+
+def test_runner_gate_honors_custom_required_state_count() -> None:
+    result = Runner(FakeJudge()).run_gate(
+        [State("stdin#L1", "launch")],
+        "any(matches_query.noul < 0.75)",
+        preset="jgrep",
+        require_states=2,
+    )
+
+    assert result.exit_code == 2
+    assert result.gate_result is not None
+    assert result.gate_result.reason == "too few judged states"
+
+
+def test_runner_validates_policy_before_judging_or_writing() -> None:
+    calls = []
+    stdout = io.StringIO()
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    with pytest.raises(PolicySyntaxError) as error:
+        Runner(judge).run_gate(
+            [State("stdin#L1", "launch")],
+            "any(matches_query.noul >=)",
+            preset="jgrep",
+            stdout=stdout,
+        )
+
+    assert error.value.exit_code == 64
+    assert calls == []
+    assert stdout.getvalue() == ""
 
 
 def test_runner_rejects_questions_with_a_preset() -> None:

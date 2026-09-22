@@ -129,6 +129,17 @@ def test_validation_rejects_invalid_question_or_threshold_data(change, message) 
         validate_preset(data)
 
 
+def test_load_rejects_reserved_policy_keyword_question_id(tmp_path: Path) -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    data["questions"]["any"] = data["questions"].pop("matches_query")
+    data["thresholds"]["any"] = data["thresholds"].pop("matches_query")
+    path = tmp_path / "reserved.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    with pytest.raises(PresetValidationError, match="reserved.*policy keyword"):
+        load_preset(path)
+
+
 def test_lookup_order_is_explicit_then_cwd_then_builtin_then_user(
     tmp_path, monkeypatch
 ) -> None:
