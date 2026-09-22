@@ -260,8 +260,51 @@ def _normalise_path(value: str, *, strip_git_prefix: bool = False) -> str:
     return PurePosixPath(path).as_posix()
 
 
+def _decode_git_path(value: str) -> str:
+    if not (value.startswith('"') and value.endswith('"')):
+        return value
+
+    decoded = bytearray()
+    index = 1
+    while index < len(value) - 1:
+        character = value[index]
+        if character != "\\":
+            decoded.extend(character.encode("utf-8"))
+            index += 1
+            continue
+        index += 1
+        escaped = value[index]
+        simple_escapes = {
+            '"': b'"',
+            "\\": b"\\",
+            "b": b"\b",
+            "f": b"\f",
+            "n": b"\n",
+            "r": b"\r",
+            "t": b"\t",
+            "v": b"\v",
+        }
+        if escaped in simple_escapes:
+            decoded.extend(simple_escapes[escaped])
+            index += 1
+            continue
+        if escaped in "01234567":
+            digits = escaped
+            index += 1
+            while index < len(value) - 1 and len(digits) < 3:
+                if value[index] not in "01234567":
+                    break
+                digits += value[index]
+                index += 1
+            decoded.append(int(digits, 8))
+            continue
+        decoded.extend(escaped.encode("utf-8"))
+        index += 1
+    return decoded.decode("utf-8")
+
+
 def _diff_path(line: str) -> str:
-    path = line.split("\t", 1)[0].split(" ", 1)[0]
+    path = _decode_git_path(line.split("\t", 1)[0].strip())
     return _normalise_path(path, strip_git_prefix=True)
 
 
@@ -410,12 +453,12 @@ def chunk_files(
             continue
         if (
             not isinstance(record, dict)
-            or "path" not in record
-            or "content" not in record
+            or not isinstance(record.get("path"), str)
+            or not isinstance(record.get("content"), str)
         ):
             _input_error(
                 _rejections,
-                f"file JSONL line {line_number} requires path and content",
+                f"file JSONL line {line_number} requires string path and content",
                 source_ref,
             )
             continue

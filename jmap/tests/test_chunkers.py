@@ -183,6 +183,43 @@ def test_file_jsonl_rejects_bad_lines_and_continues() -> None:
     )
 
 
+def test_file_jsonl_rejects_wrong_field_types_and_continues() -> None:
+    records = (
+        '{"path":"first.txt","content":"one"}\n'
+        '{"path":[],"content":{}}\n'
+        '{"path":"last.txt","content":"last"}\n'
+    )
+    result = chunk_input("file", records)
+    assert [state.state_ref for state in result.admitted] == [
+        "first.txt",
+        "last.txt",
+    ]
+    assert len(result.rejections) == 1
+    assert result.rejections[0].reason == "input_error"
+    assert result.rejections[0].source_ref == (
+        f"stdin:byte={len(b'{\"path\":\"first.txt\",\"content\":\"one\"}\n')},line=2"
+    )
+    assert result.judged == 2
+
+
+def test_hunk_paths_preserve_spaces_decode_quotes_and_strip_timestamps() -> None:
+    space_diff = "--- a/src/my file.py\n+++ b/src/my file.py\n@@ -1 +1 @@\n-old\n+new\n"
+    quoted_diff = (
+        '--- "a/src/quote\\"file.py"\n'
+        '+++ "b/src/quote\\"file.py"\n'
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+    timestamp_diff = (
+        "--- a/src/timed.py\t2026-09-22 12:00:00\n"
+        "+++ b/src/timed.py\t2026-09-22 12:01:00\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    assert chunk_hunk(space_diff)[0].state_ref == "src/my file.py@@-1+1"
+    assert chunk_hunk(quoted_diff)[0].state_ref == 'src/quote"file.py@@-1+1'
+    assert chunk_hunk(timestamp_diff)[0].state_ref == "src/timed.py@@-1+1"
+
+
 def test_invalid_stdin_bytes_use_replacement_characters() -> None:
     assert decode_stdin(b"ok\xff\n") == "ok\ufffd\n"
 
