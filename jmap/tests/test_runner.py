@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
@@ -15,7 +16,13 @@ from jmap.answers import (
     ScoreAnswer,
 )
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
-from jmap.presets import PresetUsageError, PresetValidationError, resolve_preset
+from jmap.presets import (
+    Preset,
+    PresetUsageError,
+    PresetValidationError,
+    resolve_preset,
+    validate_preset,
+)
 from jmap.runner import (
     FakeJudge,
     Runner,
@@ -95,6 +102,27 @@ def test_runner_rejects_questions_with_a_preset() -> None:
         )
 
     assert calls == []
+
+
+def test_runner_rejects_explicit_defaults_for_different_preset_values() -> None:
+    preset = resolve_preset("jgrep")
+    data = deepcopy(preset.data)
+    data["model"] = "jev-9.9.9"
+    data["chunking"]["limits"]["context_field_bytes"] = 8_192
+    custom_preset = Preset(validate_preset(data), preset.path)
+    state = State("stdin#L1", "launch")
+
+    with pytest.raises(PresetUsageError, match="model"):
+        Runner(FakeJudge(), model="jev-1.13.0").run(
+            [state], preset=custom_preset
+        )
+    with pytest.raises(PresetUsageError, match="limits"):
+        Runner(FakeJudge(), limits=StateLimits()).run(
+            [state], preset=custom_preset
+        )
+
+    result = Runner(FakeJudge()).run([state], preset=custom_preset)
+    assert result.records[0].to_dict()["meta"]["model"] == "jev-9.9.9"
 
 
 @pytest.mark.parametrize(
