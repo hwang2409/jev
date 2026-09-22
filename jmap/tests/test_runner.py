@@ -253,6 +253,34 @@ def test_invalid_preset_is_validated_before_processing(tmp_path: Path) -> None:
     assert calls == []
 
 
+def test_invalid_pretty_template_is_validated_before_judging(tmp_path: Path) -> None:
+    preset = resolve_preset("jgrep")
+    path = tmp_path / "invalid-template.yml"
+    content = preset.path.read_text(encoding="utf-8").replace(
+        "pretty_template: '{state_ref}\\t{answers.matches_query.noul}'",
+        "pretty_template: '{answers.missing.noul}'",
+    )
+    path.write_text(content, encoding="utf-8")
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    stdout = io.StringIO()
+    with pytest.raises(PresetValidationError, match="pretty_template"):
+        Runner(judge).run(
+            [State("stdin#L1", "launch")],
+            preset=path,
+            output_format="pretty",
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+
+    assert calls == []
+    assert stdout.getvalue() == ""
+
+
 def test_fake_judge_returns_deterministic_typed_answers() -> None:
     state = State("stdin#L1", "launch", {"source": "stdin"})
     fake = FakeJudge()
@@ -621,6 +649,21 @@ def test_runner_pretty_output_and_filter_do_not_hide_errors_or_coverage() -> Non
     lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
     assert [line["record_type"] for line in lines] == ["coverage"]
     assert stderr.getvalue() == ""
+
+
+def test_runner_pretty_output_without_template_includes_state_ref() -> None:
+    stderr = io.StringIO()
+    Runner(FakeJudge()).run(
+        [State("stdin#L1", "one")],
+        {"matches": {"type": "noul"}},
+        stderr=stderr,
+        output_format="pretty",
+        chunker="para",
+    )
+
+    state_ref, answers = stderr.getvalue().split("\t", 1)
+    assert state_ref == "stdin#L1"
+    assert json.loads(answers)["matches"]["type"] == "noul"
 
 
 def test_state_admission_carries_rejections_in_coverage_counts() -> None:

@@ -398,6 +398,8 @@ def chunk_file(
     content: str | bytes | None = None,
     *,
     limits: StateLimits = StateLimits(),
+    query: str | None = None,
+    predicate: str | None = None,
     _rejections: list[StateRejection] | None = None,
     _source_ref: str | None = None,
 ) -> list[State]:
@@ -411,6 +413,10 @@ def chunk_file(
         "language": suffix,
         "metadata": {"size_bytes": len(decoded.encode("utf-8"))},
     }
+    if query is not None:
+        context["query"] = query
+    if predicate is not None:
+        context["predicate"] = predicate
     return _state(
         normalized,
         decoded,
@@ -426,6 +432,8 @@ def chunk_files(
     records: str | bytes | Mapping[str, Any],
     *,
     limits: StateLimits = StateLimits(),
+    query: str | None = None,
+    predicate: str | None = None,
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     if isinstance(records, Mapping):
@@ -435,6 +443,8 @@ def chunk_files(
             records["path"],
             records["content"],
             limits=limits,
+            query=query,
+            predicate=predicate,
             _rejections=_rejections,
         )
     states: list[State] = []
@@ -467,6 +477,8 @@ def chunk_files(
                 record["path"],
                 record["content"],
                 limits=limits,
+                query=query,
+                predicate=predicate,
                 _rejections=_rejections,
                 _source_ref=source_ref,
             )
