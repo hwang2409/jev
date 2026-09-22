@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from zeta.tools.browser_catalog import (
+from zeta.tools.browser.catalog import (
     ELEMENT_CATALOG_MAX,
     ELEMENT_PREFILTER_K,
     BrowserCatalog,

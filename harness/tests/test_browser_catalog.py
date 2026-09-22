@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from zeta.tools.browser_adapter import ElementRef, PageObservation, SnapshotLimits
-from zeta.tools.browser_catalog import SnapshotCatalogBuilder, _serialized_size
+from zeta.tools.browser.adapter import ElementRef, PageObservation, SnapshotLimits
+from zeta.tools.browser.catalog import SnapshotCatalogBuilder, _serialized_size
 
 
 def test_builder_normalizes_text_caps_catalog_and_stale_ids() -> None:

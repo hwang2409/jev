@@ -7,7 +7,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from .browser_adapter import ElementRef, PageObservation, SnapshotLimits
+from .adapter import ElementRef, PageObservation, SnapshotLimits
 
 
 @dataclass(frozen=True, slots=True)
