@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import io
 import json
 
 import httpx
 import pytest
 
-from jmap.answers import ChoiceAnswer, ErrorResponse, NoulAnswer, ScoreAnswer
+from jmap.answers import (
+    ChoiceAnswer,
+    ErrorResponse,
+    JudgeResponse,
+    NoulAnswer,
+    ScoreAnswer,
+)
 from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
 from jmap.runner import (
     FakeJudge,
@@ -84,6 +91,331 @@ def test_runner_admits_states_in_input_order_and_keeps_skipped_refs() -> None:
     assert [state.state_ref for state in admission.admitted] == ["stdin#L1", "stdin#L2"]
     assert [state.state_ref for state in admission.skipped] == ["stdin#L3"]
     assert admission.skip_boundary == "max_chunks=2"
+
+
+def test_runner_emits_jsonl_then_terminal_coverage_and_flushes_each_record() -> None:
+    class FlushCapture(io.StringIO):
+        def __init__(self) -> None:
+            super().__init__()
+            self.flush_count = 0
+
+        def flush(self) -> None:
+            self.flush_count += 1
+            super().flush()
+
+    stdout = FlushCapture()
+    result = Runner(FakeJudge()).run_jsonl(
+        [State("stdin#L1", "launch")],
+        {"matches": {"type": "noul"}},
+        stdout,
+        preset="jgrep",
+        chunker="para",
+    )
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+    assert [line["record_type"] for line in lines] == ["result", "coverage"]
+    assert lines[-1]["coverage"] == "complete"
+    assert result.exit_code == 0
+    assert stdout.flush_count == 2
+
+
+def test_runner_emits_partial_result_and_operational_exit() -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    result = Runner(FakeJudge(mode="incomplete")).run(
+        [State("stdin#L1", "launch")],
+        {"matches": {"type": "noul"}, "risk": {"type": "score"}},
+        stdout=stdout,
+        stderr=stderr,
+        preset="jgrep",
+        chunker="para",
+    )
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+    assert [line["record_type"] for line in lines] == ["partial_result", "coverage"]
+    assert lines[0]["missing_questions"] == ["risk"]
+    assert lines[0]["meta"]["partial"] is True
+    assert lines[1]["coverage_reasons"] == ["partial_answer"]
+    assert lines[1]["coverage"] == "partial"
+    assert lines[1]["coverage_counts"]["failed"] == 1
+    assert result.exit_code == 2
+    assert "partial" in stderr.getvalue()
+
+
+def test_runner_emits_exact_partial_json() -> None:
+    def judge(*_):
+        return JudgeResponse({"matches": NoulAnswer(0.5)}, ("risk",))
+
+    stdout = io.StringIO()
+    result = Runner(judge).run(
+        [State("stdin#L1", "launch")],
+        {"matches": {"type": "noul"}, "risk": {"type": "score"}},
+        stdout=stdout,
+        preset="jgrep",
+        chunker="para",
+    )
+
+    assert [json.loads(line) for line in stdout.getvalue().splitlines()] == [
+        {
+            "record_type": "partial_result",
+            "state_ref": "stdin#L1",
+            "answers": {"matches": {"type": "noul", "noul": 0.5}},
+            "missing_questions": ["risk"],
+            "meta": {
+                "preset": "jgrep",
+                "preset_version": "1",
+                "model": "jev-1.13.0",
+                "chunker": "para",
+                "cache": "not_applicable",
+                "partial": True,
+            },
+        },
+        {
+            "record_type": "coverage",
+            "coverage": "partial",
+            "coverage_counts": {
+                "discovered": 1,
+                "judged": 1,
+                "emitted": 1,
+                "skipped": 0,
+                "failed": 1,
+            },
+            "coverage_reasons": ["partial_answer"],
+            "meta": {
+                "preset": "jgrep",
+                "preset_version": "1",
+                "model": "jev-1.13.0",
+                "chunker": "para",
+                "cache": "not_applicable",
+            },
+        },
+    ]
+    assert result.exit_code == 2
+
+
+def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
+    states = [State(f"notes:paragraph={index}", str(index)) for index in range(11)]
+    stdout = io.StringIO()
+    result = Runner(FakeJudge()).run(
+        states,
+        {"matches": {"type": "noul"}},
+        max_chunks=2,
+        stdout=stdout,
+        preset="jgrep",
+        chunker="para",
+    )
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    skip = next(line for line in lines if line["record_type"] == "error")
+    summary = skip["error"]["skip_summary"]
+
+    assert skip == {
+        "record_type": "error",
+        "state_ref": None,
+        "source_ref": None,
+        "error": {
+            "kind": "scan_cap",
+            "message": "scan cap reached before visit",
+            "http_status": None,
+            "attempts": 0,
+            "skip_summary": {
+                "boundary": "max_chunks=2",
+                "count": 9,
+                "sample_refs": [
+                    f"notes:paragraph={index}" for index in range(2, 10)
+                ],
+            },
+        },
+        "meta": {
+            "preset": "jgrep",
+            "preset_version": "1",
+            "model": "jev-1.13.0",
+            "chunker": "para",
+            "cache": "not_applicable",
+        },
+    }
+    assert summary["boundary"] == "max_chunks=2"
+    assert summary["count"] == 9
+    assert summary["sample_refs"] == [
+        f"notes:paragraph={index}" for index in range(2, 10)
+    ]
+    assert lines[-1]["coverage_counts"] == {
+        "discovered": 11,
+        "judged": 2,
+        "emitted": 2,
+        "skipped": 9,
+        "failed": 0,
+    }
+    assert result.exit_code == 2
+
+
+@pytest.mark.parametrize(
+    "mode,max_chunks,rejections,expected_reasons",
+    [
+        ("complete", None, (), ()),
+        ("complete", 1, (), ("scan_cap",)),
+        (
+            "complete",
+            None,
+            (
+                StateRejection(
+                    None, "input_error", "invalid JSON", "stdin:byte=0,line=1"
+                ),
+            ),
+            ("input_error",),
+        ),
+        (
+            "complete",
+            None,
+            (StateRejection("stdin#L3", "scan_cap", "cap reached"),),
+            ("scan_cap",),
+        ),
+        (
+            "complete",
+            None,
+            (StateRejection("stdin#L3", "context_limit", "too large"),),
+            ("context_limit",),
+        ),
+        ("error", None, (), ("api_error",)),
+        ("incomplete", None, (), ("partial_answer",)),
+    ],
+)
+def test_coverage_equations_hold_for_each_run_path(
+    mode, max_chunks, rejections, expected_reasons
+) -> None:
+    states = [State("stdin#L1", "one"), State("stdin#L2", "two")]
+    result = Runner(FakeJudge(mode=mode)).run(
+        states,
+        {"matches": {"type": "noul"}, "risk": {"type": "score"}},
+        max_chunks=max_chunks,
+        rejections=rejections,
+    )
+    coverage = result.records[-1].to_dict()
+    counts = coverage["coverage_counts"]
+    skip_count = sum(
+        record.to_dict()["error"]["skip_summary"]["count"]
+        for record in result.records
+        if record.to_dict().get("record_type") == "error"
+        and "skip_summary" in record.to_dict()["error"]
+    )
+
+    assert counts["discovered"] == counts["judged"] + counts["skipped"]
+    assert counts["skipped"] == skip_count
+    assert counts["failed"] <= counts["judged"]
+    assert tuple(coverage["coverage_reasons"]) == expected_reasons
+    assert result.exit_code == (2 if expected_reasons else 0)
+
+
+def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
+    stdout = io.StringIO()
+    result = Runner(FakeJudge()).run(
+        [],
+        {"matches": {"type": "noul"}},
+        stdout=stdout,
+    )
+
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert lines == [
+        {
+            "record_type": "error",
+            "state_ref": None,
+            "source_ref": "stdin:byte=0,line=1",
+            "error": {
+                "kind": "input_error",
+                "message": "input is empty",
+                "http_status": None,
+                "attempts": 0,
+            },
+            "meta": {
+                "preset": "jmap",
+                "preset_version": "1",
+                "model": "jev-1.13.0",
+                "chunker": "unknown",
+                "cache": "not_applicable",
+            },
+        },
+        {
+            "record_type": "coverage",
+            "coverage": "partial",
+            "coverage_counts": {
+                "discovered": 0,
+                "judged": 0,
+                "emitted": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            "coverage_reasons": ["input_error"],
+            "meta": {
+                "preset": "jmap",
+                "preset_version": "1",
+                "model": "jev-1.13.0",
+                "chunker": "unknown",
+                "cache": "not_applicable",
+            },
+        },
+    ]
+    assert result.exit_code == 2
+
+
+def test_runner_keeps_interleaved_input_errors_in_input_order() -> None:
+    rejections = (
+        StateRejection(None, "input_error", "bad first", "stdin:byte=0,line=1"),
+        StateRejection("stdin#L2", "context_limit", "too large"),
+        StateRejection(None, "input_error", "bad third", "stdin:byte=2,line=3"),
+    )
+    result = Runner(FakeJudge()).run(
+        [],
+        {"matches": {"type": "noul"}},
+        rejections=rejections,
+    )
+
+    rejection_records = [record.to_dict() for record in result.records[:-1]]
+    assert [
+        (record["error"]["kind"], record.get("source_ref"))
+        for record in rejection_records
+    ] == [
+        ("input_error", "stdin:byte=0,line=1"),
+        ("context_limit", None),
+        ("input_error", "stdin:byte=2,line=3"),
+    ]
+
+
+def test_runner_keeps_jsonl_on_stdout_and_human_warnings_on_stderr() -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    Runner(FakeJudge()).run(
+        [State("stdin#L1", "one"), State("stdin#L2", "two")],
+        {"matches": {"type": "noul"}},
+        max_chunks=1,
+        stdout=stdout,
+        stderr=stderr,
+        preset="jgrep",
+        chunker="para",
+    )
+
+    assert all(
+        json.loads(line)["record_type"] for line in stdout.getvalue().splitlines()
+    )
+    assert "warning" in stderr.getvalue()
+    assert not any(line.startswith("{") for line in stderr.getvalue().splitlines())
+
+
+def test_runner_pretty_output_and_filter_do_not_hide_errors_or_coverage() -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    Runner(FakeJudge()).run(
+        [State("stdin#L1", "one")],
+        {"matches": {"type": "noul"}},
+        stdout=stdout,
+        stderr=stderr,
+        output_format="pretty",
+        result_filter=lambda record: False,
+        preset="jgrep",
+        chunker="para",
+    )
+
+    lines = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [line["record_type"] for line in lines] == ["coverage"]
+    assert stderr.getvalue() == ""
 
 
 def test_state_admission_carries_rejections_in_coverage_counts() -> None:

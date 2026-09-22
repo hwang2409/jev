@@ -2,16 +2,26 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any, Protocol, TextIO
 
 from .answers import (
+    CacheStatus,
+    CanonicalRecord,
     ChoiceAnswer,
+    CoverageReason,
+    CoverageRecord,
+    ErrorDetail,
+    ErrorRecord,
     ErrorResponse,
     JudgeResponse,
     NoulAnswer,
+    PartialResultRecord,
+    RecordMeta,
+    ResultRecord,
     ScoreAnswer,
+    SkipSummary,
     TypedResponse,
 )
 
@@ -87,6 +97,16 @@ class StateRejection:
     reason: str
     message: str
     source_ref: str | None = None
+    boundary: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.reason not in {"scan_cap", "context_limit", "input_error"}:
+            raise ValueError(f"unknown rejection reason: {self.reason}")
+        if self.reason == "input_error":
+            if not self.source_ref:
+                raise ValueError("input errors require a source reference")
+        elif self.state_ref is None:
+            raise ValueError("formed-state rejections require a state reference")
 
 
 def validate_state(state: State, limits: StateLimits = StateLimits()) -> None:
@@ -128,7 +148,8 @@ class StateAdmission:
     @property
     def discovered(self) -> int:
         return len(self.formed) + sum(
-            rejection.state_ref is not None for rejection in self.rejections
+            rejection.state_ref is not None and rejection.reason != "input_error"
+            for rejection in self.rejections
         )
 
     @property
@@ -138,7 +159,9 @@ class StateAdmission:
     @property
     def skipped_count(self) -> int:
         return len(self.skipped) + sum(
-            rejection.state_ref is not None for rejection in self.rejections
+            rejection.state_ref is not None
+            and rejection.reason in {"scan_cap", "context_limit"}
+            for rejection in self.rejections
         )
 
     @property
@@ -146,6 +169,14 @@ class StateAdmission:
         if not self.skipped or self.max_chunks is None:
             return None
         return f"max_chunks={self.max_chunks}"
+
+    @property
+    def input_errors(self) -> tuple[StateRejection, ...]:
+        return tuple(
+            rejection
+            for rejection in self.rejections
+            if rejection.reason == "input_error"
+        )
 
 
 def admit_states(
@@ -183,6 +214,9 @@ class RunResult:
     admission: StateAdmission
     responses: tuple[TypedResponse, ...]
     stats: RunStats
+    records: tuple[CanonicalRecord, ...] = ()
+    coverage_reasons: tuple[CoverageReason, ...] = ()
+    exit_code: int = 0
 
 
 class Runner:
@@ -203,21 +237,78 @@ class Runner:
         return self.judge_fn(state, questions, self.model)
 
     def admit(
-        self, states: Sequence[State], max_chunks: int | None = None
+        self,
+        states: Sequence[State],
+        max_chunks: int | None = None,
+        rejections: Sequence[StateRejection] = (),
     ) -> StateAdmission:
         for state in states:
             validate_state(state, self.limits)
-        return admit_states(states, max_chunks)
+        return admit_states(states, max_chunks, rejections)
 
     def run(
         self,
         states: Sequence[State],
         questions: Mapping[str, Any],
         max_chunks: int | None = None,
+        *,
+        preset: str = "jmap",
+        preset_version: str = "1",
+        chunker: str = "unknown",
+        cache: CacheStatus = "not_applicable",
+        stdout: TextIO | None = None,
+        stderr: TextIO | None = None,
+        output_format: str = "jsonl",
+        result_filter: Callable[[ResultRecord], bool] | None = None,
+        rejections: Sequence[StateRejection] = (),
     ) -> RunResult:
-        admission = self.admit(states, max_chunks)
-        responses = tuple(self.judge(state, questions) for state in admission.admitted)
-        failed = sum(isinstance(response, ErrorResponse) for response in responses)
+        if output_format not in {"jsonl", "pretty"}:
+            raise ValueError("output format must be jsonl or pretty")
+        if not states and not rejections:
+            rejections = (
+                StateRejection(
+                    None,
+                    "input_error",
+                    "input is empty",
+                    "stdin:byte=0,line=1",
+                ),
+            )
+        admission = self.admit(states, max_chunks, rejections)
+        meta = RecordMeta(preset, preset_version, self.model, chunker, cache)
+        responses: list[TypedResponse] = []
+        records: list[CanonicalRecord] = []
+
+        def write(record: CanonicalRecord, visible: bool = True) -> None:
+            records.append(record)
+            if stdout is not None and visible:
+                emit_jsonl(record, stdout)
+
+        for state in admission.admitted:
+            try:
+                response = self.judge(state, questions)
+            except Exception:
+                response = ErrorResponse("request failed")
+            responses.append(response)
+            record = _response_record(state.state_ref, response, meta)
+            visible = not isinstance(record, ResultRecord) or result_filter is None
+            if isinstance(record, ResultRecord) and result_filter is not None:
+                visible = result_filter(record)
+            write(record, visible)
+            if (
+                output_format == "pretty"
+                and isinstance(record, ResultRecord)
+                and visible
+                and stderr is not None
+            ):
+                emit_pretty(record, stderr)
+
+        for record in _rejection_records(admission, meta):
+            write(record)
+            if stderr is not None:
+                stderr.write(f"jmap: warning: {record.error.message}\n")
+                stderr.flush()
+
+        failed = sum(not response.complete for response in responses)
         stats = RunStats(
             discovered=admission.discovered,
             judged=len(responses),
@@ -225,7 +316,51 @@ class Runner:
             skipped=admission.skipped_count,
             failed=failed,
         )
-        return RunResult(admission, responses, stats)
+        reasons = _coverage_reasons(admission, responses)
+        coverage = "partial" if reasons else "complete"
+        coverage_meta = RecordMeta(
+            preset, preset_version, self.model, chunker, "not_applicable"
+        )
+        coverage_record = CoverageRecord(
+            coverage=coverage,
+            coverage_counts={
+                "discovered": stats.discovered,
+                "judged": stats.judged,
+                "emitted": stats.emitted,
+                "skipped": stats.skipped,
+                "failed": stats.failed,
+            },
+            coverage_reasons=reasons,
+            meta=coverage_meta,
+        )
+        write(coverage_record)
+        if stderr is not None:
+            if coverage == "partial":
+                stderr.write(
+                    "jmap: warning: results are partial; "
+                    f"coverage reasons: {', '.join(reasons)}\n"
+                )
+            stderr.flush()
+        exit_code = 2 if coverage == "partial" else 0
+        return RunResult(
+            admission,
+            tuple(responses),
+            stats,
+            tuple(records),
+            reasons,
+            exit_code,
+        )
+
+    def run_jsonl(
+        self,
+        states: Sequence[State],
+        questions: Mapping[str, Any],
+        stdout: TextIO,
+        **kwargs: Any,
+    ) -> RunResult:
+        """Run a finite judgment and write only canonical JSONL to stdout."""
+        kwargs["stdout"] = stdout
+        return self.run(states, questions, **kwargs)
 
 
 class FakeJudge:
@@ -286,3 +421,138 @@ class FakeJudge:
 
 DeterministicFakeJudge = FakeJudge
 FormedState = State
+
+
+def _response_record(
+    state_ref: str, response: TypedResponse, meta: RecordMeta
+) -> ResultRecord | PartialResultRecord | ErrorRecord:
+    if isinstance(response, ErrorResponse):
+        kind: str = (
+            "malformed_answer" if response.error == "malformed answer" else "api_error"
+        )
+        return ErrorRecord(
+            state_ref,
+            ErrorDetail(
+                kind, response.error, response.http_status, response.attempts
+            ),
+            meta,
+        )
+    if response.complete:
+        return ResultRecord(state_ref, response.answers, meta)
+    return PartialResultRecord(
+        state_ref, response.answers, response.missing_questions, meta
+    )
+
+
+def _rejection_records(
+    admission: StateAdmission, meta: RecordMeta
+) -> tuple[ErrorRecord, ...]:
+    grouped: dict[tuple[str, str], list[StateRejection]] = {}
+    events: list[StateRejection | tuple[str, str]] = []
+
+    def add_skip(rejection: StateRejection) -> None:
+        boundary = rejection.boundary or rejection.reason
+        key = (rejection.reason, boundary)
+        if key not in grouped:
+            grouped[key] = []
+            events.append(key)
+        grouped[key].append(rejection)
+
+    if admission.skipped and admission.max_chunks is not None:
+        for state in admission.skipped:
+            add_skip(
+                StateRejection(
+                    state.state_ref,
+                    "scan_cap",
+                    "scan cap reached before visit",
+                    boundary=f"max_chunks={admission.max_chunks}",
+                )
+            )
+    for rejection in admission.rejections:
+        if rejection.reason in {"scan_cap", "context_limit"} and (
+            rejection.state_ref is not None
+        ):
+            add_skip(rejection)
+        elif rejection.reason == "input_error":
+            events.append(rejection)
+
+    skip_meta = RecordMeta(
+        meta.preset, meta.preset_version, meta.model, meta.chunker, "not_applicable"
+    )
+    records: list[ErrorRecord] = []
+    for event in events:
+        if isinstance(event, StateRejection):
+            records.append(
+                ErrorRecord(
+                    None,
+                    ErrorDetail("input_error", event.message),
+                    skip_meta,
+                    source_ref=event.source_ref,
+                )
+            )
+            continue
+        reason, boundary = event
+        skipped = grouped[event]
+        records.append(
+            ErrorRecord(
+                None,
+                ErrorDetail(
+                    reason,  # type: ignore[arg-type]
+                    skipped[0].message,
+                    skip_summary=SkipSummary(
+                        boundary,
+                        len(skipped),
+                        tuple(item.state_ref for item in skipped if item.state_ref),
+                    ),
+                ),
+                skip_meta,
+            )
+        )
+    return tuple(records)
+
+
+def _coverage_reasons(
+    admission: StateAdmission, responses: Sequence[TypedResponse]
+) -> tuple[CoverageReason, ...]:
+    found: set[str] = set()
+    if admission.skipped:
+        found.add("scan_cap")
+    for rejection in admission.rejections:
+        if rejection.reason in {"scan_cap", "input_error", "context_limit"}:
+            found.add(rejection.reason)
+    for response in responses:
+        if isinstance(response, ErrorResponse):
+            found.add(
+                "malformed_answer"
+                if response.error == "malformed answer"
+                else "api_error"
+            )
+        elif not response.complete:
+            found.add("partial_answer")
+    order = (
+        "scan_cap",
+        "input_error",
+        "context_limit",
+        "api_error",
+        "malformed_answer",
+        "partial_answer",
+    )
+    return tuple(reason for reason in order if reason in found)  # type: ignore[return-value]
+
+
+def emit_jsonl(record: CanonicalRecord, stdout: TextIO) -> None:
+    stdout.write(
+        json.dumps(
+            record.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        + "\n"
+    )
+    stdout.flush()
+
+
+def emit_pretty(record: ResultRecord, stderr: TextIO) -> None:
+    answers = json.dumps(
+        record.to_dict()["answers"], ensure_ascii=False, sort_keys=True
+    )
+    stderr.write(f"{record.state_ref}\t{answers}\n")
+    stderr.flush()
