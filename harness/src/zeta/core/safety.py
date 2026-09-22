@@ -19,9 +19,16 @@ _logger = logging.getLogger(__name__)
 # Match privilege escalation, including env wrappers, absolute paths, and aliases.
 _LAYER0_TEXT_PATTERNS = (
     ("sudo", re.compile(r"(?:^|[;&|]\s*)(?:(?:env|command|exec)\s+)?(?:[A-Za-z_]\w*=\S+\s+)*(?:sudo|/[^\s;&|]*/sudo)(?:\s|$)|(?:^|[;&|]\s*)alias\b[^\n;|&]*\bsudo\b", re.IGNORECASE)),
-    # Catch network or decoded input that streams directly into a shell.
-    ("pipe_to_shell", re.compile(r"(?:\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:[^\s|]+/)?(?:ba|z|fi)?sh\b|<\([^)]*\b(?:curl|wget|fetch)\b[^)]*\)|\bbase64\b[^|\n]*\|\s*(?:[^\s|]+/)?(?:ba|z|fi)?sh\b)", re.IGNORECASE)),
 )
+
+_SHELL_INTERPRETERS = frozenset(
+    {"ash", "bash", "csh", "dash", "fish", "ksh", "sh", "tcsh", "zsh"}
+)
+_COMMAND_WRAPPERS = frozenset(
+    {"command", "doas", "exec", "nice", "nohup", "setsid", "sudo", "timeout"}
+)
+_COMMAND_SEPARATORS = frozenset({";", "&&", "||", "|"})
+_EXPANSION_SYNTAX = re.compile(r"[$*?\[\]{}]")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +46,118 @@ def _command_words(command: str) -> list[str]:
         return shlex.split(command)
     except ValueError:
         return command.split()
+
+
+def _command_segments(words: list[str]) -> list[list[str]]:
+    segments: list[list[str]] = [[]]
+    for word in words:
+        if word in _COMMAND_SEPARATORS:
+            if segments[-1]:
+                segments.append([])
+            continue
+        segments[-1].append(word)
+    return [segment for segment in segments if segment]
+
+
+def _is_assignment(word: str) -> bool:
+    name, separator, _value = word.partition("=")
+    return bool(separator and name and name.replace("_", "a").isalnum())
+
+
+def _resolved_argv_start(segment: list[str]) -> int | None:
+    """Resolve common argv wrappers without interpreting their payloads."""
+
+    index = 0
+    while index < len(segment):
+        word = segment[index]
+        if _is_assignment(word):
+            index += 1
+            continue
+        name = Path(word).name.casefold()
+        if name == "env":
+            index += 1
+            while index < len(segment):
+                option = segment[index]
+                if _is_assignment(option):
+                    index += 1
+                elif option == "--":
+                    index += 1
+                    break
+                elif option.startswith("-"):
+                    index += 2 if option in {"-u", "--unset", "-S", "--split-string"} else 1
+                else:
+                    break
+            continue
+        if name in _COMMAND_WRAPPERS:
+            index += 1
+            continue
+        return index
+    return None
+
+
+def _is_shell(word: str) -> bool:
+    return Path(word).name.casefold() in _SHELL_INTERPRETERS
+
+
+def _has_shell_command_payload(args: list[str]) -> bool:
+    return any(
+        argument in {"-c", "--command"}
+        or argument.startswith(("-c", "--command="))
+        for argument in args
+    )
+
+
+def _reads_generated_stdin(segment: list[str]) -> bool:
+    return any(
+        word.startswith(("<(", "<<<"))
+        or word in {"<", "<<", "<<<"}
+        or (index and segment[index - 1] in {"<", "<<"} and word.startswith(("<(", "$(", "`")))
+        for index, word in enumerate(segment)
+    )
+
+
+def _nested_shell_reason(words: list[str]) -> str | None:
+    # Nested shells defeat static inspection, so layer 0 never auto-approves them.
+    for segment in _command_segments(words):
+        start = _resolved_argv_start(segment)
+        if start is None:
+            continue
+        raw_name = Path(segment[0]).name.casefold()
+        command_name = Path(segment[start]).name.casefold()
+        if raw_name in {"eval", "exec"} and len(segment) > 1:
+            return "nested_shell"
+        if command_name == "eval" or (
+            command_name == "exec" and len(segment) > start + 1
+        ):
+            return "nested_shell"
+        if _is_shell(segment[start]) and (
+            _has_shell_command_payload(segment[start + 1:])
+            or _reads_generated_stdin(segment[start:])
+        ):
+            return "nested_shell"
+        if command_name == "xargs" and any(
+            _is_shell(argument) for argument in segment[start + 1:]
+        ):
+            return "nested_shell"
+    return None
+
+
+def _pipeline_shell_reason(words: list[str]) -> str | None:
+    segments = _command_segments(words)
+    if len(segments) < 2 or "|" not in words:
+        return None
+    final = segments[-1]
+    start = _resolved_argv_start(final)
+    if start is None:
+        return None
+    command_name = Path(final[start]).name.casefold()
+    if _is_shell(final[start]):
+        return "pipe_to_shell"
+    if command_name == "xargs" and any(
+        _is_shell(argument) for argument in final[start + 1:]
+    ):
+        return "pipe_to_shell"
+    return None
 
 
 def _command_positions(words: list[str]) -> list[tuple[int, str]]:
@@ -90,6 +209,39 @@ def _credential_path(path_text: str, cwd_path: Path) -> bool:
     )
 
 
+def _root_scoped_expansion(path_text: str) -> bool:
+    root_scoped = path_text == "~" or path_text.startswith(("~/", "/"))
+    return root_scoped and _EXPANSION_SYNTAX.search(path_text) is not None
+
+
+def _command_arguments(words: list[str], index: int) -> list[str]:
+    arguments: list[str] = []
+    for word in words[index + 1 :]:
+        if word in _COMMAND_SEPARATORS:
+            break
+        arguments.append(word)
+    return arguments
+
+
+def _root_expansion_reason(words: list[str]) -> str | None:
+    for index, command_word in _command_positions(words):
+        command_name = Path(command_word).name.casefold()
+        arguments = _command_arguments(words, index)
+        if command_name in {"rm", "chmod", "chown"} and any(
+            _root_scoped_expansion(argument)
+            for argument in arguments
+            if not argument.startswith("-")
+        ):
+            return "root_scope_expansion"
+        if command_name == "dd" and any(
+            _root_scoped_expansion(argument.partition("=")[2])
+            for argument in arguments
+            if argument.startswith("of=")
+        ):
+            return "root_scope_expansion"
+    return None
+
+
 def _rm_reason(words: list[str], cwd_path: Path) -> str | None:
     for index, command_word in _command_positions(words):
         if Path(command_word).name.casefold() != "rm":
@@ -123,6 +275,23 @@ def _rm_reason(words: list[str], cwd_path: Path) -> str | None:
     return None
 
 
+def _credential_argument(argument: str) -> str:
+    if "=" in argument:
+        return argument.partition("=")[2]
+    return argument
+
+
+def _credential_reason(words: list[str], cwd_path: Path) -> str | None:
+    for index, _command_word in _command_positions(words):
+        if any(
+            _credential_path(_credential_argument(argument), cwd_path)
+            for argument in _command_arguments(words, index)
+            if not argument.startswith("-") or "=" in argument
+        ):
+            return "credential_file_read"
+    return None
+
+
 def _recursive_permission_reason(words: list[str], cwd_path: Path) -> str | None:
     for index, command_word in _command_positions(words):
         if Path(command_word).name.casefold() not in {"chmod", "chown"}:
@@ -152,19 +321,24 @@ def layer0_reason(command: str, cwd: str | Path) -> str | None:
     for reason, pattern in _LAYER0_TEXT_PATTERNS:
         if pattern.search(command):
             return reason
+    reason = _pipeline_shell_reason(words)
+    if reason is not None:
+        return reason
+    reason = _nested_shell_reason(words)
+    if reason is not None:
+        return reason
     reason = _rm_reason(words, cwd_path)
+    if reason is not None:
+        return reason
+    reason = _root_expansion_reason(words)
     if reason is not None:
         return reason
     reason = _recursive_permission_reason(words, cwd_path)
     if reason is not None:
         return reason
-    readers = {"cat", "head", "tail", "less", "more", "sed", "awk", "grep", "rg", "openssl"}
-    if (
-        words
-        and Path(words[0]).name.casefold() in readers
-        and any(_credential_path(word, cwd_path) for word in words[1:])
-    ):
-        return "credential_file_read"
+    reason = _credential_reason(words, cwd_path)
+    if reason is not None:
+        return reason
     profile_path = re.compile(
         r"(?:~?/\.bash_history|~?/\.zsh_history|~?/\.bashrc|~?/\.zshrc|~?/\.profile|~?/\.bash_profile|~?/\.zprofile)",
         re.IGNORECASE,
@@ -297,7 +471,7 @@ class SafetyTier:
             "trigger": outcome.reason,
         }
         if outcome.usage is not None:
-            event["usage"] = {"service": "jev", "usage": dict(outcome.usage)}
+            event["usage"] = dict(outcome.usage)
         if self.telemetry is not None:
             self.telemetry(event)
         _logger.info("safety tier decision", extra={"safety_tier": event})
