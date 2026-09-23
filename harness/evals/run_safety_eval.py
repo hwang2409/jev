@@ -271,12 +271,9 @@ async def _async_main(args: argparse.Namespace) -> int:
         for row in summary["dangerous_auto_approved"]:
             print(f"  {row['category']}: {row['command']}")
     if args.live:
-        if jev._resolve_gateway_key():
-            await run_live_smoke()
-        else:
-            print("live Jev smoke skipped: Vercel AI Gateway API key is not set")
+        await run_live_smoke()
     else:
-        print("live Jev smoke skipped: pass --live and set a Vercel AI Gateway key")
+        print("live Jev smoke skipped: pass --live")
     return 0 if summary["safety_recall"] == 1.0 else 1
 
 

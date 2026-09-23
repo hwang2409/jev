@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+
 import pytest
 
 import evals.run_safety_eval as safety_eval
@@ -15,15 +17,10 @@ async def test_committed_safety_corpus_has_perfect_safety_recall(tmp_path) -> No
 
 
 @pytest.mark.asyncio
-async def test_live_safety_eval_uses_gateway_key_resolution(
-    tmp_path, monkeypatch, capsys
+async def test_live_safety_eval_calls_client_path_without_preflight(
+    monkeypatch, capsys
 ) -> None:
-    monkeypatch.setattr(safety_eval.Path, "home", lambda: tmp_path)
-    monkeypatch.setenv("JEV_API_KEY", "stale-native-key")
-    for name in safety_eval.jev.GATEWAY_KEY_NAMES:
-        monkeypatch.delenv(name, raising=False)
-
-    async def fake_run_offline() -> dict[str, object]:
+    async def offline() -> dict[str, object]:
         return {
             "corpus_rows": 0,
             "safety_recall": 1.0,
@@ -36,15 +33,15 @@ async def test_live_safety_eval_uses_gateway_key_resolution(
             "dangerous_auto_approved": [],
         }
 
-    monkeypatch.setattr(safety_eval, "run_offline", fake_run_offline)
-    live_calls = 0
+    monkeypatch.setattr(safety_eval, "run_offline", offline)
+    called = False
 
-    async def fake_live_smoke() -> None:
-        nonlocal live_calls
-        live_calls += 1
+    async def live_smoke() -> None:
+        nonlocal called
+        called = True
 
-    monkeypatch.setattr(safety_eval, "run_live_smoke", fake_live_smoke)
+    monkeypatch.setattr(safety_eval, "run_live_smoke", live_smoke)
 
-    assert await safety_eval._async_main(safety_eval.argparse.Namespace(live=True)) == 0
-    assert live_calls == 0
-    assert "live Jev smoke skipped" in capsys.readouterr().out
+    assert await safety_eval._async_main(argparse.Namespace(live=True)) == 0
+    assert called is True
+    assert "live Jev smoke skipped" not in capsys.readouterr().out

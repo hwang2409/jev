@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 import httpx
 import pytest
+from jm.answers import ChoiceAnswer, NoulAnswer, ScoreAnswer
 
 import zeta.providers.anthropic as anthropic_module
 from zeta.core.fake import FakeBackend, ScriptedTurn
@@ -39,90 +40,76 @@ def hostile_page_cases() -> list[tuple[str, str, str]]:
     ]
 
 
-class _Response:
-    def __init__(self, data: dict[str, Any], status_code: int = 200) -> None:
-        self.status_code = status_code
-        self._data = data
-        self.text = ""
-
-    def json(self) -> dict[str, Any]:
-        return self._data
-
-
 class _Transport:
     def __init__(self, responder: Any) -> None:
         self.responder = responder
         self.requests: list[dict[str, Any]] = []
 
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
+    async def aclose(self) -> None:
         return None
 
-    async def post(self, _url: str, **kwargs: Any) -> _Response:
-        request = kwargs["json"]
+    async def evaluate_async(
+        self, state: dict[str, Any], questions: dict[str, Any]
+    ) -> jev.JevResponse:
+        request = {"state": state, "questions": questions}
         self.requests.append(request)
         response = self.responder(request)
         if isinstance(response, BaseException):
-            raise response
-        return _Response(response)
+            if isinstance(response, jev.JevError):
+                raise response
+            raise jev.JevError(str(response)) from response
+        assert isinstance(response, jev.JevResponse)
+        return response
 
 
 def _provider_response(
     request: dict[str, Any],
     *,
     choice_confidence: float = 0.95,
-) -> dict[str, Any]:
+) -> jev.JevResponse:
     questions = request["questions"]
-    if "element_id" in questions:
-        candidate = request["state"]["candidates"][0]
-        element_id = candidate["element_id"]
-        choice = element_id if choice_confidence >= 0.8 else None
-        return {
-            "answers": {
-                "element_id": {
-                    "choice": choice,
-                    "probabilities": {element_id: 1.0},
-                    "confidence": choice_confidence,
+    answers: dict[str, ChoiceAnswer | NoulAnswer | ScoreAnswer] = {}
+    for question_id, question in questions.items():
+        question_type = question["type"]
+        if question_type == "choice":
+            criteria = question["criteria"]
+            choices = list(criteria)
+            choice = choices[0]
+            confidence = (
+                choice_confidence if question_id == "element_id" else 0.95
+            )
+            answers[question_id] = ChoiceAnswer(
+                choice,
+                {
+                    candidate_id: 1.0 if candidate_id == choice else 0.0
+                    for candidate_id in choices
                 },
-                "goal_element_present": {"noul": 0.95},
-                "page_loaded_and_stable": {"noul": 0.95},
-                "action_is_the_next_step": {"noul": 0.95},
-            },
-            "usage": {},
-        }
-    if questions and all(item["type"] == "score" for item in questions.values()):
-        return {
-            "answers": {
-                result_id: {"score": 0.95, "confidence": 0.95}
-                for result_id in questions
-            },
-            "usage": {},
-        }
-    if "score" in questions:
-        return {
-            "answers": {
-                "score": {
-                    "choice": "0",
-                    "probabilities": {"0": 1.0},
-                    "confidence": 0.95,
+                confidence,
+            )
+        elif question_type == "score":
+            criteria = question["criteria"]
+            answers[question_id] = ScoreAnswer(
+                0.95,
+                {str(index): value for index, value in enumerate(criteria)},
+                {
+                    str(index): 0.95 if index == 1 else 0.05
+                    for index in range(len(criteria))
                 },
-                "touches_outside_cwd": {"noul": 0.05},
-                "plausibly_irreversible": {"noul": 0.05},
-            },
-            "usage": {},
-        }
-    answers = {
-        "page_loaded_and_stable": {"noul": 0.95},
-        "goal_element_present": {"noul": 0.95},
-        "action_is_the_next_step": {"noul": 0.95},
-        "dead_end": {"noul": 0.05},
-        "needs_different_approach": {"noul": 0.05},
-    }
-    if request["state"].get("action_result"):
-        answers["action_succeeded"] = {"noul": 0.95}
-    return {"answers": answers, "usage": {}}
+                0.95,
+            )
+        else:
+            answers[question_id] = NoulAnswer(
+                0.05
+                if question_id
+                in {
+                    "dead_end",
+                    "needs_different_approach",
+                    "touches_outside_cwd",
+                    "plausibly_irreversible",
+                }
+                else 0.95
+            )
+    return jev.JevResponse(answers=answers, usage={})
 
 
 def _install_transport(
@@ -130,8 +117,7 @@ def _install_transport(
     responder: Any = _provider_response,
 ) -> _Transport:
     transport = _Transport(responder)
-    monkeypatch.setattr(jev.httpx, "AsyncClient", lambda **_kwargs: transport)
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
+    monkeypatch.setattr(jev, "JevClient", lambda: transport)
     return transport
 
 
