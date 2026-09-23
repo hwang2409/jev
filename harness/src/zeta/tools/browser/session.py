@@ -84,7 +84,7 @@ class BrowserSession:
                 adapter = await adapter
             try:
                 await adapter.launch()
-            except Exception:
+            except BaseException:
                 try:
                     await adapter.close()
                 except Exception as cleanup_error:
@@ -244,6 +244,10 @@ class BrowserSession:
 
 class StaleSnapshotError(BrowserError):
     """The action references a snapshot other than the current one."""
+
+
+class BrowserSessionClosedError(BrowserError):
+    """The registry closed the browser session permanently."""
 
 
 def catalog_payload(catalog: BrowserCatalog) -> dict[str, object]:

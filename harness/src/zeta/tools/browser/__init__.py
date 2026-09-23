@@ -32,6 +32,7 @@ from .session import (
     BROWSER_ACTION_TIMEOUT_MS,
     BROWSER_NAVIGATION_TIMEOUT_MS,
     BrowserSession,
+    BrowserSessionClosedError,
     StaleSnapshotError,
     catalog_payload,
 )
@@ -57,6 +58,8 @@ BASE_ELEMENT_PROPERTIES = {
 def _session(registry: ToolRegistry) -> BrowserSession:
     session = registry.browser_session
     if not isinstance(session, BrowserSession):
+        if registry.browser_session_closed:
+            raise BrowserSessionClosedError("browser session is closed")
         raise BrowserError("browser session is not registered")
     return session
 
@@ -559,6 +562,10 @@ def _extracted_text(value: str | dict[str, str | None]) -> str:
 
 
 def _browser_exception(exc: Exception) -> StructuredToolResult:
+    if isinstance(exc, BrowserSessionClosedError):
+        return _browser_error(
+            str(exc) or "browser session is closed", "browser_session_closed"
+        )
     if isinstance(exc, StaleSnapshotError):
         return _browser_error(str(exc) or "browser snapshot is stale", "stale_snapshot")
     if isinstance(exc, AdapterElementUnavailableError):

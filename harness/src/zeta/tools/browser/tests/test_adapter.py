@@ -91,7 +91,28 @@ async def test_fake_returns_next_observation_and_records_values() -> None:
     assert adapter.selected == [(select, "pro")]
     assert adapter.extractions == [(element, ["href"], 100)]
     assert selected.changed is True
-    assert extracted == ExtractedData({"href": None}, False, 0)
+    assert extracted == ExtractedData({"href": None}, False, 4)
+
+
+@pytest.mark.asyncio
+async def test_fake_bounds_attribute_names_and_values_by_total_bytes() -> None:
+    observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    adapter = FakeBrowserAdapter([observation])
+    attributes = [f"attribute_{index}_{'x' * 200}" for index in range(100)]
+    element = ElementRef(1, "e1", "article", "extract", "v" * 1000, "", None, None, False, True)
+
+    extracted = await adapter.extract(element, ["text", *attributes], 800)
+
+    assert extracted.truncated is True
+    assert isinstance(extracted.value, dict)
+    retained_size = sum(
+        len(name.encode("utf-8")) + len((value or "").encode("utf-8"))
+        for name, value in extracted.value.items()
+    )
+    assert retained_size <= 800
+    assert extracted.full_size == 4 + 1000 + sum(
+        len(name.encode("utf-8")) for name in attributes
+    )
 
 
 @pytest.mark.asyncio

@@ -29,6 +29,17 @@ class _FailingAdapter:
         self.closed += 1
 
 
+class _CancelledLaunchAdapter:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    async def launch(self) -> None:
+        raise asyncio.CancelledError
+
+    async def close(self) -> None:
+        self.closed += 1
+
+
 @pytest.mark.asyncio
 async def test_browser_session_single_flights_first_adapter_launch() -> None:
     adapter = _SlowAdapter()
@@ -47,6 +58,18 @@ async def test_browser_session_closes_adapter_when_launch_fails() -> None:
     session = BrowserSession(lambda: adapter)
 
     with pytest.raises(RuntimeError, match="launch failed"):
+        await session.adapter()
+
+    assert adapter.closed == 1
+    assert session.adapter_instance is None
+
+
+@pytest.mark.asyncio
+async def test_browser_session_closes_adapter_when_launch_is_cancelled() -> None:
+    adapter = _CancelledLaunchAdapter()
+    session = BrowserSession(lambda: adapter)  # type: ignore[arg-type]
+
+    with pytest.raises(asyncio.CancelledError):
         await session.adapter()
 
     assert adapter.closed == 1

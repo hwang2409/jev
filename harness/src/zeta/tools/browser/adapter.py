@@ -262,17 +262,27 @@ def _bounded_extracted(
     limit: int,
 ) -> ExtractedData:
     if isinstance(value, dict):
-        full_size = sum(len((item or "").encode("utf-8")) for item in value.values())
+        full_size = sum(
+            len(key.encode("utf-8")) + len((item or "").encode("utf-8"))
+            for key, item in value.items()
+        )
         remaining = max(limit, 0)
         bounded: dict[str, str | None] = {}
         for key, item in value.items():
+            key_size = len(key.encode("utf-8"))
+            if key_size > remaining:
+                continue
+            remaining -= key_size
             if item is None:
                 bounded[key] = None
                 continue
             bounded_item = _bounded_string(item, remaining)
             bounded[key] = bounded_item
             remaining -= len(bounded_item.encode("utf-8"))
-        bounded_size = sum(len((item or "").encode("utf-8")) for item in bounded.values())
+        bounded_size = sum(
+            len(key.encode("utf-8")) + len((item or "").encode("utf-8"))
+            for key, item in bounded.items()
+        )
         return ExtractedData(bounded, bounded_size < full_size, full_size)
     encoded = value.encode("utf-8")
     bounded = _bounded_string(value, limit)

@@ -241,6 +241,7 @@ _ERROR_HINTS: dict[str, str] = {
     "navigation_race": "call browser_state before retrying the browser action",
     "browser_timeout": "retry with the bounded browser operation",
     "browser_start_failed": "the browser session could not start; retry later",
+    "browser_session_closed": "the browser session is closed; create a new registry",
     "jev_routing_error": "call browser_state and provide a more specific action",
     "page_load_failed": "call browser_state after the page finishes loading",
     "goal_element_absent": "call browser_state and choose an available goal element",
@@ -501,6 +502,7 @@ class ToolRegistry:
         self._tools: dict[str, ToolDefinition] = {}
         self._browser_session: Any | None = None
         self._browser_session_factory: Callable[[ToolRegistry], Any] | None = None
+        self._browser_session_closed = False
         self.browser_catalog: Any | None = None
         self.browser_adapter_factory: Callable[[], Any] | None = None
         self.browser_goal: str | None = None
@@ -543,9 +545,17 @@ class ToolRegistry:
     def browser_session(self) -> Any | None:
         """Return the lazy browser session owned by this registry."""
 
-        if self._browser_session is None and self._browser_session_factory is not None:
+        if (
+            self._browser_session is None
+            and self._browser_session_factory is not None
+            and not self._browser_session_closed
+        ):
             self._browser_session = self._browser_session_factory(self)
         return self._browser_session
+
+    @property
+    def browser_session_closed(self) -> bool:
+        return self._browser_session_closed
 
     def register(
         self,
@@ -637,6 +647,7 @@ class ToolRegistry:
             if name not in exclude_names
         }
         clone._browser_session = None
+        clone._browser_session_closed = False
         clone.browser_catalog = None
         clone.browser_goal = None
         clone._session_store = store
@@ -708,6 +719,7 @@ class ToolRegistry:
         except BaseException as exc:  # noqa: BLE001 - close must continue cleanup
             background_error = exc
         browser_session = self._browser_session
+        self._browser_session_closed = True
         self._browser_session = None
         if browser_session is not None:
             await browser_session.close()
