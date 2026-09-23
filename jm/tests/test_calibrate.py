@@ -803,6 +803,41 @@ def test_malformed_and_partial_cache_entries_fail_before_live_calls(
     assert records[-1]["within_tolerance"] is None
 
 
+@pytest.mark.parametrize(
+    "kind", ("empty", "missing_payload_preset", "missing_preimage_preset")
+)
+def test_missing_or_partial_preset_metadata_fails_before_live_calls(
+    tmp_path: Path, kind: str
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    path = next(store.root.rglob("*.json"))
+    if kind == "empty":
+        payload: dict[str, object] = {}
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if kind == "missing_payload_preset":
+            del payload["preset"]
+        else:
+            del payload["preimage"]["preset"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
 def test_mixed_preset_cache_entries_fail_before_live_calls(tmp_path: Path) -> None:
     preset = resolve_preset("jgrep")
     store = CacheStore(tmp_path)
@@ -962,3 +997,46 @@ def test_mixed_candidate_models_do_not_make_a_decision(tmp_path: Path) -> None:
         "threshold_crossings=0 stable_drift=0 boundary_noise=0 "
         "within_tolerance=none"
     )
+
+
+def test_mixed_baseline_models_do_not_make_a_decision(tmp_path: Path) -> None:
+    preset = resolve_preset("jgrep")
+    store = CacheStore(tmp_path)
+    for index, served_model in enumerate(("baseline-a", "baseline-b"), start=1):
+        preimage = build_cache_preimage(
+            model=preset.model,
+            preset=preset.name,
+            preset_version=preset.version,
+            chunking=preset.chunking,
+            questions=preset.questions,
+            state=State(f"case#{index}", "focus", {"query": "launch"}),
+        )
+        store.publish(
+            preimage,
+            JudgeResponse(
+                {"matches_query": NoulAnswer(0.5)},
+                served_model=served_model,
+            ),
+        )
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.5)},
+            served_model="candidate",
+        )
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 2
+    assert len(records) == 3
+    assert records[-1]["baseline_model_counts"] == {
+        "baseline-a": 1,
+        "baseline-b": 1,
+    }
+    assert records[-1]["candidate_model_counts"] == {"candidate": 2}
+    assert records[-1]["within_tolerance"] is None

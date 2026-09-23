@@ -214,7 +214,15 @@ class CacheStore:
                     if isinstance(preimage, Mapping)
                     else None
                 )
-                if payload_preset != preset and preimage_preset != preset:
+                if not (
+                    isinstance(payload_preset, str)
+                    and payload_preset
+                    and isinstance(preimage_preset, str)
+                    and preimage_preset
+                    and payload_preset == preimage_preset
+                ):
+                    raise ValueError("cache entry has invalid preset metadata")
+                if payload_preset != preset:
                     continue
                 expected_key = payload.get("cache_key")
                 if not isinstance(expected_key, str):
