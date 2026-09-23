@@ -146,6 +146,10 @@ class BrowserError(RuntimeError):
     """Base error translated into a stable browser tool error kind."""
 
 
+class BrowserExecutableNotFoundError(BrowserError):
+    """The configured Playwright browser executable is not installed."""
+
+
 class ElementUnavailableError(BrowserError):
     """The requested element is detached or ambiguous."""
 
@@ -679,6 +683,10 @@ def _default_fake_observation() -> PageObservation:
 
 def _raise_playwright_error(exc: Exception, message: str) -> None:
     detail = f"{exc.__class__.__name__}: {exc}".lower()
+    if exc.__class__.__name__ == "Error" and str(exc).startswith(
+        "BrowserType.launch: Executable doesn't exist at "
+    ):
+        raise BrowserExecutableNotFoundError(message) from exc
     if (
         exc.__class__.__name__ in {"TimeoutError", "PlaywrightTimeoutError"}
         or "timeout" in detail

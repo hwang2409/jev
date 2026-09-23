@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 import uuid
 from collections.abc import Generator
 from contextlib import ExitStack
@@ -18,6 +19,15 @@ import pytest
 from rich.console import Console
 
 _TEST_SITE_PACKAGES = Path(__file__).parent
+_PLAYWRIGHT_BROWSERS_PATH = pytest.StashKey[str]()
+
+
+def _default_playwright_browsers_path(home: Path) -> Path:
+    if sys.platform == "darwin":
+        return home / "Library" / "Caches" / "ms-playwright"
+    if sys.platform == "win32":
+        return home / "AppData" / "Local" / "ms-playwright"
+    return home / ".cache" / "ms-playwright"
 
 run_path(_TEST_SITE_PACKAGES / "sitecustomize.py")
 
@@ -25,6 +35,10 @@ run_path(_TEST_SITE_PACKAGES / "sitecustomize.py")
 def pytest_configure(config: pytest.Config) -> None:
     # Configure HOME before collection: module-level Path.home() values and
     # child processes must use the same watched home as the test fixtures.
+    configured_playwright_path = os.environ.get("PLAYWRIGHT_BROWSERS_PATH")
+    if configured_playwright_path is None:
+        configured_playwright_path = str(_default_playwright_browsers_path(Path.home()))
+    config.stash[_PLAYWRIGHT_BROWSERS_PATH] = configured_playwright_path
     cleanup = ExitStack()
     config.add_cleanup(cleanup.close)
     fake_home = cleanup.enter_context(TemporaryDirectory(prefix="zeta-test-home-"))
@@ -336,6 +350,18 @@ _HOME_GUARD = pytest.StashKey[LiveHomeWriteGuard]()
 @pytest.fixture(scope="session")
 def live_home_write_guard(pytestconfig: pytest.Config) -> LiveHomeWriteGuard:
     return pytestconfig.stash[_HOME_GUARD]
+
+
+@pytest.fixture(scope="session", autouse=True)
+def preserve_playwright_browsers_path(
+    pytestconfig: pytest.Config,
+) -> Generator[None, None, None]:
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setenv(
+            "PLAYWRIGHT_BROWSERS_PATH",
+            pytestconfig.stash[_PLAYWRIGHT_BROWSERS_PATH],
+        )
+        yield
 
 
 @pytest.fixture(scope="session", autouse=True)

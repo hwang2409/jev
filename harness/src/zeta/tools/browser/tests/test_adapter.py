@@ -9,6 +9,7 @@ from zeta.tools.browser import register
 from zeta.tools.browser.adapter import (
     ActionObservation,
     BrowserError,
+    BrowserExecutableNotFoundError,
     BrowserTimeoutError,
     ElementRef,
     ElementUnavailableError,
@@ -325,13 +326,81 @@ async def contract_adapter(
     adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
     try:
         await adapter.launch()
-    except BrowserError as exc:
+    except BrowserExecutableNotFoundError as exc:
         await adapter.close()
         pytest.skip(f"playwright browser executable is absent: {exc}")
     try:
         yield adapter
     finally:
         await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_does_not_hide_launch_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class BrokenChromium:
+        async def launch(self, *, headless: bool) -> object:
+            del headless
+            raise RuntimeError("browser executable path is invalid")
+
+    class BrokenPlaywright:
+        chromium = BrokenChromium()
+
+    class BrokenManager:
+        async def start(self) -> BrokenPlaywright:
+            return BrokenPlaywright()
+
+    monkeypatch.setattr(
+        "zeta.tools.browser.adapter.load_playwright_page",
+        lambda: type(
+            "PlaywrightModule",
+            (),
+            {"async_playwright": staticmethod(lambda: BrokenManager())},
+        )(),
+    )
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+
+    with pytest.raises(BrowserError, match="browser launch failed") as raised:
+        await adapter.launch()
+
+    assert not isinstance(raised.value, BrowserExecutableNotFoundError)
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_types_a_missing_browser_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingExecutableError(RuntimeError):
+        pass
+
+    MissingExecutableError.__name__ = "Error"
+
+    class MissingChromium:
+        async def launch(self, *, headless: bool) -> object:
+            del headless
+            raise MissingExecutableError(
+                "BrowserType.launch: Executable doesn't exist at /missing/browser"
+            )
+
+    class MissingPlaywright:
+        chromium = MissingChromium()
+
+    class MissingManager:
+        async def start(self) -> MissingPlaywright:
+            return MissingPlaywright()
+
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    monkeypatch.setattr(
+        "zeta.tools.browser.adapter.load_playwright_page",
+        lambda: type(
+            "PlaywrightModule",
+            (),
+            {"async_playwright": staticmethod(lambda: MissingManager())},
+        )(),
+    )
+    with pytest.raises(BrowserExecutableNotFoundError):
+        await adapter.launch()
 
 
 @pytest.mark.asyncio
