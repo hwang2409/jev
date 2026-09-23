@@ -1,7 +1,6 @@
-import pytest
-import requests
+from jm.answers import ChoiceAnswer, NoulAnswer
+from jm.client import JevError, JevResponse
 
-import router
 from router import RouteResult, build_request, parse_response, route
 
 CATALOG_STUB = {"Read": "read a file", "Bash": "run a command"}
@@ -17,7 +16,7 @@ RESPONSE_STUB = {
         "needs_tool": {"type": "noul", "noul": 0.97},
         "step_clarity": {"type": "noul", "noul": 0.88},
     },
-    "usage": {"inputTokens": 400, "outputTokens": 60},
+    "usage": {"input_tokens": 400, "output_tokens": 60},
 }
 
 
@@ -57,133 +56,67 @@ def test_parse_response():
     assert r.usage == {"input_tokens": 400, "output_tokens": 60}
 
 
-class FakeResponse:
-    def __init__(self, status_code, payload=None, headers=None):
-        self.status_code = status_code
-        self._payload = payload
-        self.headers = headers or {}
-
-    def json(self):
-        return self._payload
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise requests.HTTPError(f"status {self.status_code}")
-
-
-class FakeSession:
-    def __init__(self, responses):
-        self.responses = list(responses)
+class FakeClient:
+    def __init__(self, response):
+        self.response = response
         self.calls = []
 
-    def post(self, url, json=None, headers=None, timeout=None):
-        self.calls.append({"url": url, "json": json, "headers": headers})
-        return self.responses.pop(0)
+    def evaluate(self, state, questions):
+        self.calls.append((state, questions))
+        return self.response
 
 
-def test_route_success(monkeypatch):
-    sess = FakeSession([FakeResponse(200, RESPONSE_STUB)])
-    r = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
-    assert r.tool == "Read"
-    assert sess.calls[0]["headers"]["Authorization"] == "Bearer k"
-    assert sess.calls[0]["headers"] == {
-        "Authorization": "Bearer k",
-        "Content-Type": "application/json",
-        "Accept-Encoding": "identity",
-        "ai-evaluation-model-specification-version": "4",
-        "ai-gateway-auth-method": "api-key",
-        "ai-gateway-protocol-version": "0.0.1",
-        "ai-model-id": "typesafe-ai/jev",
-    }
-    assert sess.calls[0]["json"]["questions"]["needs_tool"]["type"] == "boolean"
-    assert sess.calls[0]["json"]["providerOptions"] == {
-        "gateway": {"zeroDataRetention": True}
-    }
-    assert sess.calls[0]["json"]["questions"]["tool"]["criteria"] == CATALOG_STUB
+def test_route_uses_jm_client_and_preserves_request_questions():
+    client = FakeClient(RESPONSE_STUB)
 
+    result = route("task", "step", ["old"], CATALOG_STUB, client=client)
 
-def test_route_maps_gateway_booleans_and_derives_missing_confidence():
-    response = {
-        "answers": {
-            "tool": {
-                "type": "choice",
-                "choice": "Read",
-                "probabilities": {"Read": 0.8, "Bash": 0.2},
+    assert result.tool == "Read"
+    assert result.needs_tool == 0.97
+    assert result.step_clarity == 0.88
+    assert result.usage == {"input_tokens": 400, "output_tokens": 60}
+    assert client.calls == [
+        (
+            {
+                "task": "task",
+                "current_step": "step",
+                "recent_steps": ["old"],
             },
-            "needs_tool": {"type": "boolean", "probability": 0.75},
-            "step_clarity": {"type": "boolean", "probability": 0.9},
+            build_request("task", "step", ["old"], CATALOG_STUB)["questions"],
+        )
+    ]
+
+
+def test_route_accepts_normalized_jm_response():
+    response = JevResponse(
+        answers={
+            "tool": ChoiceAnswer(
+                choice="Read",
+                probabilities={"Read": 0.8, "Bash": 0.2},
+                confidence=0.6,
+            ),
+            "needs_tool": NoulAnswer(noul=0.75),
+            "step_clarity": NoulAnswer(noul=0.9),
         },
-        "usage": {"inputTokens": 2, "outputTokens": 1},
-    }
-    sess = FakeSession([FakeResponse(200, response)])
+        usage={"input_tokens": 2, "output_tokens": 1},
+    )
 
-    result = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
+    result = route("t", "s", catalog=CATALOG_STUB, client=FakeClient(response))
 
+    assert result.tool == "Read"
+    assert result.probabilities == {"Read": 0.8, "Bash": 0.2}
+    assert result.confidence == 0.6
     assert result.needs_tool == 0.75
     assert result.step_clarity == 0.9
-    assert result.confidence == pytest.approx(0.6)
-    assert result.usage == {"input_tokens": 2, "output_tokens": 1}
 
 
-def test_route_uses_question_criteria_count_for_confidence():
-    response = {
-        "answers": {
-            "tool": {
-                "type": "choice",
-                "choice": "Read",
-                "probabilities": {"Read": 0.8, "Bash": 0.2},
-            },
-            "needs_tool": {"type": "boolean", "probability": 0.75},
-            "step_clarity": {"type": "boolean", "probability": 0.9},
-        },
-        "usage": {"inputTokens": 2, "outputTokens": 1},
-    }
-    sess = FakeSession([FakeResponse(200, response)])
+def test_route_keeps_jm_transport_errors():
+    class FailingClient:
+        def evaluate(self, state, questions):
+            raise JevError("gateway unavailable", http_status=503, attempts=3)
 
-    result = route(
-        "t",
-        "s",
-        session=sess,
-        api_key="k",
-        catalog={"Read": "read", "Bash": "run", "Search": "search"},
-    )
-
-    assert result.confidence == pytest.approx(0.7)
-
-
-def test_route_retries_on_429_then_succeeds(monkeypatch):
-    delays = []
-    monkeypatch.setattr(router.time, "sleep", delays.append)
-    sess = FakeSession(
-        [
-            FakeResponse(429, headers={"Retry-After": "59"}),
-            FakeResponse(200, RESPONSE_STUB),
-        ]
-    )
-    r = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
-    assert r.tool == "Read"
-    assert len(sess.calls) == 2
-    assert delays == [59.0]
-
-
-def test_route_gives_up_after_three_attempts(monkeypatch):
-    delays = []
-    monkeypatch.setattr(router.time, "sleep", delays.append)
-    sess = FakeSession([FakeResponse(529)] * 3)
     try:
-        route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
-        raise AssertionError("expected HTTPError")
-    except requests.HTTPError:
-        pass
-    assert len(sess.calls) == 3
-    assert delays == [1.0, 2.0]
-
-
-def test_route_does_not_retry_client_errors(monkeypatch):
-    sess = FakeSession([FakeResponse(422)])
-    try:
-        route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
-        raise AssertionError("expected HTTPError")
-    except requests.HTTPError:
-        pass
-    assert len(sess.calls) == 1
+        route("t", "s", catalog=CATALOG_STUB, client=FailingClient())
+        raise AssertionError("expected JevError")
+    except JevError as error:
+        assert str(error) == "gateway unavailable"
