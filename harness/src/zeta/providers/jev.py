@@ -129,29 +129,9 @@ class BrowserPageStateResult:
 def _element_description(item: dict[str, object]) -> str:
     role = item.get("role")
     affordance = item.get("affordance")
-    text = item.get("text")
-    name = item.get("name")
-    value_hint = item.get("value_hint")
-    landmark = item.get("landmark")
     details = [str(role) if isinstance(role, str) and role else "element"]
     if isinstance(affordance, str) and affordance:
         details.append(f"supports {affordance}")
-    label = next(
-        (
-            value
-            for value in (text, name, value_hint)
-            if isinstance(value, str) and value
-        ),
-        None,
-    )
-    if label is not None:
-        details.append(f"labelled {label!r}")
-    if isinstance(name, str) and name and name != label:
-        details.append(f"named {name!r}")
-    if isinstance(value_hint, str) and value_hint:
-        details.append(f"with value hint {value_hint!r}")
-    if isinstance(landmark, str) and landmark:
-        details.append(f"in the {landmark} landmark")
     if item.get("disabled") is True:
         details.append("disabled")
     if item.get("visible") is False:
@@ -161,16 +141,7 @@ def _element_description(item: dict[str, object]) -> str:
 
 def _element_examples(item: dict[str, object]) -> list[str]:
     affordance = item.get("affordance")
-    label = next(
-        (
-            value
-            for key in ("text", "name", "value_hint")
-            for value in [item.get(key)]
-            if isinstance(value, str) and value
-        ),
-        "this element",
-    )
-    subject = f"the {label} element"
+    subject = "the selected catalog element"
     examples_by_affordance = {
         "click": [f"Click {subject}.", f"Use {subject} to continue."],
         "submit": [f"Submit with {subject}.", f"Send the form using {subject}."],

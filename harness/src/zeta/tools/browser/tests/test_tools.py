@@ -773,6 +773,40 @@ async def test_browser_rejects_stale_and_mismatched_element_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "affordance"),
+    [("link", "submit"), ("button", "type"), ("input", "click")],
+)
+async def test_injection_selected_metadata_is_reverified_before_execution(
+    tmp_path: Path,
+    role: str,
+    affordance: str,
+) -> None:
+    """Prove caller metadata is checked before any adapter action."""
+
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(tmp_path, adapter)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    result = await registry.execute(
+        ToolCall(
+            "click-1",
+            "browser_click",
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": role,
+                "affordance": affordance,
+            },
+        )
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "element_unavailable"
+    assert adapter.clicks == []
+
+
+@pytest.mark.asyncio
 async def test_browser_close_is_idempotent_and_closes_adapter(tmp_path: Path) -> None:
     adapter = FakeBrowserAdapter([_observation()])
     registry = _registry(tmp_path, adapter)

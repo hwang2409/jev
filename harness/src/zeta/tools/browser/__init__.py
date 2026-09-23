@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from html import escape
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -967,8 +968,10 @@ def _state_result(state: Any, *, action: str | None = None) -> StructuredToolRes
 
 def _extracted_text(value: object) -> str:
     if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        serialized = value
+    else:
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    return escape(serialized, quote=False)
 
 
 def _browser_exception(exc: Exception) -> StructuredToolResult:
