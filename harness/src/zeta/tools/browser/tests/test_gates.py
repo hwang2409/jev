@@ -158,28 +158,33 @@ def test_action_failure_or_uncertainty_requests_a_fresh_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("error_kind", ["timeout", "malformed", "api_error"])
 @pytest.mark.parametrize(
-    ("error", "expected"),
+    ("gate", "expected"),
     [
-        (
-            jev.JevRouterError("Jev request failed: timed out"),
-            PageStateDecision(False, "observe", "page_load_failed"),
-        ),
-        (
-            jev.JevRouterError("invalid Jev browser page-state response"),
-            PageStateDecision(False, "observe", "page_load_failed"),
-        ),
-        (
-            jev.JevRouterError("Jev request failed with HTTP 500", status_code=500),
-            PageStateDecision(False, "observe", "page_load_failed"),
-        ),
+        ("page_loaded_and_stable", PageStateDecision(False, "observe", "page_load_failed")),
+        ("goal_element_present", PageStateDecision(False, "state", "goal_element_absent")),
+        ("action_is_the_next_step", PageStateDecision(False, "state", "action_not_next_step")),
+        ("dead_end", PageStateDecision(False, "stop", "dead_end")),
+        ("needs_different_approach", PageStateDecision(False, "reroute", "different_approach")),
+        ("action_succeeded", PageStateDecision(True, "state", None)),
     ],
 )
-async def test_provider_errors_take_the_conservative_page_load_direction(
-    error: jev.JevRouterError, expected: PageStateDecision
+async def test_provider_errors_follow_the_failed_gate(
+    error_kind: str, gate: str, expected: PageStateDecision
 ) -> None:
+    errors = {
+        "timeout": jev.JevRouterError("Jev request failed: timed out", gate=gate),
+        "malformed": jev.JevRouterError(
+            "invalid Jev browser page-state response", gate=gate
+        ),
+        "api_error": jev.JevRouterError(
+            "Jev request failed with HTTP 500", status_code=500, gate=gate
+        ),
+    }
+
     async def fail(**_kwargs: object) -> jev.BrowserPageStateResult:
-        raise error
+        raise errors[error_kind]
 
     assert await evaluate_page_state_with_provider(
         goal="continue",

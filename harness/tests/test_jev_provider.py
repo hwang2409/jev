@@ -135,6 +135,12 @@ def browser_page_state_response() -> Response:
     )
 
 
+def browser_page_state_pre_action_response() -> Response:
+    response = browser_page_state_response()
+    del response._data["answers"]["action_succeeded"]
+    return response
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -488,6 +494,22 @@ async def test_browser_page_state_request_names_each_gate_state_field(
     assert result.dead_end == 0.1
     assert result.needs_different_approach == 0.2
     assert result.call_confidence == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+async def test_browser_page_state_pre_action_request_omits_action_success_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Client.responses = [browser_page_state_pre_action_response()]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    result = await jev.judge_browser_page_state("continue", "click", {}, [])
+
+    questions = Client.requests[0]["json"]["questions"]
+    assert "action_succeeded" not in questions
+    assert result.action_succeeded is None
 
 
 @pytest.mark.asyncio

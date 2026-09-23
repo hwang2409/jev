@@ -127,7 +127,9 @@ async def evaluate_page_state_with_provider(
             action_result=action_result,
         )
     except jev.JevRouterError as exc:
-        return conservative_provider_error_decision("page_loaded_and_stable", exc)
+        return conservative_provider_error_decision(
+            exc.gate or "page_loaded_and_stable", exc
+        )
     return evaluate_page_state(
         page_loaded_and_stable=result.page_loaded_and_stable,
         goal_element_present=result.goal_element_present,
