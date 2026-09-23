@@ -4388,7 +4388,7 @@ def test_main_pty_normal_command_then_queued_enter_submits(
 
 
 def test_main_import_compatibility() -> None:
-    from zeta.cli.main import main as cli_main
+    from zeta.cli import main as cli_main
     from zeta.tui import main as tui_main
     from zeta.tui.app import main as app_main
 
@@ -4401,7 +4401,7 @@ def test_tui_import_does_not_load_cli() -> None:
         [
             sys.executable,
             "-c",
-            "import sys; import zeta.tui; raise SystemExit('zeta.cli.main' in sys.modules)",
+            "import sys; import zeta.tui; raise SystemExit('zeta.cli' in sys.modules)",
         ],
         capture_output=True,
         text=True,

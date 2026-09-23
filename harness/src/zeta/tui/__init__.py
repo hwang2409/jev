@@ -6,11 +6,14 @@ __all__ = ["TUIApp", "main"]
 
 _EXPORTS = {
     "TUIApp": (".app", "TUIApp"),
-    "main": ("..cli.main", "main"),
 }
 
 
 def __getattr__(name: str) -> object:
+    if name == "main":
+        from ..cli import main
+
+        return main
     try:
         module_name, attribute_name = _EXPORTS[name]
     except KeyError as error:
