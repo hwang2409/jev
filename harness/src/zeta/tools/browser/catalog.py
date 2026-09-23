@@ -6,8 +6,12 @@ import json
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from .adapter import ElementRef, PageObservation, SnapshotLimits
+
+if TYPE_CHECKING:
+    from ...providers.jev import SearchResultScoreResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +43,61 @@ class PrefilterResult:
     candidates: tuple[CatalogEntry, ...]
     reason: str | None
     considered: int
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResult:
+    result_id: str
+    title: str
+    snippet: str
+    displayed_url: str
+    source_section: str
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
+class SearchTriageDecision:
+    accepted: str | None
+    exposed: tuple[str, ...]
+    reason: str
+
+
+SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD = 0.8
+
+
+def triage_search_results(
+    scores: SearchResultScoreResult,
+    *,
+    relevance_threshold: float,
+    tie_margin: float,
+    relevance_floor: float,
+    top_n: int = 3,
+) -> SearchTriageDecision:
+    """Apply separate relevance, tie, floor, and confidence rules."""
+
+    ranked = sorted(
+        (
+            item
+            for item in scores.scores.items()
+            if item[1] >= relevance_floor
+        ),
+        key=lambda item: (-item[1], item[0]),
+    )
+    if not ranked:
+        return SearchTriageDecision(None, (), "relevance_floor")
+    if (
+        scores.call_confidence < SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD
+        or len(ranked) > 1
+        and ranked[0][1] - ranked[1][1] < tie_margin
+    ):
+        return SearchTriageDecision(
+            None,
+            tuple(item_id for item_id, _score in ranked[: max(top_n, 0)]),
+            "expose_candidates",
+        )
+    if ranked[0][1] < relevance_threshold:
+        return SearchTriageDecision(None, (), "relevance_threshold")
+    return SearchTriageDecision(ranked[0][0], (), "accepted")
 
 
 class SnapshotCatalogBuilder:
