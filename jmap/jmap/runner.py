@@ -5,7 +5,7 @@ import json
 import string
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from os import PathLike
 from typing import Any, Protocol, TextIO
 
@@ -27,6 +27,7 @@ from .answers import (
     SkipSummary,
     TypedResponse,
 )
+from .api import GATEWAY_MODEL
 from .cache import CacheStore, build_cache_preimage, cache_key
 from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
@@ -231,7 +232,7 @@ class RunResult:
     gate_result: GateResult | None = None
 
 
-_DEFAULT_MODEL = "jev-1.13.0"
+_DEFAULT_MODEL = GATEWAY_MODEL
 
 
 class _Unset:
@@ -415,7 +416,7 @@ class Runner:
                         RecordMeta(
                             runtime_name,
                             runtime_version,
-                            runtime_model,
+                            cached.response.served_model or runtime_model,
                             runtime_chunker,
                             "hit",
                         ),
@@ -432,6 +433,8 @@ class Runner:
                 response = self.judge_fn(state, runtime_questions, runtime_model)
             except Exception:
                 response = ErrorResponse("request failed")
+            if isinstance(response, JudgeResponse) and response.served_model:
+                state_meta = replace(state_meta, model=response.served_model)
             if (
                 cache_store is not None
                 and preimage is not None

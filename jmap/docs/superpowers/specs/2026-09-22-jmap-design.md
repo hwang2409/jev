@@ -140,20 +140,20 @@ rejects the chunk when it cannot split it. It never silently truncates an
 over-limit field. These effective byte limits are part of the preset and cache
 key.
 
-The API request is:
+The gateway request is:
 
 ```json
 {
+  "providerOptions": {"gateway": {"zeroDataRetention": true}},
   "state": {"focus":"...","context":{"state_ref":"..."}},
-  "model": "jev-1.13.0",
-  "questions": {"question_id": {"type":"noul","instructions":{"question":"...","state_fields":["focus"]}}}
+  "questions": {"question_id": {"type":"boolean","instructions":{"question":"...","state_fields":["focus"]}}}
 }
 ```
 
-The endpoint is `POST https://api.typesafe.ai/v1/systemone` with
-`Authorization: Bearer $JEV_API_KEY`. A preset pins the resolved model version.
-`jev-latest` is not valid in a committed preset because it makes thresholds
-move without review.
+The endpoint is `POST https://ai-gateway.vercel.sh/v4/ai/evaluation-model`.
+The request selects `typesafe-ai/jev` with the `ai-model-id` header and uses a
+Vercel AI Gateway key. Noul questions use `boolean` on the wire. Gateway
+responses may omit choice confidence and score legend fields.
 
 ### 2.4 question battery format
 
@@ -223,7 +223,7 @@ The common metadata object has these required fields:
 {
   "preset": "jgrep",
   "preset_version": "1",
-  "model": "jev-1.13.0",
+  "model": "typesafe-ai/jev",
   "chunker": "para",
   "cache": "miss"
 }
@@ -238,7 +238,7 @@ A complete state has this shape:
   "record_type": "result",
   "state_ref": "src/payments.py@@-40,8+40,12",
   "answers": {"change_scope": {"type": "score", "score": 2.13, "legend": {"0": "...", "1": "...", "2": "...", "3": "..."}, "probabilities": {"0": 0.01, "1": 0.08, "2": 0.78, "3": 0.13}, "confidence": 0.86}},
-  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "jev-1.13.0", "chunker": "hunk", "cache": "miss"}
+  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "hunk", "cache": "miss"}
 }
 ```
 
@@ -257,7 +257,7 @@ non-empty, and `meta.partial` is `true`:
   "state_ref": "src/payments.py@@-40,8+40,12",
   "answers": {"change_scope": {"type": "score", "score": 2.13, "legend": {"0": "...", "1": "...", "2": "...", "3": "..."}, "probabilities": {"0": 0.01, "1": 0.08, "2": 0.78, "3": 0.13}, "confidence": 0.86}},
   "missing_questions": ["likely_breakage"],
-  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "jev-1.13.0", "chunker": "hunk", "cache": "miss", "partial": true}
+  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "hunk", "cache": "miss", "partial": true}
 }
 ```
 
@@ -272,7 +272,7 @@ error variant defined below, not one error record per skipped state.
   "record_type": "error",
   "state_ref": "src/payments.py@@-40,8+40,12",
   "error": {"kind": "api_error", "message": "request failed", "http_status": 503, "attempts": 3},
-  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "jev-1.13.0", "chunker": "hunk", "cache": "miss"}
+  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "hunk", "cache": "miss"}
 }
 ```
 
@@ -293,7 +293,7 @@ one per-reason count and a bounded sample of stable refs.
   "state_ref": null,
   "source_ref": "stdin:byte=128,line=4",
   "error": {"kind": "input_error", "message": "invalid JSON record", "http_status": null, "attempts": 0},
-  "meta": {"preset": "jfilter", "preset_version": "1", "model": "jev-1.13.0", "chunker": "record", "cache": "not_applicable"}
+  "meta": {"preset": "jfilter", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "record", "cache": "not_applicable"}
 }
 ```
 
@@ -305,7 +305,7 @@ Every judgment invocation emits exactly one coverage record:
   "coverage": "complete",
   "coverage_counts": {"discovered": 1, "judged": 1, "emitted": 1, "skipped": 0, "failed": 0},
   "coverage_reasons": [],
-  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "jev-1.13.0", "chunker": "hunk", "cache": "not_applicable"}
+  "meta": {"preset": "diff-risk-heat", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "hunk", "cache": "not_applicable"}
 }
 ```
 
@@ -362,7 +362,7 @@ record and includes a bounded sample of stable refs:
       "sample_refs": ["notes.md:paragraph=257", "notes.md:paragraph=258"]
     }
   },
-  "meta": {"preset": "jgrep", "preset_version": "1", "model": "jev-1.13.0", "chunker": "para", "cache": "not_applicable"}
+  "meta": {"preset": "jgrep", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "para", "cache": "not_applicable"}
 }
 ```
 
@@ -502,14 +502,14 @@ error record and a terminal coverage record such as:
   "state_ref": null,
   "source_ref": null,
   "error": {"kind": "scan_cap", "message": "scan cap reached before visit", "http_status": null, "attempts": 0, "skip_summary": {"boundary": "max_chunks=256", "count": 685, "sample_refs": ["notes.md:paragraph=257", "notes.md:paragraph=258"]}},
-  "meta": {"preset": "jgrep", "preset_version": "1", "model": "jev-1.13.0", "chunker": "para", "cache": "not_applicable"}
+  "meta": {"preset": "jgrep", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "para", "cache": "not_applicable"}
 }
 {
   "record_type": "coverage",
   "coverage": "partial",
   "coverage_counts": {"discovered": 941, "judged": 256, "emitted": 256, "skipped": 685, "failed": 0},
   "coverage_reasons": ["scan_cap"],
-  "meta": {"preset": "jgrep", "preset_version": "1", "model": "jev-1.13.0", "chunker": "para", "cache": "not_applicable"}
+  "meta": {"preset": "jgrep", "preset_version": "1", "model": "typesafe-ai/jev", "chunker": "para", "cache": "not_applicable"}
 }
 ```
 
@@ -527,7 +527,7 @@ Presets are small YAML files. They are versioned review artifacts, like a
 schema: jmap.preset/v1
 name: diff-risk-heat
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Classify changed hunks for review triage.
 chunking:
   by: hunk
@@ -551,6 +551,9 @@ Required fields are `schema`, `name`, `version`, `model`, `chunking`,
 pinned resolved version, not an alias. A preset version changes whenever its
 questions, criteria, chunking, thresholds, or output meaning changes.
 Question IDs must not be the reserved policy keywords `any`, `all`, or `not`.
+
+The model must be `typesafe-ai/jev`. The gateway model id is stable, while the
+served model version is recorded when the response provides it.
 
 `compatible_chunkers` is a required list whose values come from the `--by`
 vocabulary: `line`, `para`, `hunk`, `file`, and `record`. If `--by` is
@@ -606,7 +609,7 @@ arithmetic outside Jev.
 schema: jmap.preset/v1
 name: jgrep
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Find chunks that satisfy a natural-language query.
 chunking:
   by: para
@@ -676,7 +679,7 @@ The v1 battery has one question:
 schema: jmap.preset/v1
 name: jfilter
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Keep records that satisfy a natural-language predicate.
 chunking:
   by: record
@@ -744,7 +747,7 @@ security, privacy, permission, integrity, migration, or compatibility concern.
 schema: jmap.preset/v1
 name: diff-risk-heat
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Classify changed hunks for review triage.
 chunking:
   by: hunk
@@ -1058,7 +1061,7 @@ object keys and no insignificant whitespace:
 ```json
 {
   "cache_schema": "jmap-answer/v1",
-  "model": "jev-1.13.0",
+  "model": "typesafe-ai/jev",
   "preset": "jgrep",
   "preset_version": "1",
   "chunking": {
@@ -1080,7 +1083,7 @@ object keys and no insignificant whitespace:
 }
 ```
 
-The exact inputs are cache schema version, pinned model version, preset name,
+The exact inputs are cache schema version, gateway model id, preset name,
 preset version, fully resolved chunking configuration and limits, fully resolved
 question battery, and fully resolved state. The effective byte limits are
 included even when they equal preset defaults.
@@ -1162,7 +1165,7 @@ record because exporting the cache has no coverage concept.
     }
   },
   "answer": {"type":"noul","noul":0.93},
-  "model": "jev-1.13.0",
+  "model": "typesafe-ai/jev",
   "preset": "jgrep",
   "preset_version": "1",
   "cache_key": "sha256:..."

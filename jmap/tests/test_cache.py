@@ -33,7 +33,7 @@ QUESTIONS = {
 
 def _preimage() -> dict[str, object]:
     return build_cache_preimage(
-        model="jev-1.13.0",
+        model="typesafe-ai/jev",
         preset="jgrep",
         preset_version="1",
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -53,7 +53,7 @@ def test_cache_key_has_the_exact_canonical_preimage() -> None:
         b'{"cache_schema":"jmap-answer/v1","chunking":{"by":"para",'
         b'"context_paragraphs":0,"limits":{"context_field_bytes":4096,'
         b'"focus_bytes":16384,"state_bytes":32768},"max_chunks":512},'
-        b'"model":"jev-1.13.0",'
+        b'"model":"typesafe-ai/jev",'
         b'"preset":"jgrep","preset_version":"1","question_battery":'
         b'{"matches_query":{"criteria":{"true":{"what":"direct evidence"}},'
         b'"instructions":"judge the focus","type":"noul"},"risk":{"criteria":'
@@ -118,7 +118,7 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
 def test_chunking_requires_exact_resolved_fields() -> None:
     with pytest.raises(ValueError, match="chunking"):
         build_cache_preimage(
-            model="jev-1.13.0",
+            model="typesafe-ai/jev",
             preset="jgrep",
             preset_version="1",
             chunking={"by": "para"},
@@ -129,7 +129,7 @@ def test_chunking_requires_exact_resolved_fields() -> None:
 
     with pytest.raises(ValueError, match="chunking"):
         build_cache_preimage(
-            model="jev-1.13.0",
+            model="typesafe-ai/jev",
             preset="jgrep",
             preset_version="1",
             chunking={
@@ -325,7 +325,8 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
             {
                 "matches_query": NoulAnswer(0.93),
                 "risk": ScoreAnswer(1.5, confidence=0.8),
-            }
+            },
+            served_model="jev-1.13.0",
         )
 
     state = State("stdin#L1", "focus")
@@ -348,6 +349,8 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     assert calls == 1
     assert first.records[0].to_dict()["meta"]["cache"] == "miss"
     assert second.records[0].to_dict()["meta"]["cache"] == "hit"
+    assert first.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
+    assert second.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
     assert second.responses[0] == first.responses[0]
     assert second.records[-1].to_dict() == first.records[-1].to_dict()
 
@@ -369,7 +372,15 @@ def test_clear_only_removes_the_requested_preset(tmp_path) -> None:
     assert [entry.preset for entry in store.entries()] == ["jfilter"]
 
 
-def test_export_emits_exact_triples_and_preserves_scores(tmp_path) -> None:
+def test_export_emits_exact_triples_and_preserves_scores(tmp_path, monkeypatch) -> None:
+    sentinels = {
+        "VERCEL_AI_GATEWAY": "gateway-sentinel",
+        "AI_GATEWAY_API_KEY": "api-key-sentinel",
+        "VERCEL_JEV_KEY": "jev-key-sentinel",
+    }
+    for name, value in sentinels.items():
+        monkeypatch.setenv(name, value)
+
     store = CacheStore(tmp_path)
     response = JudgeResponse(
         {
@@ -399,4 +410,10 @@ def test_export_emits_exact_triples_and_preserves_scores(tmp_path) -> None:
     score = next(line["answer"] for line in lines if line["question_id"] == "risk")
     assert score["score"] == 1.5
     assert all("coverage" not in line for line in lines)
-    assert all("JEV_API_KEY" not in json.dumps(line) for line in lines)
+    cache_files = list(tmp_path.rglob("*.json"))
+    assert cache_files
+    for value in sentinels.values():
+        assert all(value not in json.dumps(line) for line in lines)
+        assert all(
+            value not in path.read_text(encoding="utf-8") for path in cache_files
+        )

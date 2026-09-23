@@ -51,6 +51,9 @@ type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer
 class JudgeResponse:
     answers: dict[str, Answer] = field(default_factory=dict)
     missing_questions: tuple[str, ...] = ()
+    served_model: str | None = None
+    usage: Mapping[str, Any] | None = None
+    latency_ms: int | None = None
 
     @property
     def complete(self) -> bool:
@@ -338,7 +341,7 @@ def record_to_dict(record: CanonicalRecord) -> dict[str, Any]:
 def parse_judge_response(
     payload: Any, questions: Mapping[str, Any]
 ) -> JudgeResponse:
-    """Validate one complete TypeSafe response against its requested battery."""
+    """Validate one complete gateway response against its requested battery."""
     if not isinstance(payload, Mapping):
         raise ValueError("response must be an object")
     answers_payload = payload.get("answers")
@@ -386,8 +389,9 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
     if question_type == "choice":
         _require_keys(
             raw_answer,
-            {"type", "choice", "probabilities", "confidence"},
+            {"type", "choice", "probabilities"},
             question_id,
+            {"confidence"},
         )
         choice = raw_answer.get("choice")
         if not isinstance(choice, str):
@@ -395,37 +399,37 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
                 f"choice answer for {question_id} requires a string choice"
             )
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _number(
-            raw_answer.get("confidence"), question_id, "confidence"
-        )
+        confidence = _confidence(raw_answer, probabilities, question_id)
         return ChoiceAnswer(choice, probabilities, confidence)
     if question_type == "score":
         _require_keys(
             raw_answer,
-            {"type", "score", "legend", "probabilities", "confidence"},
+            {"type", "score", "probabilities"},
             question_id,
+            {"legend", "confidence"},
         )
         score = _number(raw_answer.get("score"), question_id, "score")
-        legend = raw_answer.get("legend")
+        legend = raw_answer.get("legend", {})
         if not isinstance(legend, Mapping) or not all(
             isinstance(key, str) and isinstance(value, str)
             for key, value in legend.items()
         ):
             raise ValueError(f"score answer for {question_id} requires a string legend")
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _number(
-            raw_answer.get("confidence"), question_id, "confidence"
-        )
+        confidence = _confidence(raw_answer, probabilities, question_id)
         return ScoreAnswer(score, dict(legend), probabilities, confidence)
     raise ValueError(f"unknown question type for {question_id}: {question_type!r}")
 
 
 def _require_keys(
-    answer: Mapping[str, Any], expected: set[str], question_id: str
+    answer: Mapping[str, Any],
+    expected: set[str],
+    question_id: str,
+    optional: frozenset[str] = frozenset(),
 ) -> None:
     actual = set(answer)
     missing = expected - actual
-    extra = actual - expected
+    extra = actual - expected - optional
     if missing:
         raise ValueError(f"answer for {question_id} missing fields: {sorted(missing)}")
     if extra:
@@ -441,6 +445,20 @@ def _number(value: Any, question_id: str, field_name: str) -> float:
     if not math.isfinite(converted):
         raise ValueError(f"{field_name} for {question_id} must be finite")
     return converted
+
+
+def _confidence(
+    answer: Mapping[str, Any], probabilities: Mapping[str, float], question_id: str
+) -> float | None:
+    if "confidence" in answer:
+        return _number(answer.get("confidence"), question_id, "confidence")
+    option_count = len(probabilities)
+    if option_count == 0:
+        return None
+    if option_count == 1:
+        return 1.0
+    largest_probability = max(probabilities.values())
+    return (option_count * largest_probability - 1) / (option_count - 1)
 
 
 def _require_number(value: Any, description: str) -> None:

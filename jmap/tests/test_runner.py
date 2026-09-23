@@ -15,7 +15,13 @@ from jmap.answers import (
     NoulAnswer,
     ScoreAnswer,
 )
-from jmap.api import MAX_RESPONSE_BYTES, MAX_WAIT_SECONDS, TypeSafeClient
+from jmap.api import (
+    GATEWAY_ENDPOINT,
+    GATEWAY_MODEL,
+    MAX_RESPONSE_BYTES,
+    MAX_WAIT_SECONDS,
+    GatewayClient,
+)
 from jmap.gates import PolicySyntaxError
 from jmap.presets import (
     Preset,
@@ -41,8 +47,14 @@ QUESTIONS = {
 }
 
 
+@pytest.fixture(autouse=True)
+def clear_local_gateway_keys(monkeypatch) -> None:
+    for name in ("VERCEL_AI_GATEWAY", "VERCEL_JEV_KEY"):
+        monkeypatch.delenv(name, raising=False)
+
+
 def _complete_payload() -> dict[str, object]:
-    return {"answers": {"is_relevant": {"type": "noul", "noul": 0.9}}}
+    return {"answers": {"is_relevant": {"type": "boolean", "probability": 0.9}}}
 
 
 def test_runner_requires_an_explicit_judge_function() -> None:
@@ -58,9 +70,9 @@ def test_fake_judge_is_injected_without_http() -> None:
         calls.append((state_arg, questions_arg, model_arg))
         return "answer"
 
-    runner = Runner(judge_fn=fake, model="jev-1.13.0")
+    runner = Runner(judge_fn=fake, model="typesafe-ai/jev")
     assert runner.judge(state, QUESTIONS) == "answer"
-    assert calls == [(state, QUESTIONS, "jev-1.13.0")]
+    assert calls == [(state, QUESTIONS, "typesafe-ai/jev")]
 
 
 def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
@@ -86,6 +98,21 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "chunker": "file",
         "cache": "not_applicable",
     }
+
+
+def test_runner_records_gateway_served_model() -> None:
+    def judge(*_args):
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)},
+            served_model="jev-1.13.0",
+        )
+
+    result = Runner(judge).run(
+        [State("stdin#L1", "launch")],
+        {"matches_query": {"type": "noul"}},
+    )
+
+    assert result.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
 
 
 @pytest.mark.parametrize("noul", [0.5, 0.9])
@@ -197,13 +224,12 @@ def test_runner_rejects_questions_with_a_preset() -> None:
 def test_runner_rejects_explicit_defaults_for_different_preset_values() -> None:
     preset = resolve_preset("jgrep")
     data = deepcopy(preset.data)
-    data["model"] = "jev-9.9.9"
     data["chunking"]["limits"]["context_field_bytes"] = 8_192
     custom_preset = Preset(validate_preset(data), preset.path)
     state = State("stdin#L1", "launch")
 
     with pytest.raises(PresetUsageError, match="model"):
-        Runner(FakeJudge(), model="jev-1.13.0").run(
+        Runner(FakeJudge(), model="other-model").run(
             [state], preset=custom_preset
         )
     with pytest.raises(PresetUsageError, match="limits"):
@@ -212,7 +238,7 @@ def test_runner_rejects_explicit_defaults_for_different_preset_values() -> None:
         )
 
     result = Runner(FakeJudge()).run([state], preset=custom_preset)
-    assert result.records[0].to_dict()["meta"]["model"] == "jev-9.9.9"
+    assert result.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
 
 
 @pytest.mark.parametrize(
@@ -285,8 +311,8 @@ def test_fake_judge_returns_deterministic_typed_answers() -> None:
     state = State("stdin#L1", "launch", {"source": "stdin"})
     fake = FakeJudge()
 
-    first = fake(state, QUESTIONS, "jev-1.13.0")
-    second = fake(state, QUESTIONS, "jev-1.13.0")
+    first = fake(state, QUESTIONS, "typesafe-ai/jev")
+    second = fake(state, QUESTIONS, "typesafe-ai/jev")
 
     assert first == second
     assert isinstance(first.answers["is_relevant"], NoulAnswer)
@@ -296,7 +322,7 @@ def test_fake_judge_returns_deterministic_typed_answers() -> None:
 
 def test_fake_judge_can_return_incomplete_answers() -> None:
     state = State("stdin#L1", "launch", {"source": "stdin"})
-    response = FakeJudge(mode="incomplete")(state, QUESTIONS, "jev-1.13.0")
+    response = FakeJudge(mode="incomplete")(state, QUESTIONS, "typesafe-ai/jev")
 
     assert response.complete is False
     assert response.missing_questions == ("risk",)
@@ -305,8 +331,8 @@ def test_fake_judge_can_return_incomplete_answers() -> None:
 
 def test_fake_judge_can_return_an_operational_error() -> None:
     state = State("stdin#L1", "launch", {"source": "stdin"})
-    first = FakeJudge(mode="error")(state, QUESTIONS, "jev-1.13.0")
-    second = FakeJudge(mode="error")(state, QUESTIONS, "jev-1.13.0")
+    first = FakeJudge(mode="error")(state, QUESTIONS, "typesafe-ai/jev")
+    second = FakeJudge(mode="error")(state, QUESTIONS, "typesafe-ai/jev")
 
     assert first == second == ErrorResponse("fake operational error")
 
@@ -400,7 +426,7 @@ def test_runner_emits_exact_partial_json() -> None:
             "meta": {
                 "preset": "jmap",
                 "preset_version": "1",
-                "model": "jev-1.13.0",
+                "model": "typesafe-ai/jev",
                 "chunker": "para",
                 "cache": "not_applicable",
                 "partial": True,
@@ -420,7 +446,7 @@ def test_runner_emits_exact_partial_json() -> None:
             "meta": {
                 "preset": "jmap",
                 "preset_version": "1",
-                "model": "jev-1.13.0",
+                "model": "typesafe-ai/jev",
                 "chunker": "para",
                 "cache": "not_applicable",
             },
@@ -463,7 +489,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
         "meta": {
             "preset": "jmap",
             "preset_version": "1",
-            "model": "jev-1.13.0",
+            "model": "typesafe-ai/jev",
             "chunker": "para",
             "cache": "not_applicable",
         },
@@ -563,7 +589,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
             "meta": {
                 "preset": "jmap",
                 "preset_version": "1",
-                "model": "jev-1.13.0",
+                "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
             },
@@ -582,7 +608,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
             "meta": {
                 "preset": "jmap",
                 "preset_version": "1",
-                "model": "jev-1.13.0",
+                "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
             },
@@ -678,7 +704,7 @@ def test_state_admission_carries_rejections_in_coverage_counts() -> None:
     assert admission.rejections == (rejection,)
 
 
-def test_typesafe_client_sends_one_full_battery_request(monkeypatch) -> None:
+def test_gateway_client_sends_one_full_battery_request(monkeypatch) -> None:
     requests = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -687,47 +713,59 @@ def test_typesafe_client_sends_one_full_battery_request(monkeypatch) -> None:
             200,
             json={
                 "answers": {
-                    "is_relevant": {"type": "noul", "noul": 0.9},
+                    "is_relevant": {"type": "boolean", "probability": 0.9},
                     "kind": {
                         "type": "choice",
                         "choice": "code",
                         "probabilities": {"code": 1.0},
-                        "confidence": 0.9,
                     },
                     "risk": {
                         "type": "score",
                         "score": 2,
-                        "legend": {"0": "low"},
                         "probabilities": {"2": 1.0},
-                        "confidence": 0.8,
                     },
                 }
+            },
+            headers={
+                "content-type": "application/json",
             },
             request=request,
         )
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(http_client=client)(
-        State("stdin#L1", "focus", {"source": "stdin"}), QUESTIONS, "jev-1.13.0"
+    response = GatewayClient(http_client=client)(
+        State("stdin#L1", "focus", {"source": "stdin"}), QUESTIONS, "typesafe-ai/jev"
     )
 
     assert response.complete
+    assert response.answers["is_relevant"] == NoulAnswer(0.9)
+    assert response.answers["kind"].confidence == 1.0
+    assert response.answers["risk"].legend == {}
+    assert response.answers["risk"].confidence == 1.0
     assert len(requests) == 1
     request = requests[0]
-    assert str(request.url) == "https://api.typesafe.ai/v1/systemone"
+    assert str(request.url) == GATEWAY_ENDPOINT
     assert request.headers["authorization"] == "Bearer test-secret"
+    assert request.headers["ai-evaluation-model-specification-version"] == "4"
+    assert request.headers["ai-gateway-auth-method"] == "api-key"
+    assert request.headers["ai-gateway-protocol-version"] == "0.0.1"
+    assert request.headers["ai-model-id"] == GATEWAY_MODEL
     assert json.loads(request.content) == {
+        "providerOptions": {"gateway": {"zeroDataRetention": True}},
         "state": {
             "focus": "focus",
             "context": {"source": "stdin", "state_ref": "stdin#L1"},
         },
-        "model": "jev-1.13.0",
-        "questions": QUESTIONS,
+        "questions": {
+            "is_relevant": {"type": "boolean"},
+            "kind": {"type": "choice"},
+            "risk": {"type": "score"},
+        },
     }
 
 
-def test_typesafe_client_retries_timeout_then_succeeds(monkeypatch) -> None:
+def test_gateway_client_retries_timeout_then_succeeds(monkeypatch) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -737,26 +775,26 @@ def test_typesafe_client_retries_timeout_then_succeeds(monkeypatch) -> None:
             raise httpx.ReadTimeout("timed out", request=request)
         return httpx.Response(200, json=_complete_payload(), request=request)
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-        State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "jev-1.13.0"
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "typesafe-ai/jev"
     )
 
     assert response.complete
     assert attempts == 2
 
 
-def test_typesafe_client_rejects_malformed_success_response(monkeypatch) -> None:
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+def test_gateway_client_rejects_malformed_success_response(monkeypatch) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, text="not json", request=request)
         )
     )
 
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
     assert response == ErrorResponse(
@@ -764,7 +802,7 @@ def test_typesafe_client_rejects_malformed_success_response(monkeypatch) -> None
     )
 
 
-def test_typesafe_client_retries_retryable_statuses_and_timeout(
+def test_gateway_client_retries_retryable_statuses_and_timeout(
     monkeypatch,
 ) -> None:
     for status_or_timeout in (429, 529, "timeout"):
@@ -778,12 +816,12 @@ def test_typesafe_client_retries_retryable_statuses_and_timeout(
             return httpx.Response(status_or_timeout, request=request)
 
         sleeps: list[float] = []
-        monkeypatch.setenv("JEV_API_KEY", "test-secret")
+        monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        response = TypeSafeClient(
+        response = GatewayClient(
             http_client=client, sleep=sleeps.append, jitter=lambda: 0.0
         )(
-            State("stdin#L1", "focus"), QUESTIONS, "jev-1.13.0"
+            State("stdin#L1", "focus"), QUESTIONS, "typesafe-ai/jev"
         )
 
         assert attempts == 3
@@ -792,7 +830,7 @@ def test_typesafe_client_retries_retryable_statuses_and_timeout(
         assert response.http_status in {None, status_or_timeout}
 
 
-def test_typesafe_client_does_not_retry_auth_or_validation_status(monkeypatch) -> None:
+def test_gateway_client_does_not_retry_auth_or_validation_status(monkeypatch) -> None:
     for status in (401, 422):
         attempts = 0
 
@@ -801,17 +839,17 @@ def test_typesafe_client_does_not_retry_auth_or_validation_status(monkeypatch) -
             attempts += 1
             return httpx.Response(status, request=request)
 
-        monkeypatch.setenv("JEV_API_KEY", "test-secret")
+        monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
         client = httpx.Client(transport=httpx.MockTransport(handler))
-        response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-            State("stdin#L1", "focus"), QUESTIONS, "jev-1.13.0"
+        response = GatewayClient(http_client=client, sleep=lambda _: None)(
+            State("stdin#L1", "focus"), QUESTIONS, "typesafe-ai/jev"
         )
 
         assert attempts == 1
         assert response.http_status == status
 
 
-def test_typesafe_client_honors_retry_after(monkeypatch) -> None:
+def test_gateway_client_honors_retry_after(monkeypatch) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -824,19 +862,72 @@ def test_typesafe_client_honors_retry_after(monkeypatch) -> None:
         return httpx.Response(200, json={"answers": {}}, request=request)
 
     sleeps: list[float] = []
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(
+    response = GatewayClient(
         http_client=client, sleep=sleeps.append, jitter=lambda: 99.0
     )(
-        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
     assert response.complete
     assert sleeps == [7.0]
 
 
-def test_typesafe_client_clamps_large_retry_after(monkeypatch) -> None:
+def test_gateway_client_honors_long_retry_after(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429, headers={"Retry-After": "59"}, request=request
+            )
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
+    sleeps: list[float] = []
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = GatewayClient(
+        http_client=client, sleep=sleeps.append, jitter=lambda: 99.0
+    )(State("stdin#L1", "focus"), {}, "typesafe-ai/jev")
+
+    assert response.complete
+    assert sleeps == [59.0]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "noul", "noul": 0.9},
+        {"type": "boolean", "probability": 0.9, "extra": True},
+    ],
+)
+def test_gateway_client_rejects_non_gateway_boolean_shapes(
+    monkeypatch, answer
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"answers": {"is_relevant": answer}},
+                request=request,
+            )
+        )
+    )
+
+    response = GatewayClient(http_client=client)(
+        State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "typesafe-ai/jev"
+    )
+
+    assert response == ErrorResponse(
+        "malformed answer", http_status=200, attempts=1
+    )
+
+
+def test_gateway_client_clamps_large_retry_after(monkeypatch) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -849,23 +940,23 @@ def test_typesafe_client_clamps_large_retry_after(monkeypatch) -> None:
         return httpx.Response(200, json={"answers": {}}, request=request)
 
     sleeps: list[float] = []
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(
+    response = GatewayClient(
         http_client=client, sleep=sleeps.append, jitter=lambda: 1e100
-    )(State("stdin#L1", "focus"), {}, "jev-1.13.0")
+    )(State("stdin#L1", "focus"), {}, "typesafe-ai/jev")
 
     assert response.complete
     assert sleeps == [MAX_WAIT_SECONDS]
 
 
-def test_typesafe_client_retries_an_incomplete_full_battery(monkeypatch) -> None:
+def test_gateway_client_retries_an_incomplete_full_battery(monkeypatch) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        answers = {"is_relevant": {"type": "noul", "noul": 0.5}}
+        answers = {"is_relevant": {"type": "boolean", "probability": 0.5}}
         if attempts == 2:
             answers["kind"] = {
                 "type": "choice",
@@ -875,19 +966,19 @@ def test_typesafe_client_retries_an_incomplete_full_battery(monkeypatch) -> None
             }
         return httpx.Response(200, json={"answers": answers}, request=request)
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
         State("stdin#L1", "focus"),
         {"is_relevant": {"type": "noul"}, "kind": {"type": "choice"}},
-        "jev-1.13.0",
+        "typesafe-ai/jev",
     )
 
     assert attempts == 2
     assert response.complete
 
 
-def test_typesafe_client_shares_attempt_budget_across_retries(monkeypatch) -> None:
+def test_gateway_client_shares_attempt_budget_across_retries(monkeypatch) -> None:
     attempts = 0
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -897,35 +988,35 @@ def test_typesafe_client_shares_attempt_budget_across_retries(monkeypatch) -> No
             return httpx.Response(429, request=request)
         return httpx.Response(
             200,
-            json={"answers": {"is_relevant": {"type": "noul", "noul": 0.5}}},
+            json={"answers": {"is_relevant": {"type": "boolean", "probability": 0.5}}},
             request=request,
         )
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(
+    response = GatewayClient(
         http_client=client, max_attempts=99, sleep=lambda _: None
     )(
         State("stdin#L1", "focus"),
         {"is_relevant": {"type": "noul"}, "kind": {"type": "choice"}},
-        "jev-1.13.0",
+        "typesafe-ai/jev",
     )
 
     assert attempts == 3
     assert response.missing_questions == ("kind",)
 
 
-def test_typesafe_client_enforces_timeout_on_injected_client(monkeypatch) -> None:
+def test_gateway_client_enforces_timeout_on_injected_client(monkeypatch) -> None:
     seen_timeouts: list[dict[str, float | None]] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen_timeouts.append(request.extensions["timeout"])
         return httpx.Response(200, json={"answers": {}}, request=request)
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(timeout=None, transport=httpx.MockTransport(handler))
-    response = TypeSafeClient(http_client=client, timeout=2.5)(
-        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    response = GatewayClient(http_client=client, timeout=2.5)(
+        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
     assert response.complete
@@ -934,7 +1025,7 @@ def test_typesafe_client_enforces_timeout_on_injected_client(monkeypatch) -> Non
     ]
 
 
-def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
+def test_gateway_client_rejects_oversized_response(monkeypatch) -> None:
     class OversizedStream(httpx.SyncByteStream):
         chunk = b"x" * 4096
 
@@ -948,7 +1039,7 @@ def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
 
     stream = OversizedStream()
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
 
     def handler(request: httpx.Request) -> httpx.Response:
         response = httpx.Response(200, stream=stream, request=request)
@@ -959,8 +1050,8 @@ def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
         transport=httpx.MockTransport(handler)
     )
 
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
     assert isinstance(response, ErrorResponse)
@@ -968,51 +1059,55 @@ def test_typesafe_client_rejects_oversized_response(monkeypatch) -> None:
     assert stream.bytes_read <= MAX_RESPONSE_BYTES + len(stream.chunk)
 
 
-def test_typesafe_client_handles_mid_body_connection_reset(monkeypatch) -> None:
+def test_gateway_client_handles_mid_body_connection_reset(monkeypatch) -> None:
     class ResetStream(httpx.SyncByteStream):
         def __iter__(self):
             yield b'{"answers": '
             raise httpx.ReadError("connection reset")
 
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(200, stream=ResetStream(), request=request)
         )
     )
 
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-        State("stdin#L1", "focus"), {}, "jev-1.13.0"
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
     assert response == ErrorResponse("request failed", attempts=1)
 
 
-def test_typesafe_client_returns_missing_ids_after_second_incomplete_response(
+def test_gateway_client_returns_missing_ids_after_second_incomplete_response(
     monkeypatch,
 ) -> None:
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
-                json={"answers": {"is_relevant": {"type": "noul", "noul": 0.5}}},
+                json={
+                    "answers": {
+                        "is_relevant": {"type": "boolean", "probability": 0.5}
+                    }
+                },
                 request=request,
             )
         )
     )
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
         State("stdin#L1", "focus"),
         {"is_relevant": {"type": "noul"}, "kind": {"type": "choice"}},
-        "jev-1.13.0",
+        "typesafe-ai/jev",
     )
 
     assert response.missing_questions == ("kind",)
     assert set(response.answers) == {"is_relevant"}
 
 
-def test_typesafe_client_never_includes_api_key_in_error(monkeypatch) -> None:
-    monkeypatch.setenv("JEV_API_KEY", "do-not-leak-this")
+def test_gateway_client_never_includes_api_key_in_error(monkeypatch) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "do-not-leak-this")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
@@ -1021,23 +1116,23 @@ def test_typesafe_client_never_includes_api_key_in_error(monkeypatch) -> None:
         )
     )
 
-    response = TypeSafeClient(http_client=client, sleep=lambda _: None)(
-        State("stdin#L1", "focus"), QUESTIONS, "jev-1.13.0"
+    response = GatewayClient(http_client=client, sleep=lambda _: None)(
+        State("stdin#L1", "focus"), QUESTIONS, "typesafe-ai/jev"
     )
 
     assert "do-not-leak-this" not in response.error
 
 
-def test_typesafe_client_rejects_moving_model_name(monkeypatch) -> None:
-    monkeypatch.setenv("JEV_API_KEY", "test-secret")
+def test_gateway_client_rejects_moving_model_name(monkeypatch) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(
         transport=httpx.MockTransport(
             lambda request: pytest.fail("moving model must not make a request")
         )
     )
 
-    response = TypeSafeClient(http_client=client)(
+    response = GatewayClient(http_client=client)(
         State("stdin#L1", "focus"), QUESTIONS, "jev-latest"
     )
 
-    assert response == ErrorResponse("model must be a pinned version")
+    assert response == ErrorResponse("model must be typesafe-ai/jev")

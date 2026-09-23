@@ -50,7 +50,7 @@ def _record(**answers: object) -> ResultRecord:
     return ResultRecord(
         "state#1",
         answers,
-        RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+        RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
     )
 
 
@@ -204,7 +204,7 @@ def test_typed_thresholds_and_choice_equality_evaluate_without_formatting() -> N
     score_record = ResultRecord(
         "hunk#1",
         {"change_scope": ScoreAnswer(2.0)},
-        RecordMeta("diff-risk-heat", "1", "jev-1.13.0", "hunk", "miss"),
+        RecordMeta("diff-risk-heat", "1", "typesafe-ai/jev", "hunk", "miss"),
     )
     assert evaluate_policy(score_policy, [score_record]) is True
 
