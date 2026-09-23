@@ -121,6 +121,8 @@ def _element_description(item: dict[str, object]) -> str:
         details.append(f"labelled {label!r}")
     if isinstance(name, str) and name and name != label:
         details.append(f"named {name!r}")
+    if isinstance(value_hint, str) and value_hint:
+        details.append(f"with value hint {value_hint!r}")
     if isinstance(landmark, str) and landmark:
         details.append(f"in the {landmark} landmark")
     if item.get("disabled") is True:

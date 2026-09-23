@@ -250,7 +250,10 @@ def test_build_browser_element_request_derives_structured_choice_criteria() -> N
     }
     criteria = request["questions"]["element_id"]["criteria"]
     assert set(criteria) == {"e17", "e18"}
-    assert set(criteria["e17"]) == {"what", "not_for", "examples"}
+    assert all(
+        set(candidate_criteria) == {"what", "not_for", "examples"}
+        for candidate_criteria in criteria.values()
+    )
     assert criteria["e17"]["what"] == (
         "button supports click labelled 'Continue' in the main landmark"
     )
@@ -274,6 +277,38 @@ def test_build_browser_element_request_derives_structured_choice_criteria() -> N
     )
 
 
+def test_browser_element_criteria_distinguish_value_hints() -> None:
+    candidates = [
+        {
+            "element_id": "e17",
+            "role": "combobox",
+            "affordance": "type",
+            "name": "Search",
+            "value_hint": "products",
+        },
+        {
+            "element_id": "e18",
+            "role": "combobox",
+            "affordance": "type",
+            "name": "Search",
+            "value_hint": "orders",
+        },
+    ]
+
+    criteria = jev.build_browser_element_request(
+        "find a product",
+        "type",
+        {},
+        candidates,
+    )["questions"]["element_id"]["criteria"]
+
+    assert criteria["e17"]["what"] != criteria["e18"]["what"]
+    assert "products" in criteria["e17"]["what"]
+    assert "orders" in criteria["e18"]["what"]
+    assert "orders" in criteria["e17"]["not_for"]
+    assert "products" in criteria["e18"]["not_for"]
+
+
 @pytest.mark.parametrize(
     ("confidence", "expected_ids"),
     [
@@ -286,10 +321,10 @@ def test_browser_choice_confidence_gate_expands_top_three_below_cutoff(
     confidence: float, expected_ids: tuple[str, ...]
 ) -> None:
     candidates = [
-        {"element_id": "e17", "affordance": "click"},
-        {"element_id": "e18", "affordance": "click"},
         {"element_id": "e19", "affordance": "click"},
+        {"element_id": "e17", "affordance": "click"},
         {"element_id": "e20", "affordance": "click"},
+        {"element_id": "e18", "affordance": "click"},
     ]
     result = jev.parse_browser_element_response(
         {
