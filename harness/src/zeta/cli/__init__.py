@@ -1,4 +1,6 @@
 import importlib
+import sys
+import types
 
 __all__ = ["build_parser", "main"]
 
@@ -10,6 +12,20 @@ _EXPORTS = {
     "_print_exit_hint": (".main", "_print_exit_hint"),
     "_run_login": (".main", "_run_login"),
 }
+
+
+class _CliModule(types.ModuleType):
+    def __setattr__(self, name: str, value: object) -> None:
+        if (
+            name == "main"
+            and isinstance(value, types.ModuleType)
+            and value.__name__ == f"{__name__}.main"
+        ):
+            value = value.main
+        super().__setattr__(name, value)
+
+
+sys.modules[__name__].__class__ = _CliModule
 
 
 def __getattr__(name: str) -> object:

@@ -1070,7 +1070,11 @@ _EXPORTS = {
 Its `__getattr__` must import the selected relative module with
 `importlib.import_module(module_name, __name__)`, return the named attribute,
 and raise `AttributeError` for every name outside this map. Keep
-`__all__ = ["build_parser", "main"]`.
+`__all__ = ["build_parser", "main"]`. Since importing `zeta.cli.main`
+automatically binds the child module to the package's `main` attribute,
+the package initializer must intercept that binding and keep its `main`
+attribute set to the function. This keeps the lazy package export
+order-independent.
 
 Before moving `persistence.py`, replace `zeta.tui.__init__` with this lazy
 export map:

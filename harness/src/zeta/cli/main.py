@@ -206,11 +206,11 @@ def _print_exit_hint(app: object) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    parser = main.build_parser()
     args = parser.parse_args(argv)
     if args.command == "login":
         try:
-            handle = _run_login(args.provider)
+            handle = main._run_login(args.provider)
         except KeyboardInterrupt:
             print("login cancelled", file=sys.stderr)
             return 1
@@ -257,7 +257,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--format requires --print")
     while True:
         try:
-            app = create_app(args)
+            app = main.create_app(args)
         except SessionError as exc:
             parser.error(str(exc))
         try:
@@ -267,10 +267,19 @@ def main(argv: list[str] | None = None) -> int:
                 args.continue_session = False
                 args.resume = None
                 continue
-            _print_exit_hint(app)
+            main._print_exit_hint(app)
             return 0
         finally:
-            _cleanup_ephemeral(app)
+            main._cleanup_ephemeral(app)
+
+
+# Keep ``import zeta.cli.main as cli`` usable after the package export wins.
+main.main = main
+main.build_parser = build_parser
+main.create_app = create_app
+main._cleanup_ephemeral = _cleanup_ephemeral
+main._print_exit_hint = _print_exit_hint
+main._run_login = _run_login
 
 
 __all__ = ["build_parser", "main"]
