@@ -31,8 +31,9 @@ GATEWAY_HEADERS = {
     "ai-model-id": GATEWAY_MODEL,
 }
 DEFAULT_MAX_ATTEMPTS = 3
-# Keep retry delays bounded so server hints and injected jitter cannot hang a run.
-MAX_WAIT_SECONDS = 30.0
+# Keep retry delays bounded so absurd server hints and injected jitter cannot hang
+# a run while honoring normal rate-limit windows.
+MAX_WAIT_SECONDS = 300.0
 # Bound successful response bodies before parsing them into memory.
 MAX_RESPONSE_BYTES = 1_048_576
 
@@ -268,14 +269,15 @@ def _normalize_gateway_response(
         if question_type == "noul":
             if not isinstance(raw_answer, Mapping):
                 raise ValueError("boolean answer must be an object")
-            if raw_answer.get("type") == "noul":
-                normalized_answers[question_id] = raw_answer
-                continue
+            if set(raw_answer) != {"type", "probability"}:
+                raise ValueError(
+                    "boolean answer must contain exactly type and probability"
+                )
             if raw_answer.get("type") != "boolean":
                 raise ValueError("gateway noul answer must have boolean type")
             normalized_answers[question_id] = {
                 "type": "noul",
-                "noul": raw_answer.get("probability"),
+                "noul": raw_answer["probability"],
             }
         else:
             normalized_answers[question_id] = raw_answer

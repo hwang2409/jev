@@ -416,7 +416,7 @@ class Runner:
                         RecordMeta(
                             runtime_name,
                             runtime_version,
-                            runtime_model,
+                            cached.response.served_model or runtime_model,
                             runtime_chunker,
                             "hit",
                         ),

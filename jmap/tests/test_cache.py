@@ -325,7 +325,8 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
             {
                 "matches_query": NoulAnswer(0.93),
                 "risk": ScoreAnswer(1.5, confidence=0.8),
-            }
+            },
+            served_model="jev-1.13.0",
         )
 
     state = State("stdin#L1", "focus")
@@ -348,6 +349,8 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     assert calls == 1
     assert first.records[0].to_dict()["meta"]["cache"] == "miss"
     assert second.records[0].to_dict()["meta"]["cache"] == "hit"
+    assert first.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
+    assert second.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
     assert second.responses[0] == first.responses[0]
     assert second.records[-1].to_dict() == first.records[-1].to_dict()
 
@@ -369,7 +372,15 @@ def test_clear_only_removes_the_requested_preset(tmp_path) -> None:
     assert [entry.preset for entry in store.entries()] == ["jfilter"]
 
 
-def test_export_emits_exact_triples_and_preserves_scores(tmp_path) -> None:
+def test_export_emits_exact_triples_and_preserves_scores(tmp_path, monkeypatch) -> None:
+    sentinels = {
+        "VERCEL_AI_GATEWAY": "gateway-sentinel",
+        "AI_GATEWAY_API_KEY": "api-key-sentinel",
+        "VERCEL_JEV_KEY": "jev-key-sentinel",
+    }
+    for name, value in sentinels.items():
+        monkeypatch.setenv(name, value)
+
     store = CacheStore(tmp_path)
     response = JudgeResponse(
         {
@@ -399,4 +410,10 @@ def test_export_emits_exact_triples_and_preserves_scores(tmp_path) -> None:
     score = next(line["answer"] for line in lines if line["question_id"] == "risk")
     assert score["score"] == 1.5
     assert all("coverage" not in line for line in lines)
-    assert all("JEV_API_KEY" not in json.dumps(line) for line in lines)
+    cache_files = list(tmp_path.rglob("*.json"))
+    assert cache_files
+    for value in sentinels.values():
+        assert all(value not in json.dumps(line) for line in lines)
+        assert all(
+            value not in path.read_text(encoding="utf-8") for path in cache_files
+        )

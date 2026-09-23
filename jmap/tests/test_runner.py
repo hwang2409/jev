@@ -54,7 +54,7 @@ def clear_local_gateway_keys(monkeypatch) -> None:
 
 
 def _complete_payload() -> dict[str, object]:
-    return {"answers": {"is_relevant": {"type": "noul", "noul": 0.9}}}
+    return {"answers": {"is_relevant": {"type": "boolean", "probability": 0.9}}}
 
 
 def test_runner_requires_an_explicit_judge_function() -> None:
@@ -739,6 +739,7 @@ def test_gateway_client_sends_one_full_battery_request(monkeypatch) -> None:
     )
 
     assert response.complete
+    assert response.answers["is_relevant"] == NoulAnswer(0.9)
     assert response.answers["kind"].confidence == 1.0
     assert response.answers["risk"].legend == {}
     assert response.answers["risk"].confidence == 1.0
@@ -746,6 +747,9 @@ def test_gateway_client_sends_one_full_battery_request(monkeypatch) -> None:
     request = requests[0]
     assert str(request.url) == GATEWAY_ENDPOINT
     assert request.headers["authorization"] == "Bearer test-secret"
+    assert request.headers["ai-evaluation-model-specification-version"] == "4"
+    assert request.headers["ai-gateway-auth-method"] == "api-key"
+    assert request.headers["ai-gateway-protocol-version"] == "0.0.1"
     assert request.headers["ai-model-id"] == GATEWAY_MODEL
     assert json.loads(request.content) == {
         "providerOptions": {"gateway": {"zeroDataRetention": True}},
@@ -870,6 +874,59 @@ def test_gateway_client_honors_retry_after(monkeypatch) -> None:
     assert sleeps == [7.0]
 
 
+def test_gateway_client_honors_long_retry_after(monkeypatch) -> None:
+    attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            return httpx.Response(
+                429, headers={"Retry-After": "59"}, request=request
+            )
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
+    sleeps: list[float] = []
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    response = GatewayClient(
+        http_client=client, sleep=sleeps.append, jitter=lambda: 99.0
+    )(State("stdin#L1", "focus"), {}, "typesafe-ai/jev")
+
+    assert response.complete
+    assert sleeps == [59.0]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        {"type": "noul", "noul": 0.9},
+        {"type": "boolean", "probability": 0.9, "extra": True},
+    ],
+)
+def test_gateway_client_rejects_non_gateway_boolean_shapes(
+    monkeypatch, answer
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = httpx.Client(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                json={"answers": {"is_relevant": answer}},
+                request=request,
+            )
+        )
+    )
+
+    response = GatewayClient(http_client=client)(
+        State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "typesafe-ai/jev"
+    )
+
+    assert response == ErrorResponse(
+        "malformed answer", http_status=200, attempts=1
+    )
+
+
 def test_gateway_client_clamps_large_retry_after(monkeypatch) -> None:
     attempts = 0
 
@@ -899,7 +956,7 @@ def test_gateway_client_retries_an_incomplete_full_battery(monkeypatch) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal attempts
         attempts += 1
-        answers = {"is_relevant": {"type": "noul", "noul": 0.5}}
+        answers = {"is_relevant": {"type": "boolean", "probability": 0.5}}
         if attempts == 2:
             answers["kind"] = {
                 "type": "choice",
@@ -931,7 +988,7 @@ def test_gateway_client_shares_attempt_budget_across_retries(monkeypatch) -> Non
             return httpx.Response(429, request=request)
         return httpx.Response(
             200,
-            json={"answers": {"is_relevant": {"type": "noul", "noul": 0.5}}},
+            json={"answers": {"is_relevant": {"type": "boolean", "probability": 0.5}}},
             request=request,
         )
 
@@ -1030,7 +1087,11 @@ def test_gateway_client_returns_missing_ids_after_second_incomplete_response(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
                 200,
-                json={"answers": {"is_relevant": {"type": "noul", "noul": 0.5}}},
+                json={
+                    "answers": {
+                        "is_relevant": {"type": "boolean", "probability": 0.5}
+                    }
+                },
                 request=request,
             )
         )
