@@ -185,11 +185,8 @@ def _element_examples(item: dict[str, object]) -> list[str]:
 _SEARCH_RESULT_MAX = 24
 _SEARCH_RESULT_FIELD_MAX = 240
 _SEARCH_RESULT_SCORE_CRITERIA = [
-    "The result does not help achieve the user goal.",
-    (
-        "The result directly helps achieve the user goal based on its title, "
-        "visible snippet, displayed URL, source section, and position."
-    ),
+    "The result is not relevant to the user goal.",
+    "The result is relevant to the user goal.",
 ]
 
 

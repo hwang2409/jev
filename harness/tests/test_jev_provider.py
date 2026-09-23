@@ -182,11 +182,8 @@ def test_search_result_score_request_keeps_only_bounded_result_fields() -> None:
     }
     assert all(len(value) <= 240 for value in results[0].values())
     assert request["questions"]["result-0"]["criteria"] == [
-        "The result does not help achieve the user goal.",
-        (
-            "The result directly helps achieve the user goal based on its title, "
-            "visible snippet, displayed URL, source section, and position."
-        ),
+        "The result is not relevant to the user goal.",
+        "The result is relevant to the user goal.",
     ]
 
 
@@ -683,6 +680,47 @@ async def test_search_result_scoring_rejects_malformed_scores(
                     "source_section": "results",
                     "position": "1",
                 }
+            ],
+        )
+
+
+@pytest.mark.asyncio
+async def test_search_result_scoring_rejects_partial_answers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Client.responses = [
+        Response(
+            200,
+            {
+                "answers": {"result-a": {"score": 0.9, "confidence": 0.9}},
+                "usage": {},
+            },
+        )
+    ]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    with pytest.raises(jev.JevRouterError, match="invalid Jev search result score response"):
+        await jev.score_search_results(
+            "find docs",
+            [
+                {
+                    "id": "result-a",
+                    "title": "Docs",
+                    "snippet": "Read docs",
+                    "displayed_url": "example.test/docs",
+                    "source_section": "results",
+                    "position": "1",
+                },
+                {
+                    "id": "result-b",
+                    "title": "Other docs",
+                    "snippet": "Other docs",
+                    "displayed_url": "example.test/other",
+                    "source_section": "results",
+                    "position": "2",
+                },
             ],
         )
 

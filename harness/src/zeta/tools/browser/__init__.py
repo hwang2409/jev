@@ -27,7 +27,12 @@ from .adapter import (
 from .adapter import (
     ElementUnavailableError as AdapterElementUnavailableError,
 )
-from .catalog import prefilter_catalog
+from .catalog import (
+    SearchResult,
+    prefilter_catalog,
+    rank_search_result_ids,
+    triage_search_results,
+)
 from .gates import (
     PAGE_STATE_RECOVERY_ATTEMPT_CAP,
     PageStateDecision,
@@ -400,13 +405,123 @@ async def _browser_extract(
         extracted = await session.extract(target, attributes, limit)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
-    content = _extracted_text(extracted.value)
+    triage = await _triage_extracted_search_results(
+        _browser_goal(registry, "extract", element_id or "page", None),
+        extracted.value,
+    )
+    value = extracted.value if triage is None else triage["value"]
+    content = _extracted_text(value)
     structured: dict[str, object] = {
-        "value": extracted.value,
+        "value": value,
         "truncated": extracted.truncated,
         "full_size": extracted.full_size,
     }
+    if triage is not None:
+        structured.update(triage)
     return _success_result(text_block(content, full_size=extracted.full_size), structured_content=structured)
+
+
+async def _triage_extracted_search_results(
+    goal: str, value: object
+) -> dict[str, object] | None:
+    container, raw_results = _search_result_container(value)
+    if raw_results is None:
+        return None
+    records = [_search_result_record(item, index) for index, item in enumerate(raw_results)]
+    provider_items = [
+        {
+            "result_id": result.result_id,
+            "title": result.title,
+            "snippet": result.snippet,
+            "displayed_url": result.displayed_url,
+            "source_section": result.source_section,
+            "position": str(result.position),
+        }
+        for result in records
+    ]
+    if not provider_items:
+        return {
+            "results": [],
+            "ranked_results": [],
+            "triage": {"status": "ranked", "decision": "relevance_floor"},
+            "value": _replace_search_results(container, []),
+        }
+    try:
+        scores = await jev.score_search_results(goal, provider_items)
+    except Exception as exc:  # noqa: BLE001 - triage is advisory to extraction
+        warning = f"search results returned unranked because Jev triage failed: {exc}"
+        return {
+            "results": provider_items,
+            "ranked_results": provider_items,
+            "warning": warning,
+            "triage": {"status": "unranked", "warning": warning},
+            "value": _replace_search_results(container, provider_items),
+        }
+    decision = triage_search_results(scores, records)
+    items_by_id = {item["result_id"]: item for item in provider_items}
+    ranked_results = [
+        {
+            **items_by_id[result_id],
+            "rank": rank,
+            "relevance_score": scores.scores[result_id],
+        }
+        for rank, result_id in enumerate(
+            rank_search_result_ids(scores, records), start=1
+        )
+    ]
+    triage_payload = {
+        "status": "ranked",
+        "decision": decision.reason,
+        "accepted": decision.accepted,
+        "exposed": list(decision.exposed),
+        "call_confidence": scores.call_confidence,
+        "usage": dict(scores.usage),
+    }
+    return {
+        "results": ranked_results,
+        "ranked_results": ranked_results,
+        "triage": triage_payload,
+        "value": _replace_search_results(container, ranked_results),
+    }
+
+
+def _search_result_container(value: object) -> tuple[object, list[object] | None]:
+    if isinstance(value, list):
+        return value, value
+    if isinstance(value, dict) and isinstance(value.get("results"), list):
+        return value, value["results"]
+    return value, None
+
+
+def _search_result_record(item: object, index: int) -> SearchResult:
+    fields = item if isinstance(item, dict) else {}
+    result_id = _search_result_field(fields, "result_id", _search_result_field(fields, "id", f"result-{index + 1}"))
+    position_text = _search_result_field(fields, "position", str(index + 1))
+    try:
+        position = int(position_text)
+    except ValueError:
+        position = index + 1
+    return SearchResult(
+        result_id=result_id,
+        title=_search_result_field(fields, "title"),
+        snippet=_search_result_field(fields, "snippet"),
+        displayed_url=_search_result_field(fields, "displayed_url", _search_result_field(fields, "url")),
+        source_section=_search_result_field(fields, "source_section", _search_result_field(fields, "source", "results")),
+        position=position,
+    )
+
+
+def _search_result_field(fields: dict[object, object], key: str, default: str = "") -> str:
+    value = fields.get(key, default)
+    return value if isinstance(value, str) else str(value)
+
+
+def _replace_search_results(container: object, results: list[dict[str, object]]) -> object:
+    if isinstance(container, list):
+        return results
+    if isinstance(container, dict):
+        return {**container, "results": results}
+    return results
 
 
 def register(registry: ToolRegistry) -> None:
@@ -762,7 +877,7 @@ def _state_result(state: Any, *, action: str | None = None) -> StructuredToolRes
     return _success_result(text_block(text), structured_content=payload)
 
 
-def _extracted_text(value: str | dict[str, str | None]) -> str:
+def _extracted_text(value: object) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

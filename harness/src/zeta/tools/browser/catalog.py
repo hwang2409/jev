@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from ...routing import (
+    SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD,
+    SEARCH_RESULT_RELEVANCE_FLOOR,
+    SEARCH_RESULT_RELEVANCE_THRESHOLD,
+    SEARCH_RESULT_TIE_MARGIN,
+)
 from .adapter import ElementRef, PageObservation, SnapshotLimits
 
 if TYPE_CHECKING:
@@ -62,42 +68,90 @@ class SearchTriageDecision:
     reason: str
 
 
-SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD = 0.8
-
-
 def triage_search_results(
     scores: SearchResultScoreResult,
+    results: Iterable[SearchResult] | Mapping[str, SearchResult] | None = None,
     *,
-    relevance_threshold: float,
-    tie_margin: float,
-    relevance_floor: float,
+    relevance_threshold: float = SEARCH_RESULT_RELEVANCE_THRESHOLD,
+    tie_margin: float = SEARCH_RESULT_TIE_MARGIN,
+    relevance_floor: float = SEARCH_RESULT_RELEVANCE_FLOOR,
     top_n: int = 3,
 ) -> SearchTriageDecision:
     """Apply separate relevance, tie, floor, and confidence rules."""
 
-    ranked = sorted(
-        (
-            item
-            for item in scores.scores.items()
-            if item[1] >= relevance_floor
-        ),
-        key=lambda item: (-item[1], item[0]),
-    )
+    source_by_id = _result_sources(results)
+    ranked = _rank_search_scores(scores.scores, source_by_id)
     if not ranked:
         return SearchTriageDecision(None, (), "relevance_floor")
-    if (
-        scores.call_confidence < SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD
-        or len(ranked) > 1
-        and ranked[0][1] - ranked[1][1] < tie_margin
-    ):
+    if ranked[0][1] < relevance_floor:
+        return SearchTriageDecision(None, (), "relevance_floor")
+    score_gap = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
+    close_tie = score_gap is not None and score_gap + 1e-12 < tie_margin
+    if scores.call_confidence < SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD or close_tie:
+        candidates = (
+            [item for item in ranked if ranked[0][1] - item[1] < tie_margin]
+            if close_tie
+            else [item for item in ranked if item[1] >= relevance_floor]
+        )
         return SearchTriageDecision(
             None,
-            tuple(item_id for item_id, _score in ranked[: max(top_n, 0)]),
+            tuple(item_id for item_id, _score in candidates[: max(top_n, 0)]),
             "expose_candidates",
         )
     if ranked[0][1] < relevance_threshold:
         return SearchTriageDecision(None, (), "relevance_threshold")
     return SearchTriageDecision(ranked[0][0], (), "accepted")
+
+
+def rank_search_result_ids(
+    scores: SearchResultScoreResult,
+    results: Iterable[SearchResult] | Mapping[str, SearchResult] | None = None,
+) -> tuple[str, ...]:
+    """Return score-ranked result ids with source diversity for ties."""
+
+    return tuple(result_id for result_id, _score in _rank_search_scores(
+        scores.scores, _result_sources(results)
+    ))
+
+
+def _result_sources(
+    results: Iterable[SearchResult] | Mapping[str, SearchResult] | None,
+) -> dict[str, str]:
+    if results is None:
+        return {}
+    values = results.values() if isinstance(results, Mapping) else results
+    return {result.result_id: result.source_section for result in values}
+
+
+def _rank_search_scores(
+    scores: Mapping[str, float], source_by_id: Mapping[str, str]
+) -> list[tuple[str, float]]:
+    """Sort scores while spreading equal-score results across sources."""
+
+    ranked = sorted(scores.items(), key=lambda item: (-item[1], item[0]))
+    output: list[tuple[str, float]] = []
+    index = 0
+    while index < len(ranked):
+        score = ranked[index][1]
+        end = index + 1
+        while end < len(ranked) and ranked[end][1] == score:
+            end += 1
+        group = ranked[index:end]
+        used_sources: set[str] = set()
+        while group:
+            next_index = next(
+                (
+                    candidate_index
+                    for candidate_index, (result_id, _score) in enumerate(group)
+                    if source_by_id.get(result_id, result_id) not in used_sources
+                ),
+                0,
+            )
+            result_id, result_score = group.pop(next_index)
+            used_sources.add(source_by_id.get(result_id, result_id))
+            output.append((result_id, result_score))
+        index = end
+    return output
 
 
 class SnapshotCatalogBuilder:

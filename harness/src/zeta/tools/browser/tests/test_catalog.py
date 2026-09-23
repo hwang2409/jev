@@ -3,6 +3,7 @@ from __future__ import annotations
 from zeta.providers.jev import SearchResultScoreResult
 from zeta.tools.browser.adapter import ElementRef, PageObservation, SnapshotLimits
 from zeta.tools.browser.catalog import (
+    SearchResult,
     SearchTriageDecision,
     SnapshotCatalogBuilder,
     _serialized_size,
@@ -61,6 +62,86 @@ def test_search_triage_rejects_scores_below_relevance_threshold() -> None:
         tie_margin=0.1,
         relevance_floor=0.4,
     ) == SearchTriageDecision(None, (), "relevance_threshold")
+
+
+def test_search_triage_compares_ties_before_applying_the_floor() -> None:
+    scores = SearchResultScoreResult({"a": 0.45, "b": 0.39}, 0.95, {}, 0.95)
+
+    assert triage_search_results(
+        scores,
+        relevance_threshold=0.7,
+        tie_margin=0.1,
+        relevance_floor=0.4,
+    ) == SearchTriageDecision(None, ("a", "b"), "expose_candidates")
+
+
+def test_search_triage_uses_source_diversity_for_equal_scores() -> None:
+    scores = SearchResultScoreResult({"a": 0.9, "b": 0.9, "c": 0.9}, 0.95, {}, 0.95)
+    same_source = [
+        SearchResult("a", "a", "", "", "one", 1),
+        SearchResult("b", "b", "", "", "one", 2),
+        SearchResult("c", "c", "", "", "two", 3),
+    ]
+    different_sources = [
+        SearchResult("a", "a", "", "", "one", 1),
+        SearchResult("b", "b", "", "", "two", 2),
+        SearchResult("c", "c", "", "", "one", 3),
+    ]
+
+    assert triage_search_results(
+        scores, same_source, top_n=2
+    ).exposed == ("a", "c")
+    assert triage_search_results(
+        scores, different_sources, top_n=2
+    ).exposed == ("a", "b")
+
+
+def test_search_triage_threshold_boundaries_and_zero_or_one_result() -> None:
+    assert triage_search_results(
+        SearchResultScoreResult({"a": 0.7, "b": 0.5}, 0.95, {}, 0.95),
+        relevance_threshold=0.7,
+        tie_margin=0.1,
+        relevance_floor=0.4,
+    ) == SearchTriageDecision("a", (), "accepted")
+    assert triage_search_results(
+        SearchResultScoreResult({"a": 0.9, "b": 0.8}, 0.95, {}, 0.95),
+        relevance_threshold=0.7,
+        tie_margin=0.1,
+        relevance_floor=0.4,
+    ) == SearchTriageDecision("a", (), "accepted")
+    assert triage_search_results(
+        SearchResultScoreResult({"a": 0.4}, 0.95, {}, 0.95),
+        relevance_threshold=0.7,
+        tie_margin=0.1,
+        relevance_floor=0.4,
+    ) == SearchTriageDecision(None, (), "relevance_threshold")
+    assert triage_search_results(
+        SearchResultScoreResult({}, 0.95, {}, 0.95),
+        relevance_threshold=0.7,
+        tie_margin=0.1,
+        relevance_floor=0.4,
+    ) == SearchTriageDecision(None, (), "relevance_floor")
+
+
+def test_catalog_text_bounds_use_utf8_bytes() -> None:
+    builder = SnapshotCatalogBuilder(
+        SnapshotLimits(page_text_bytes=5, element_text_bytes=5, catalog_bytes=500)
+    )
+    observation = PageObservation(
+        1,
+        1,
+        "https://example.test",
+        "标题",
+        "你好世界",
+        (),
+        True,
+        True,
+    )
+
+    catalog = builder.build(observation)
+
+    assert catalog.title == "标"
+    assert catalog.summary == "你"
 
 
 def test_builder_normalizes_text_caps_catalog_and_stale_ids() -> None:
