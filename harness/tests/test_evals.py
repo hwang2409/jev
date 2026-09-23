@@ -1039,10 +1039,10 @@ def test_verify_normalized_equals_rejects_extra_output(tmp_path: Path) -> None:
     ) == [False]
 
 
-def test_memory_injection_eval_requires_jev_api_key(
+def test_memory_injection_eval_requires_gateway_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.setattr(eval_runner.jev, "_resolve_gateway_key", lambda: None)
 
     assert main(
         [
@@ -1053,7 +1053,7 @@ def test_memory_injection_eval_requires_jev_api_key(
             str(tmp_path / "tasks.jsonl"),
         ]
     ) == 2
-    assert "JEV_API_KEY is required" in capsys.readouterr().err
+    assert "Vercel AI Gateway API key is required" in capsys.readouterr().err
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:

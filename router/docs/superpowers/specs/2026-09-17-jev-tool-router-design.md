@@ -59,7 +59,7 @@ class RouteResult:
 The full distribution survives so a future harness can do top-k fallback when
 confidence is low. The router itself never truncates to top-1 internally.
 
-Auth: `JEV_API_KEY` env var. Model: `jev-latest`. Errors 429/529 retry with
+Auth: a Vercel AI Gateway key. Model: `jev-latest`. Errors 429/529 retry with
 exponential backoff (3 attempts); other HTTP errors raise.
 
 ## Catalog (phase 1)

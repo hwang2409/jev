@@ -19,7 +19,7 @@ TUI, and persistence are untouched.
 1. `src/zeta/providers/jev.py` — async Jev client.
    - `async route_step(step: str, catalog: dict[str, str], history: list[str] = []) -> RouteResult`
    - POST `https://api.typesafe.ai/v1/systemone`, model `"jev-latest"`, auth
-     `Authorization: Bearer $JEV_API_KEY`.
+     `Authorization: Bearer $VERCEL_AI_GATEWAY`.
    - Body: `state={"current_step": step, "recent_steps": history[-5:]}`,
      `questions`: `tool` (choice, criteria = catalog),
      `needs_tool` (noul), `step_clarity` (noul) — same shapes as
@@ -40,7 +40,7 @@ TUI, and persistence are untouched.
    - Reports the routed tool set to the loop (mechanism: whatever zeta's
      tool-to-loop contract supports cleanly — `ToolExecutionContext` binding
      or a loop-installed callback; implementer's choice, reviewer judges).
-   - If `JEV_API_KEY` is unset or Jev errors after retries: return an error
+   - If no Vercel AI Gateway key is set or Jev errors after retries: return an error
      result naming the failure; the loop then advertises the FULL toolset for
      the next turn (fail-open — an experiment session must not wedge).
 3. `src/zeta/loop.py` — router mode.
@@ -80,7 +80,7 @@ Setup: `uv sync --frozen` creates the fork venv; run tests via
 ## Live smoke (orchestrator step, after review)
 
 Headless zeta session on the Claude subscription OAuth (token in
-`~/.zeta/anthropic-oauth.json`) with `JEV_API_KEY` set: a small real
+`~/.zeta/anthropic-oauth.json`) with a Vercel AI Gateway key set: a small real
 multi-tool task; verify every tool selection went through route (transcript
 shows route calls; unrouted_attempts == 0) and the task completes.
 

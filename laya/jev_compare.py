@@ -59,17 +59,45 @@ def _gateway_questions(questions: dict) -> dict:
 
 def _normalize_gateway_answers(result: dict, questions: dict) -> dict:
     answers = result.get("answers", {})
-    normalized = {
-        question_id: (
-            {"type": "noul", "noul": answer["probability"]}
-            if questions.get(question_id, {}).get("type") == "noul"
+    normalized = {}
+    for question_id, answer in answers.items():
+        question = questions.get(question_id, {})
+        question_type = question.get("type") if isinstance(question, dict) else None
+        if (
+            question_type == "noul"
             and isinstance(answer, dict)
             and answer.get("type") == "boolean"
-            else answer
-        )
-        for question_id, answer in answers.items()
-    }
-    return {**result, "answers": normalized}
+        ):
+            normalized[question_id] = {
+                "type": "noul",
+                "noul": answer["probability"],
+            }
+            continue
+        if isinstance(answer, dict) and question_type in {"choice", "score"}:
+            answer = dict(answer)
+            if "confidence" not in answer:
+                probabilities = answer.get("probabilities", {})
+                option_count = len(probabilities)
+                if option_count <= 1:
+                    answer["confidence"] = 1.0
+                else:
+                    answer["confidence"] = (
+                        option_count * max(probabilities.values()) - 1
+                    ) / (option_count - 1)
+            if question_type == "score" and "legend" not in answer:
+                criteria = question.get("criteria", [])
+                answer["legend"] = {
+                    str(index): criterion for index, criterion in enumerate(criteria)
+                }
+        normalized[question_id] = answer
+    usage = dict(result.get("usage", {}))
+    for gateway_key, native_key in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+    ):
+        if gateway_key in usage:
+            usage[native_key] = usage.pop(gateway_key)
+    return {**result, "answers": normalized, "usage": usage}
 
 
 def _retry_after(error: HTTPError) -> float | None:
@@ -88,7 +116,7 @@ def _retry_after(error: HTTPError) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return max(60.0, seconds)
+    return seconds
 
 
 def _call_case(case: dict) -> dict:

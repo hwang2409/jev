@@ -10,7 +10,6 @@ from email.utils import parsedate_to_datetime
 from pathlib import Path
 
 import requests
-
 from catalog import CATALOG
 
 API_URL = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
@@ -84,7 +83,7 @@ def parse_response(data: dict) -> RouteResult:
         confidence=tool_confidence,
         needs_tool=answers["needs_tool"]["noul"],
         step_clarity=answers["step_clarity"]["noul"],
-        usage=data["usage"],
+        usage=_normalize_usage(data["usage"]),
     )
 
 
@@ -155,7 +154,22 @@ def _normalize_gateway_response(data: dict) -> dict:
         )
         for question_id, answer in answers.items()
     }
-    return {**data, "answers": normalized}
+    return {
+        **data,
+        "answers": normalized,
+        "usage": _normalize_usage(data.get("usage", {})),
+    }
+
+
+def _normalize_usage(usage: dict) -> dict:
+    normalized = dict(usage)
+    for gateway_key, native_key in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+    ):
+        if gateway_key in normalized:
+            normalized[native_key] = normalized.pop(gateway_key)
+    return normalized
 
 
 def _resolve_gateway_key() -> str | None:
@@ -194,4 +208,4 @@ def _retry_after(response) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return max(60.0, seconds)
+    return seconds

@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Dependencies: stdlib + `requests` (runtime), `pytest` (tests). No frameworks, no packaging scaffold.
-- Auth: `JEV_API_KEY` env var (set in Henry's `~/.zshrc`; tests must NOT hit the network).
+- Auth: a Vercel AI Gateway key (set in Henry's `~/.zshrc`; tests must NOT hit the network).
 - API: `POST https://api.typesafe.ai/v1/systemone`, model `"jev-latest"`, retry 429/529 3 attempts with exponential backoff.
 - All files live at the repo root (`~/me/fun/jev`) except docs. `results/` is gitignored.
 - Commit style: Tim Pope seven rules, imperative subject, no emojis.
@@ -367,7 +367,7 @@ def route(
     api_key: str | None = None,
 ) -> RouteResult:
     body = build_request(task, step, history or [], catalog or CATALOG)
-    key = api_key or os.environ["JEV_API_KEY"]
+    key = api_key or os.environ["VERCEL_AI_GATEWAY"]
     sess = session or requests.Session()
     headers = {"Authorization": f"Bearer {key}"}
     delay = 1.0
@@ -741,12 +741,12 @@ git add run_eval.py tests/test_run_eval.py && git commit -m "Add eval runner wit
 - No new source files. Produces `results/<timestamp>.json` (gitignored) and findings.
 
 **Interfaces:**
-- Consumes: everything above plus `JEV_API_KEY` from the environment.
+- Consumes: everything above plus a Vercel AI Gateway key from the environment.
 
 - [ ] **Step 1: Smoke-test one live call**
 
 ```bash
-cd ~/me/fun/jev && export JEV_API_KEY=$(grep JEV_API_KEY ~/.zshrc | sed 's/^export JEV_API_KEY=//') && .venv/bin/python -c "
+cd ~/me/fun/jev && export VERCEL_AI_GATEWAY=$(grep VERCEL_AI_GATEWAY ~/.zshrc | sed 's/^export VERCEL_AI_GATEWAY=//') && .venv/bin/python -c "
 from router import route
 r = route('Fix the login bug', 'Look at the contents of src/auth/login.py')
 print(r)"

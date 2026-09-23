@@ -46,7 +46,7 @@ Claude call. Otherwise stock summarization runs on the smaller range.
 5. Recount assembled tokens. Under budget -> emit compaction events as usual
    and SKIP summarize. Still over -> run the existing summarize on the
    (post-tombstone) range, unchanged.
-6. Fail-safe: any Jev error / missing JEV_API_KEY / empty candidate set ->
+6. Fail-safe: any Jev error / missing gateway key / empty candidate set ->
    stage 0 is a no-op and stock compaction proceeds. Never wedge, never
    double-charge (one triage attempt per compaction).
 7. Persistence: tombstoning mutates what the PROVIDER sees. Follow zeta's

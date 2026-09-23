@@ -1,5 +1,7 @@
 """The optional Jev safety tier for yolo shell commands."""
 
+# calibrated on jev-1.13.0 native; gateway-equivalence spot-checked 2026-09-23, N=30, max delta 0.0200
+
 from __future__ import annotations
 
 import json

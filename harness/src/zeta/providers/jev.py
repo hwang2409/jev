@@ -98,7 +98,17 @@ def _normalize_gateway_response(
             }
         else:
             normalized_answers[question_id] = raw_answer
-    return {**payload, "answers": normalized_answers}
+    usage = payload.get("usage", {})
+    if not isinstance(usage, dict):
+        raise TypeError("usage must be an object")
+    usage = dict(usage)
+    for gateway_key, native_key in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+    ):
+        if gateway_key in usage:
+            usage[native_key] = usage.pop(gateway_key)
+    return {**payload, "answers": normalized_answers, "usage": usage}
 
 
 def _resolve_gateway_key() -> str | None:
@@ -138,7 +148,7 @@ def _retry_after(response: Any) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return max(60.0, seconds)
+    return seconds
 
 
 class JevRouterError(RuntimeError):

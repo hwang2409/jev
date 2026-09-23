@@ -9,9 +9,15 @@ from zeta.providers import jev
 
 
 class Response:
-    def __init__(self, status_code: int, data: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        data: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> None:
         self.status_code = status_code
         self._data = data or {}
+        self.headers = headers or {}
         self.text = "backend error" if status_code >= 400 else ""
 
     @property
@@ -53,7 +59,7 @@ def response() -> Response:
                 "needs_tool": {"noul": 0.99},
                 "step_clarity": {"noul": 0.8},
             },
-            "usage": {"input_tokens": 10, "output_tokens": 4},
+            "usage": {"inputTokens": 10, "outputTokens": 4},
         },
     )
 
@@ -978,7 +984,12 @@ async def test_route_step_builds_the_jev_request(monkeypatch: pytest.MonkeyPatch
     assert request["url"] == jev.API_URL
     assert request["headers"] == {
         "Authorization": "Bearer test-key",
-        **jev.GATEWAY_HEADERS,
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+        "ai-evaluation-model-specification-version": "4",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "typesafe-ai/jev",
     }
     assert request["json"]["providerOptions"] == {
         "gateway": {"zeroDataRetention": True}
@@ -1026,7 +1037,12 @@ async def test_gateway_maps_boolean_answers_and_derives_missing_confidence(
     request = Client.requests[0]
     assert request["headers"] == {
         "Authorization": "Bearer test-key",
-        **jev.GATEWAY_HEADERS,
+        "Content-Type": "application/json",
+        "Accept-Encoding": "identity",
+        "ai-evaluation-model-specification-version": "4",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": "typesafe-ai/jev",
     }
     assert request["json"]["questions"]["needs_tool"]["type"] == "boolean"
     assert result.needs_tool == pytest.approx(0.75)
@@ -1036,16 +1052,26 @@ async def test_gateway_maps_boolean_answers_and_derives_missing_confidence(
 
 @pytest.mark.asyncio
 async def test_route_step_retries_rate_limits(monkeypatch: pytest.MonkeyPatch) -> None:
-    Client.responses = [Response(429), Response(529), response()]
+    delays: list[float] = []
+    Client.responses = [
+        Response(429, headers={"Retry-After": "59"}),
+        Response(529),
+        response(),
+    ]
     Client.requests = []
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setattr(jev.asyncio, "sleep", lambda _delay: _done())
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(jev.asyncio, "sleep", sleep)
     monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
 
     result = await jev.route_step("read it", {"read": "Read"})
 
     assert result.tool == "read"
     assert len(Client.requests) == 3
+    assert delays == [59.0, 2.0]
 
 
 async def _done() -> None:
