@@ -500,8 +500,10 @@ class ToolRegistry:
         )
         self._tools: dict[str, ToolDefinition] = {}
         self._browser_session: Any | None = None
+        self._browser_session_factory: Callable[[ToolRegistry], Any] | None = None
         self.browser_catalog: Any | None = None
         self.browser_adapter_factory: Callable[[], Any] | None = None
+        self.browser_goal: str | None = None
         self.skill_catalog = skill_catalog
         if agent_catalog is None:
             from ..skills.agent_catalog import discover_packaged_agents
@@ -541,6 +543,8 @@ class ToolRegistry:
     def browser_session(self) -> Any | None:
         """Return the lazy browser session owned by this registry."""
 
+        if self._browser_session is None and self._browser_session_factory is not None:
+            self._browser_session = self._browser_session_factory(self)
         return self._browser_session
 
     def register(
@@ -634,6 +638,7 @@ class ToolRegistry:
         }
         clone._browser_session = None
         clone.browser_catalog = None
+        clone.browser_goal = None
         clone._session_store = store
         clone._todo_store = self._todo_store or store
         clone.background_tasks = BackgroundTaskRegistry(
@@ -663,6 +668,11 @@ class ToolRegistry:
     def start_batch(self) -> None:
         """Rotate the active signal before a new tool batch."""
         self.abort_signal = self._abort_registry.new_generation()
+
+    def start_user_turn(self, goal: str) -> None:
+        """Reset browser-local routing state at a user-turn boundary."""
+
+        self.browser_goal = goal
         if self._browser_session is not None:
             self._browser_session.reset_turn_state()
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import logging
 from collections.abc import Awaitable, Callable
@@ -53,6 +54,7 @@ class BrowserSession:
         self.action_timeout_ms = action_timeout_ms
         self._catalog_sink = catalog_sink
         self._adapter: BrowserAdapter | None = None
+        self._adapter_lock = asyncio.Lock()
         self._state: BrowserState | None = None
         self._builder = SnapshotCatalogBuilder(self.limits)
         self._element_refs: dict[str, ElementRef] = {}
@@ -72,13 +74,27 @@ class BrowserSession:
         return None if self._state is None else self._state.catalog
 
     async def adapter(self) -> BrowserAdapter:
-        if self._adapter is None:
+        if self._adapter is not None:
+            return self._adapter
+        async with self._adapter_lock:
+            if self._adapter is not None:
+                return self._adapter
             adapter = self._factory()
             if inspect.isawaitable(adapter):
                 adapter = await adapter
-            await adapter.launch()
+            try:
+                await adapter.launch()
+            except Exception:
+                try:
+                    await adapter.close()
+                except Exception as cleanup_error:
+                    _logger.debug(
+                        "browser startup cleanup failed",
+                        exc_info=cleanup_error,
+                    )
+                raise
             self._adapter = adapter
-        return self._adapter
+            return adapter
 
     async def open(self) -> BrowserAdapter:
         """Open the lazy adapter on first use."""

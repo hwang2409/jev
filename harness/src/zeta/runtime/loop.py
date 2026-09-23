@@ -28,6 +28,13 @@ from ..agent.budget import (
     AgentTree,
     consume_turn,
 )
+from ..agent.plan_mode import (
+    PLAN_MODE_PREAMBLE,
+    PLAN_MODE_TOOLS,
+)
+from ..agent.presets import (
+    compose_system_prompt,
+)
 from ..agent.receipt import (
     TerminalState,
     finalize_agent_results,
@@ -62,26 +69,6 @@ from ..mcp.commands import (
 )
 from ..mcp.prompt_commands import SlashModelInput
 from ..prompts import load_identity
-from ..providers.jev import auto_route, memory_relevance
-from ..skills import SkillCatalog
-from ..skills.agent_catalog import AgentCatalog
-from ..tools import ToolHandler, ToolRegistry, ToolStreamPublisher
-from ..tools.agent import MAX_AGENT_RESULT_BYTES, agent_result
-from ..agent.presets import (
-    compose_system_prompt,
-)
-from .tool_setup import select_tool_registry
-from ..tools.memory import _memory_search
-from ..agent.plan_mode import (
-    PLAN_MODE_PREAMBLE,
-    PLAN_MODE_TOOLS,
-)
-from ..tools.registry import (
-    ToolExecutionContext,
-    _validate_unique_tool_call_ids,
-    validate_tool_result,
-)
-from ..tools.route import ROUTE_TOPK_CONFIDENCE, build_catalog
 from ..protocol.types import (
     FAILED_TURN_ERROR,
     FAILED_TURN_MARKER,
@@ -100,6 +87,19 @@ from ..protocol.types import (
     ToolUseContent,
     flatten_tool_content,
 )
+from ..providers.jev import auto_route, memory_relevance
+from ..skills import SkillCatalog
+from ..skills.agent_catalog import AgentCatalog
+from ..tools import ToolHandler, ToolRegistry, ToolStreamPublisher
+from ..tools.agent import MAX_AGENT_RESULT_BYTES, agent_result
+from ..tools.memory import _memory_search
+from ..tools.registry import (
+    ToolExecutionContext,
+    _validate_unique_tool_call_ids,
+    validate_tool_result,
+)
+from ..tools.route import ROUTE_TOPK_CONFIDENCE, build_catalog
+from .tool_setup import select_tool_registry
 
 TaskResult = TypeVar("TaskResult")
 MAX_ERROR_MESSAGE = 400
@@ -1668,6 +1668,7 @@ class AgentLoop:
         self._routed_tools = []
         self._router_fail_open = False
         self._router_recent_steps.clear()
+        self.tool_registry.start_user_turn(user_text)
         self._router_auto_allowed_tools = set()
         self._router_auto_fail_open = False
         if self.hooks is not None:
