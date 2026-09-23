@@ -1,13 +1,12 @@
-from router import RouteResult, build_request, parse_response
+import pytest
 import requests
 
 import router
-from router import route
+from router import RouteResult, build_request, parse_response, route
 
 CATALOG_STUB = {"Read": "read a file", "Bash": "run a command"}
 
 RESPONSE_STUB = {
-    "model": "jev-1.13.0",
     "answers": {
         "tool": {
             "type": "choice",
@@ -24,7 +23,7 @@ RESPONSE_STUB = {
 
 def test_build_request_shape():
     body = build_request("fix bug", "read config.py", ["opened repo"], CATALOG_STUB)
-    assert body["model"] == "jev-latest"
+    assert "model" not in body
     assert body["state"] == {
         "task": "fix bug",
         "current_step": "read config.py",
@@ -86,7 +85,37 @@ def test_route_success(monkeypatch):
     r = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
     assert r.tool == "Read"
     assert sess.calls[0]["headers"]["Authorization"] == "Bearer k"
+    assert sess.calls[0]["headers"] == {
+        "Authorization": "Bearer k",
+        **router.GATEWAY_HEADERS,
+    }
+    assert sess.calls[0]["json"]["questions"]["needs_tool"]["type"] == "boolean"
+    assert sess.calls[0]["json"]["providerOptions"] == {
+        "gateway": {"zeroDataRetention": True}
+    }
     assert sess.calls[0]["json"]["questions"]["tool"]["criteria"] == CATALOG_STUB
+
+
+def test_route_maps_gateway_booleans_and_derives_missing_confidence():
+    response = {
+        "answers": {
+            "tool": {
+                "type": "choice",
+                "choice": "Read",
+                "probabilities": {"Read": 0.8, "Bash": 0.2},
+            },
+            "needs_tool": {"type": "boolean", "probability": 0.75},
+            "step_clarity": {"type": "boolean", "probability": 0.9},
+        },
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+    }
+    sess = FakeSession([FakeResponse(200, response)])
+
+    result = route("t", "s", session=sess, api_key="k", catalog=CATALOG_STUB)
+
+    assert result.needs_tool == 0.75
+    assert result.step_clarity == 0.9
+    assert result.confidence == pytest.approx(0.6)
 
 
 def test_route_retries_on_429_then_succeeds(monkeypatch):
