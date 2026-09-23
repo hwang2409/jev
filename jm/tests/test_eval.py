@@ -1,4 +1,4 @@
-"""Offline end-to-end evaluations for the built-in jmap presets."""
+"""Offline end-to-end evaluations for the built-in jm presets."""
 
 from __future__ import annotations
 
@@ -11,11 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from jmap.answers import ChoiceAnswer, JudgeResponse, NoulAnswer, ScoreAnswer
-from jmap.cache import CacheStore
-from jmap.cli import main
-from jmap.presets import resolve_preset
-from jmap.runner import State
+from jm.answers import ChoiceAnswer, JudgeResponse, NoulAnswer, ScoreAnswer
+from jm.cache import CacheStore
+from jm.cli import main
+from jm.presets import resolve_preset
+from jm.runner import State
 
 
 @dataclass(frozen=True, slots=True)
@@ -409,8 +409,8 @@ def test_scan_cap_reports_unvisited_states_and_partial_coverage() -> None:
 
     assert result["exit_code"] == 2
     assert result["stderr"] == (
-        "jmap: warning: scan cap reached before visit\n"
-        "jmap: warning: results are partial; coverage reasons: scan_cap\n"
+        "jm: warning: scan cap reached before visit\n"
+        "jm: warning: results are partial; coverage reasons: scan_cap\n"
     )
     scan_cap = next(
         record
@@ -537,7 +537,7 @@ def test_live_smoke_skips_without_a_key_and_does_not_create_a_client(
     monkeypatch,
 ) -> None:
     script_path = Path(__file__).parents[1] / "scripts" / "live_api_smoke.py"
-    spec = importlib.util.spec_from_file_location("jmap_live_api_smoke", script_path)
+    spec = importlib.util.spec_from_file_location("jm_live_api_smoke", script_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

@@ -7,9 +7,9 @@ import json
 import sys
 from typing import TextIO
 
-from jmap.answers import ErrorResponse, answers_to_dict
-from jmap.api import GatewayClient, resolve_gateway_key
-from jmap.runner import State
+from jm.answers import ErrorResponse, answers_to_dict
+from jm.api import GatewayClient, resolve_gateway_key
+from jm.runner import State
 
 SMOKE_STATE = {
     "focus": 'Caregiver reply: "yes, I can take the Saturday morning shift"',

@@ -8,29 +8,29 @@ from pathlib import Path
 import httpx
 import pytest
 
-from jmap.answers import (
+from jm.answers import (
     ChoiceAnswer,
     ErrorResponse,
     JudgeResponse,
     NoulAnswer,
     ScoreAnswer,
 )
-from jmap.api import (
+from jm.api import (
     GATEWAY_ENDPOINT,
     GATEWAY_MODEL,
     MAX_RESPONSE_BYTES,
     MAX_WAIT_SECONDS,
     GatewayClient,
 )
-from jmap.gates import PolicySyntaxError
-from jmap.presets import (
+from jm.gates import PolicySyntaxError
+from jm.presets import (
     Preset,
     PresetUsageError,
     PresetValidationError,
     resolve_preset,
     validate_preset,
 )
-from jmap.runner import (
+from jm.runner import (
     FakeJudge,
     Runner,
     State,
@@ -263,7 +263,7 @@ def test_runner_rejects_conflicting_loose_preset_values(
 
 def test_invalid_preset_is_validated_before_processing(tmp_path: Path) -> None:
     path = tmp_path / "invalid.yml"
-    path.write_text("schema: jmap.preset/v1\n", encoding="utf-8")
+    path.write_text("schema: jm.preset/v1\n", encoding="utf-8")
     calls = []
 
     def judge(*args):
@@ -424,7 +424,7 @@ def test_runner_emits_exact_partial_json() -> None:
             "answers": {"matches": {"type": "noul", "noul": 0.5}},
             "missing_questions": ["risk"],
             "meta": {
-                "preset": "jmap",
+                "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
                 "chunker": "para",
@@ -444,7 +444,7 @@ def test_runner_emits_exact_partial_json() -> None:
             },
             "coverage_reasons": ["partial_answer"],
             "meta": {
-                "preset": "jmap",
+                "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
                 "chunker": "para",
@@ -487,7 +487,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
             },
         },
         "meta": {
-            "preset": "jmap",
+            "preset": "jm",
             "preset_version": "1",
             "model": "typesafe-ai/jev",
             "chunker": "para",
@@ -587,7 +587,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
                 "attempts": 0,
             },
             "meta": {
-                "preset": "jmap",
+                "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",
@@ -606,7 +606,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
             },
             "coverage_reasons": ["input_error"],
             "meta": {
-                "preset": "jmap",
+                "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",

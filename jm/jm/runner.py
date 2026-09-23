@@ -306,7 +306,7 @@ class Runner:
             runtime_questions = questions
             runtime_model = self.model
             runtime_limits = self.limits
-            runtime_name = str(preset) if preset is not None else "jmap"
+            runtime_name = str(preset) if preset is not None else "jm"
             runtime_version = "1" if preset_version is _UNSET else preset_version
             runtime_chunker = "unknown" if chunker is _UNSET else chunker
             runtime_max_chunks = None if max_chunks is _UNSET else max_chunks
@@ -479,7 +479,7 @@ class Runner:
         for record in _rejection_records(admission, meta):
             write(record)
             if stderr is not None:
-                stderr.write(f"jmap: warning: {record.error.message}\n")
+                stderr.write(f"jm: warning: {record.error.message}\n")
                 stderr.flush()
 
         failed = sum(not response.complete for response in responses)
@@ -515,7 +515,7 @@ class Runner:
         if stderr is not None:
             if coverage == "partial":
                 stderr.write(
-                    "jmap: warning: results are partial; "
+                    "jm: warning: results are partial; "
                     f"coverage reasons: {', '.join(reasons)}\n"
                 )
             stderr.flush()

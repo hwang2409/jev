@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from jmap.answers import (
+from jm.answers import (
     ChoiceAnswer,
     CoverageRecord,
     ErrorDetail,

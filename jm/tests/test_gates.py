@@ -4,8 +4,8 @@ from copy import deepcopy
 
 import pytest
 
-from jmap.answers import ChoiceAnswer, NoulAnswer, RecordMeta, ResultRecord, ScoreAnswer
-from jmap.gates import (
+from jm.answers import ChoiceAnswer, NoulAnswer, RecordMeta, ResultRecord, ScoreAnswer
+from jm.gates import (
     MAX_POLICY_DEPTH,
     Aggregate,
     Boolean,
@@ -18,7 +18,7 @@ from jmap.gates import (
     evaluate_policy,
     parse_policy,
 )
-from jmap.presets import Preset, resolve_preset, validate_preset
+from jm.presets import Preset, resolve_preset, validate_preset
 
 
 def _choice_preset() -> Preset:

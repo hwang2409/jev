@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from jmap.chunkers import (
+from jm.chunkers import (
     DEFAULT_CONTEXT_FIELD_BYTES,
     DEFAULT_FOCUS_BYTES,
     DEFAULT_STATE_BYTES,
@@ -17,7 +17,7 @@ from jmap.chunkers import (
     chunk_record,
     decode_stdin,
 )
-from jmap.runner import State, StateLimits, validate_state
+from jm.runner import State, StateLimits, validate_state
 
 
 def test_default_byte_limits_are_pinned() -> None:
