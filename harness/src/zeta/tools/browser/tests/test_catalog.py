@@ -21,9 +21,7 @@ def test_search_triage_exposes_ties_and_rejects_below_floor() -> None:
         relevance_floor=0.4,
     ) == SearchTriageDecision(None, (), "relevance_floor")
 
-    tied = SearchResultScoreResult(
-        {"a": 0.82, "b": 0.79, "c": 0.2}, 0.9, {}, 0.9
-    )
+    tied = SearchResultScoreResult({"a": 0.82, "b": 0.79, "c": 0.2}, 0.9, {}, 0.9)
 
     assert triage_search_results(
         tied,
@@ -33,7 +31,9 @@ def test_search_triage_exposes_ties_and_rejects_below_floor() -> None:
     ).exposed == ("a", "b")
 
 
-def test_search_triage_accepts_clear_winner_and_exposes_low_confidence_candidates() -> None:
+def test_search_triage_accepts_clear_winner_and_exposes_low_confidence_candidates() -> (
+    None
+):
     winner = SearchResultScoreResult({"b": 0.92, "a": 0.4}, 0.95, {}, 0.95)
     uncertain = SearchResultScoreResult(
         {"a": 0.92, "b": 0.4, "c": 0.3, "d": 0.2}, 0.95, {}, 0.79
@@ -88,12 +88,11 @@ def test_search_triage_uses_source_diversity_for_equal_scores() -> None:
         SearchResult("c", "c", "", "", "one", 3),
     ]
 
-    assert triage_search_results(
-        scores, same_source, top_n=2
-    ).exposed == ("a", "c")
-    assert triage_search_results(
-        scores, different_sources, top_n=2
-    ).exposed == ("a", "b")
+    assert triage_search_results(scores, same_source, top_n=2).exposed == ("a", "c")
+    assert triage_search_results(scores, different_sources, top_n=2).exposed == (
+        "a",
+        "b",
+    )
 
 
 def test_search_triage_threshold_boundaries_and_zero_or_one_result() -> None:
@@ -239,7 +238,11 @@ def test_builder_invalidates_all_ids_when_generation_changes() -> None:
         "https://example.test",
         "One",
         "",
-        (ElementRef(10, "e1", "button", "click", "one", "one", None, None, False, True),),
+        (
+            ElementRef(
+                10, "e1", "button", "click", "one", "one", None, None, False, True
+            ),
+        ),
         True,
         True,
     )
@@ -249,7 +252,11 @@ def test_builder_invalidates_all_ids_when_generation_changes() -> None:
         "https://example.test",
         "Two",
         "",
-        (ElementRef(11, "e1", "button", "click", "two", "two", None, None, False, True),),
+        (
+            ElementRef(
+                11, "e1", "button", "click", "two", "two", None, None, False, True
+            ),
+        ),
         True,
         True,
     )
@@ -270,7 +277,11 @@ def test_builder_assigns_monotonic_ids_and_bumps_generation_for_url_changes() ->
         "https://example.test/one",
         "One",
         "",
-        (ElementRef(10, "e1", "button", "click", "one", "one", None, None, False, True),),
+        (
+            ElementRef(
+                10, "e1", "button", "click", "one", "one", None, None, False, True
+            ),
+        ),
         True,
         True,
     )
@@ -302,29 +313,41 @@ def test_builder_catalog_byte_cap_includes_invalidated_ids() -> None:
         "One",
         "",
         tuple(
-            ElementRef(1, f"e{index}", "button", "click", "item", "item", None, None, False, True)
+            ElementRef(
+                1,
+                f"e{index}",
+                "button",
+                "click",
+                "item",
+                "item",
+                None,
+                None,
+                False,
+                True,
+            )
             for index in range(6)
         ),
         True,
         True,
     )
-    builder = SnapshotCatalogBuilder(
-        SnapshotLimits(catalog_bytes=390)
-    )
+    builder = SnapshotCatalogBuilder(SnapshotLimits(catalog_bytes=390))
     builder.build(first)
     second = builder.build(
         PageObservation(2, 1, "https://example.test/two", "Two", "", (), True, True)
     )
 
-    assert _serialized_size(
-        second.snapshot_id,
-        second.generation,
-        second.url,
-        second.title,
-        second.summary,
-        second.entries,
-        second.invalidated_element_ids,
-    ) <= 390
+    assert (
+        _serialized_size(
+            second.snapshot_id,
+            second.generation,
+            second.url,
+            second.title,
+            second.summary,
+            second.entries,
+            second.invalidated_element_ids,
+        )
+        <= 390
+    )
 
 
 def test_builder_fits_two_thousand_elements_within_time_and_bounds() -> None:
@@ -337,7 +360,18 @@ def test_builder_fits_two_thousand_elements_within_time_and_bounds() -> None:
         "Results",
         "",
         tuple(
-            ElementRef(1, f"e{index}", "button", "click", f"item {index}", f"item {index}", None, None, False, True)
+            ElementRef(
+                1,
+                f"e{index}",
+                "button",
+                "click",
+                f"item {index}",
+                f"item {index}",
+                None,
+                None,
+                False,
+                True,
+            )
             for index in range(2_000)
         ),
         True,
@@ -351,12 +385,15 @@ def test_builder_fits_two_thousand_elements_within_time_and_bounds() -> None:
 
     assert elapsed < 2
     assert len(catalog.entries) <= 2_000
-    assert _serialized_size(
-        catalog.snapshot_id,
-        catalog.generation,
-        catalog.url,
-        catalog.title,
-        catalog.summary,
-        catalog.entries,
-        catalog.invalidated_element_ids,
-    ) <= builder.limits.catalog_bytes
+    assert (
+        _serialized_size(
+            catalog.snapshot_id,
+            catalog.generation,
+            catalog.url,
+            catalog.title,
+            catalog.summary,
+            catalog.entries,
+            catalog.invalidated_element_ids,
+        )
+        <= builder.limits.catalog_bytes
+    )

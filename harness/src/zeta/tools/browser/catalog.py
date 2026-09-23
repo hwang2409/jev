@@ -109,9 +109,12 @@ def rank_search_result_ids(
 ) -> tuple[str, ...]:
     """Return score-ranked result ids with source diversity for ties."""
 
-    return tuple(result_id for result_id, _score in _rank_search_scores(
-        scores.scores, _result_sources(results)
-    ))
+    return tuple(
+        result_id
+        for result_id, _score in _rank_search_scores(
+            scores.scores, _result_sources(results)
+        )
+    )
 
 
 def _result_sources(
@@ -174,11 +177,14 @@ class SnapshotCatalogBuilder:
         summary = _normalize_text(observation.text, self.limits.page_text_bytes)
         url = _truncate_utf8(observation.url, self.limits.catalog_bytes)
         previous = self._current
-        previous_ids = frozenset() if previous is None else {
-            entry.element_id for entry in previous.entries
-        }
+        previous_ids = (
+            frozenset()
+            if previous is None
+            else {entry.element_id for entry in previous.entries}
+        )
         generation_changed = previous is not None and (
-            self._source_generation != observation.generation or self._source_url != observation.url
+            self._source_generation != observation.generation
+            or self._source_url != observation.url
         )
         if self._generation is None:
             self._generation = observation.generation
@@ -307,10 +313,15 @@ def _fit_catalog(
     if serialized_size(retained_count, url, title, summary) > bounded_limit:
         url = _largest_fitting_text(
             url,
-            lambda candidate: serialized_size(retained_count, candidate, title, summary),
+            lambda candidate: serialized_size(
+                retained_count, candidate, title, summary
+            ),
             bounded_limit,
         )
-    while retained_count and serialized_size(retained_count, url, title, summary) > bounded_limit:
+    while (
+        retained_count
+        and serialized_size(retained_count, url, title, summary) > bounded_limit
+    ):
         retained_count -= 1
     return entries[:retained_count], title, summary, url
 
@@ -330,13 +341,12 @@ def _serialized_size(
         "url": url,
         "title": title,
         "summary": summary,
-        "entries": [
-            _entry_payload(entry)
-            for entry in entries
-        ],
+        "entries": [_entry_payload(entry) for entry in entries],
         "invalidated_element_ids": sorted(invalidated_element_ids),
     }
-    return len(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
 
 
 def _entry_payload(entry: CatalogEntry) -> dict[str, object]:
@@ -354,7 +364,9 @@ def _entry_payload(entry: CatalogEntry) -> dict[str, object]:
 
 
 def _json_size(value: object) -> int:
-    return len(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
 
 
 def _array_size(item_sizes: list[int] | tuple[int, ...]) -> int:
@@ -388,7 +400,9 @@ def _serialized_size_from_parts(
 
 
 def _invalidated_array_size(element_ids: frozenset[str]) -> int:
-    return _array_size(tuple(_json_size(element_id) for element_id in sorted(element_ids)))
+    return _array_size(
+        tuple(_json_size(element_id) for element_id in sorted(element_ids))
+    )
 
 
 def _invalidated_sizes_by_prefix(
@@ -519,7 +533,11 @@ def _score_entry(goal: str, action: str, entry: CatalogEntry) -> int:
     goal_tokens = _tokens(goal)
     searchable = _tokens(" ".join((entry.text, entry.name, entry.landmark or "")))
     lexical = len(goal_tokens & searchable) * 3
-    phrase = 2 if goal.casefold().strip() and goal.casefold().strip() in entry.text.casefold() else 0
+    phrase = (
+        2
+        if goal.casefold().strip() and goal.casefold().strip() in entry.text.casefold()
+        else 0
+    )
     role = _role_score(action, entry.role)
     return lexical + phrase + role
 
@@ -579,7 +597,8 @@ def _retain_candidates(
                 for item in scored
                 if _tie_group(item[1].role) == group
                 and item[0] == min(score for score, _ in retained)
-                and item[1].element_id not in {entry.element_id for _, entry in retained}
+                and item[1].element_id
+                not in {entry.element_id for _, entry in retained}
             ),
             None,
         )
@@ -600,7 +619,10 @@ def _diversity_replacement_index(
     for index in range(len(retained) - 1, -1, -1):
         score, entry = retained[index]
         del score
-        if entry.element_id != prior_element_id and group_counts[_tie_group(entry.role)] > 1:
+        if (
+            entry.element_id != prior_element_id
+            and group_counts[_tie_group(entry.role)] > 1
+        ):
             return index
     return None
 

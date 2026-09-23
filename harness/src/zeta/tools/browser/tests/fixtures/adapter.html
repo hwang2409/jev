@@ -1,0 +1,24 @@
+<!doctype html>
+<html>
+  <head><title>adapter fixture</title></head>
+  <body>
+    <main aria-label="fixture main">
+      <h1>local browser fixture</h1>
+      <label for="query">query</label>
+      <input id="query" name="query" value="initial">
+      <label for="choice">choice</label>
+      <select id="choice" name="choice">
+        <option value="one">one</option>
+        <option value="two">two</option>
+      </select>
+      <button id="continue" type="button" onclick="document.querySelector('#status').textContent = 'clicked'">continue</button>
+      <p id="status">ready</p>
+      <section aria-label="results">
+        <article data-search-result data-result-id="result-1">
+          <h2><a href="https://example.test/one">first result</a></h2>
+          <p>first snippet</p>
+        </article>
+      </section>
+    </main>
+  </body>
+</html>

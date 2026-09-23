@@ -36,12 +36,8 @@ class PageStateDecision:
 
 
 _PROVIDER_ERROR_DECISIONS = {
-    "page_loaded_and_stable": PageStateDecision(
-        False, "observe", "page_load_failed"
-    ),
-    "goal_element_present": PageStateDecision(
-        False, "state", "goal_element_absent"
-    ),
+    "page_loaded_and_stable": PageStateDecision(False, "observe", "page_load_failed"),
+    "goal_element_present": PageStateDecision(False, "state", "goal_element_absent"),
     "action_is_the_next_step": PageStateDecision(
         False, "state", "action_not_next_step"
     ),
@@ -141,8 +137,7 @@ def _catalog_identity(
 def _action_succeeded_is_uncertain(action_succeeded: float | None) -> bool:
     return action_succeeded is not None and (
         action_succeeded < 0.5
-        or abs(action_succeeded - 0.5)
-        <= ACTION_SUCCEEDED_LOW_CONFIDENCE_RADIUS
+        or abs(action_succeeded - 0.5) <= ACTION_SUCCEEDED_LOW_CONFIDENCE_RADIUS
     )
 
 
@@ -152,12 +147,11 @@ def _bound_action_recovery(
     previous_page_state: dict[str, object] | None,
     recovery_attempts: int,
 ) -> PageStateDecision:
-    next_attempt = min(
-        recovery_attempts + 1, PAGE_STATE_RECOVERY_ATTEMPT_CAP
-    )
-    unchanged = (
-        _catalog_identity(previous_page_state) is not None
-        and _catalog_identity(page_state) == _catalog_identity(previous_page_state)
+    next_attempt = min(recovery_attempts + 1, PAGE_STATE_RECOVERY_ATTEMPT_CAP)
+    unchanged = _catalog_identity(
+        previous_page_state
+    ) is not None and _catalog_identity(page_state) == _catalog_identity(
+        previous_page_state
     )
     if recovery_attempts >= PAGE_STATE_RECOVERY_ATTEMPT_CAP or unchanged:
         return PageStateDecision(False, None, ACTION_OUTCOME_UNKNOWN, next_attempt)
