@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from ...core.safety import BrowserRiskEvidence, browser_action_requires_safety
 from ...protocol.types import StructuredToolResult
 from ...providers import jev
 from ...routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
@@ -81,7 +82,26 @@ async def _browser_navigate(
             "invalid_arguments",
         )
     try:
-        state = await _session(registry).navigate(url)
+        session = _session(registry)
+        current_url = url
+        if session.state is not None:
+            current_url = session.state.observation.url
+        evidence = BrowserRiskEvidence(
+            action="navigate",
+            role="navigation",
+            text=url,
+            current_origin=_origin(current_url) or "",
+            target_url=url,
+            form_action_origin=None,
+            payment_language=False,
+            authentication_language=False,
+            download=False,
+            durable_state_change=False,
+        )
+        safety_error = await _check_browser_safety(registry, evidence)
+        if safety_error is not None:
+            return safety_error
+        state = await session.navigate(url)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
     return _state_result(state)
@@ -237,6 +257,24 @@ async def _run_element_action(
             role=selected_entry.role,
             affordance=selected_entry.affordance,
         )
+        evidence = BrowserRiskEvidence(
+            action=action,
+            role=element.role,
+            text=" ".join(part for part in (element.text, element.name) if part),
+            current_origin=_origin(current_state.observation.url) or "",
+            target_url=element.target_url,
+            form_action_origin=element.form_action_origin,
+            payment_language=_has_payment_language(element.text, element.name),
+            authentication_language=_has_authentication_language(
+                element.text, element.name
+            ),
+            download=element.download,
+            durable_state_change=element.durable_state_change or action == "submit",
+        )
+        if browser_action_requires_safety(evidence):
+            safety_error = await _check_browser_safety(registry, evidence)
+            if safety_error is not None:
+                return safety_error
         _action, state = await session.action(
             action,
             element,
@@ -423,6 +461,82 @@ def _element_schema(
 def _is_absolute_http_url(url: str) -> bool:
     parsed = urlsplit(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _origin(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname.casefold()
+    if port is None or (parsed.scheme == "http" and port == 80) or (
+        parsed.scheme == "https" and port == 443
+    ):
+        return f"{parsed.scheme.casefold()}://{host}"
+    return f"{parsed.scheme.casefold()}://{host}:{port}"
+
+
+def _has_payment_language(*values: str) -> bool:
+    text = " ".join(values).casefold()
+    return any(
+        word in text
+        for word in (
+            "buy",
+            "checkout",
+            "donate",
+            "pay",
+            "payment",
+            "purchase",
+            "subscribe",
+            "transfer",
+        )
+    )
+
+
+def _has_authentication_language(*values: str) -> bool:
+    text = " ".join(values).casefold()
+    return any(
+        word in text
+        for word in (
+            "account",
+            "authenticate",
+            "authentication",
+            "login",
+            "log-in",
+            "password",
+            "permission",
+            "sign-in",
+            "token",
+        )
+    )
+
+
+async def _check_browser_safety(
+    registry: ToolRegistry, evidence: BrowserRiskEvidence
+) -> StructuredToolResult | None:
+    safety_tier = registry.safety_tier
+    if safety_tier is None:
+        return _browser_error(
+            "browser safety tier is not configured for this risky action",
+            "safety_denied",
+        )
+    try:
+        outcome = await safety_tier.evaluate_browser_action(evidence)
+    except Exception as exc:  # noqa: BLE001 - safety must fail closed
+        outcome = safety_tier.fail_closed(exc)
+    if outcome.decision == "allow":
+        return None
+    if outcome.decision == "ask":
+        message = (
+            "browser action requires approval: "
+            f"{outcome.reason or 'safety threshold not met'}"
+        )
+    else:
+        message = safety_tier.teaching_error(outcome)
+    return _browser_error(message, "safety_denied")
 
 
 def _browser_goal(

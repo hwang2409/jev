@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from zeta.core.safety import SafetyOutcome, SafetyTier
 from zeta.protocol.types import ToolCall
 from zeta.providers import jev
 from zeta.skills import SkillCatalog
@@ -39,11 +40,16 @@ def _observation(snapshot_id: int = 1) -> PageObservation:
     )
 
 
-def _registry(tmp_path: Path, adapter: FakeBrowserAdapter) -> ToolRegistry:
+def _registry(
+    tmp_path: Path,
+    adapter: FakeBrowserAdapter,
+    safety_tier: SafetyTier | None = None,
+) -> ToolRegistry:
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
         skill_catalog=SkillCatalog.empty(),
+        safety_tier=safety_tier,
     )
     registry.browser_adapter_factory = lambda: adapter
     register(registry)
@@ -56,10 +62,15 @@ def _structured(result: dict[str, object]) -> dict[str, object]:
     return structured
 
 
-def _choice(element_id: str | None, confidence: float, candidates: tuple[str, ...]) -> jev.BrowserElementChoiceResult:
+def _choice(
+    element_id: str | None,
+    confidence: float,
+    candidates: tuple[str, ...],
+    affordance: str = "click",
+) -> jev.BrowserElementChoiceResult:
     return jev.BrowserElementChoiceResult(
         element_id,
-        "click" if element_id is not None else None,
+        affordance if element_id is not None else None,
         candidates,
         {candidate: 1 / len(candidates) for candidate in candidates},
         confidence,
@@ -186,6 +197,74 @@ async def test_browser_click_does_not_act_when_page_state_gate_blocks(
 
     assert result["isError"] is True
     assert _structured(result)["error"]["kind"] == "action_not_next_step"
+    assert adapter.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_browser_submit_hands_risk_to_shared_safety_tier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    observation = _observation()
+    submit = ElementRef(
+        observation.snapshot_id,
+        "e1",
+        "button",
+        "submit",
+        "safe approved submit",
+        "safe approved submit",
+        None,
+        "main",
+        False,
+        True,
+    )
+    adapter = FakeBrowserAdapter(
+        [
+            PageObservation(
+                observation.snapshot_id,
+                observation.generation,
+                observation.url,
+                observation.title,
+                observation.text,
+                (submit,),
+                observation.loaded,
+                observation.stable,
+            )
+        ]
+    )
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    registry = _registry(tmp_path, adapter, tier)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+        return _choice("e1", 0.9, ("e1",), "submit")
+
+    async def page_gate(**_kwargs: object) -> PageStateDecision:
+        return PageStateDecision(True, None, None)
+
+    async def deny(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("deny", "layer0", reason="durable_state_change")
+
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    monkeypatch.setattr(
+        "zeta.tools.browser.evaluate_page_state_with_provider", page_gate
+    )
+    monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+
+    result = await registry.execute(
+        ToolCall(
+            "submit",
+            "browser_submit",
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "submit",
+            },
+        )
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
     assert adapter.clicks == []
 
 

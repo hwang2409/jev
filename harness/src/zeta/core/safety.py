@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import shlex
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from ..providers import jev
 
@@ -220,6 +222,20 @@ class SafetyOutcome:
     confidence: float | None = None
     reason: str | None = None
     usage: dict[str, int] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserRiskEvidence:
+    action: str
+    role: str
+    text: str
+    current_origin: str
+    target_url: str | None
+    form_action_origin: str | None
+    payment_language: bool
+    authentication_language: bool
+    download: bool
+    durable_state_change: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -984,6 +1000,73 @@ def layer0_reason(command: str, cwd: str | Path) -> str | None:
     return reason
 
 
+_BROWSER_ACTIONS = frozenset({"click", "navigate", "select", "submit", "type"})
+_BROWSER_DESTRUCTIVE_WORDS = re.compile(
+    r"\b(?:cancel|delete|destroy|discard|remove|revoke|terminate|unsubscribe)\b",
+    re.IGNORECASE,
+)
+_BROWSER_PAYMENT_WORDS = re.compile(
+    r"\b(?:buy|checkout|donate|pay|payment|purchase|subscribe|transfer)\b",
+    re.IGNORECASE,
+)
+_BROWSER_AUTH_WORDS = re.compile(
+    r"\b(?:account|authenticate|authentication|login|log[ -]?in|password|permission|sign[ -]?in|token)\b",
+    re.IGNORECASE,
+)
+
+
+def _url_origin(value: str) -> str | None:
+    parsed = urlsplit(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname.casefold()
+    if (
+        port is None
+        or (parsed.scheme == "http" and port == 80)
+        or (parsed.scheme == "https" and port == 443)
+    ):
+        return f"{parsed.scheme.casefold()}://{host}"
+    return f"{parsed.scheme.casefold()}://{host}:{port}"
+
+
+def _browser_layer0_reason(evidence: BrowserRiskEvidence) -> str | None:
+    if evidence.action not in _BROWSER_ACTIONS:
+        return "unclassifiable_action"
+    if not evidence.role or _url_origin(evidence.current_origin) is None:
+        return "unclassifiable_origin"
+    if evidence.target_url is not None:
+        target_origin = _url_origin(evidence.target_url)
+        if target_origin is None:
+            return "unclassifiable_target_url"
+        if target_origin != _url_origin(evidence.current_origin):
+            return "external_origin"
+    if evidence.form_action_origin is not None:
+        form_origin = _url_origin(evidence.form_action_origin)
+        if form_origin is None:
+            return "unclassifiable_form_action_origin"
+        if form_origin != _url_origin(evidence.current_origin):
+            return "external_form_action_origin"
+    if evidence.payment_language or _BROWSER_PAYMENT_WORDS.search(evidence.text):
+        return "payment_or_financial_commitment"
+    if evidence.authentication_language or _BROWSER_AUTH_WORDS.search(evidence.text):
+        return "authentication_or_permission_change"
+    if evidence.download:
+        return "download"
+    if evidence.durable_state_change:
+        return "durable_state_change"
+    if evidence.action == "click" and _BROWSER_DESTRUCTIVE_WORDS.search(evidence.text):
+        return "destructive_action"
+    return None
+
+
+def browser_action_requires_safety(evidence: BrowserRiskEvidence) -> bool:
+    return _browser_layer0_reason(evidence) is not None
+
+
 class SafetyTier:
     """Evaluate only yolo shell calls and preserve full decision telemetry."""
 
@@ -1041,17 +1124,38 @@ class SafetyTier:
                     reason=reason,
                 )
             )
+        return self._finish(await self._evaluate_jev(command, cwd))
+
+    async def evaluate_browser_action(
+        self, evidence: BrowserRiskEvidence
+    ) -> SafetyOutcome:
+        """Evaluate risky browser evidence through the shared safety policy."""
+
+        layer0_reason = _browser_layer0_reason(evidence)
+        command = json.dumps(asdict(evidence), sort_keys=True)
+        outcome = await self._evaluate_jev(command, evidence.current_origin)
+        if outcome.layer in {"jev_error_failclosed", "safety_error_failclosed"}:
+            return self._finish(outcome)
+        if layer0_reason is not None:
+            return self._finish(
+                SafetyOutcome(
+                    "deny" if self.headless else "ask",
+                    "layer0",
+                    reason=layer0_reason,
+                )
+            )
+        return self._finish(outcome)
+
+    async def _evaluate_jev(self, command: str, cwd: str) -> SafetyOutcome:
         try:
             result = await jev.safety_score(command, cwd, self.task_excerpt)
         except Exception as exc:  # noqa: BLE001 - safety must fail closed
             # This polarity is deliberate: unlike a routing failure, a safety
             # failure must never turn an uncertain command into auto-approval.
-            return self._finish(
-                SafetyOutcome(
-                    "deny" if self.headless else "ask",
-                    "jev_error_failclosed",
-                    reason=str(exc),
-                )
+            return SafetyOutcome(
+                "deny" if self.headless else "ask",
+                "jev_error_failclosed",
+                reason=str(exc),
             )
         safe = (
             result.score <= SAFE_MAX
@@ -1059,15 +1163,13 @@ class SafetyTier:
             and result.touches_outside_cwd < NOUL_THRESHOLD
             and result.plausibly_irreversible < NOUL_THRESHOLD
         )
-        return self._finish(
-            SafetyOutcome(
-                "allow" if safe else ("deny" if self.headless else "ask"),
-                "jev",
-                score=result.score,
-                confidence=result.call_confidence,
-                reason=(None if safe else _triggering_judgment(result)),
-                usage=result.usage,
-            )
+        return SafetyOutcome(
+            "allow" if safe else ("deny" if self.headless else "ask"),
+            "jev",
+            score=result.score,
+            confidence=result.call_confidence,
+            reason=(None if safe else _triggering_judgment(result)),
+            usage=result.usage,
         )
 
     def fail_closed(self, error: BaseException) -> SafetyOutcome:
@@ -1157,8 +1259,10 @@ __all__ = [
     "SAFETY_CONFIDENCE",
     "SAFE_MAX",
     "SHELL_TOOLS",
+    "BrowserRiskEvidence",
     "SafetyOutcome",
     "SafetyTier",
+    "browser_action_requires_safety",
     "layer0_classify",
     "layer0_reason",
 ]

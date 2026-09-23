@@ -29,6 +29,7 @@ class ElementRef:
     target_url: str | None = None
     form_action_origin: str | None = None
     download: bool = False
+    durable_state_change: bool = False
 
 
 @dataclass(frozen=True, slots=True)
