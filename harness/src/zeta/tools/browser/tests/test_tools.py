@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 
 import pytest
 
+from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.safety import SafetyOutcome, SafetyTier
+from zeta.core.store import ConversationStore
 from zeta.protocol.types import ToolCall
 from zeta.providers import jev
 from zeta.skills import SkillCatalog
@@ -40,16 +43,35 @@ def _observation(snapshot_id: int = 1) -> PageObservation:
     )
 
 
+def _element_observation(
+    element: ElementRef, *additional_elements: ElementRef
+) -> PageObservation:
+    return PageObservation(
+        element.snapshot_id,
+        element.snapshot_id,
+        "https://example.test/",
+        "Example",
+        "Page text",
+        (element, *additional_elements),
+        True,
+        True,
+    )
+
+
 def _registry(
     tmp_path: Path,
     adapter: FakeBrowserAdapter,
     safety_tier: SafetyTier | None = None,
+    approval_policy: ApprovalPolicy | None = None,
+    approval_store: ConversationStore | None = None,
 ) -> ToolRegistry:
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
         skill_catalog=SkillCatalog.empty(),
         safety_tier=safety_tier,
+        approval_policy=approval_policy,
+        approval_store=approval_store,
     )
     registry.browser_adapter_factory = lambda: adapter
     register(registry)
@@ -266,6 +288,308 @@ async def test_browser_submit_hands_risk_to_shared_safety_tier(
     assert result["isError"] is True
     assert _structured(result)["error"]["kind"] == "safety_denied"
     assert adapter.clicks == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("decision", [ApprovalDecision.ALLOW, ApprovalDecision.DENY])
+async def test_browser_ask_uses_durable_approval_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    decision: ApprovalDecision,
+) -> None:
+    submit = ElementRef(
+        1,
+        "e1",
+        "button",
+        "submit",
+        "Pay now",
+        "Pay now",
+        None,
+        "main",
+        False,
+        True,
+    )
+    adapter = FakeBrowserAdapter([_element_observation(submit)])
+    store = ConversationStore(tmp_path / "sessions", cwd=tmp_path)
+    policy = ApprovalPolicy(store=store, default=ApprovalDecision.ALLOW)
+    tier = SafetyTier(cwd=tmp_path)
+    registry = _registry(
+        tmp_path,
+        adapter,
+        tier,
+        approval_policy=policy,
+        approval_store=store,
+    )
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+        return _choice("e1", 0.9, ("e1",), "submit")
+
+    async def page_gate(**_kwargs: object) -> PageStateDecision:
+        return PageStateDecision(True, None, None)
+
+    async def ask(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("ask", "jev", score=2, confidence=0.9, reason="score_exceeds")
+
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    monkeypatch.setattr(
+        "zeta.tools.browser.evaluate_page_state_with_provider", page_gate
+    )
+    monkeypatch.setattr(tier, "evaluate_browser_action", ask)
+
+    call = ToolCall(
+        "pay",
+        "browser_submit",
+        {
+            "snapshot_id": 1,
+            "element_id": "e1",
+            "role": "button",
+            "affordance": "submit",
+        },
+    )
+    task = asyncio.create_task(registry.execute(call))
+    for _ in range(100):
+        if any(request.request_id == call.id for request in policy.pending_requests()):
+            break
+        await asyncio.sleep(0.01)
+    else:
+        pytest.fail("browser approval request was not persisted")
+
+    assert policy.resolve(call.id, decision) is True
+    result = await task
+
+    assert result["isError"] is (decision is ApprovalDecision.DENY)
+    assert len(adapter.clicks) == (1 if decision is ApprovalDecision.ALLOW else 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "element", "reason"),
+    [
+        (
+            "browser_click",
+            ElementRef(1, "e1", "button", "click", "Delete record", "Delete record", None, "main", False, True),
+            "destructive_action",
+        ),
+        (
+            "browser_submit",
+            ElementRef(1, "e1", "button", "submit", "Pay now", "Pay now", None, "main", False, True),
+            "payment_or_financial_commitment",
+        ),
+        (
+            "browser_submit",
+            ElementRef(1, "e1", "button", "submit", "Delete record", "Delete record", None, "main", False, True),
+            "durable_state_change",
+        ),
+        (
+            "browser_click",
+            ElementRef(1, "e1", "button", "click", "Sign in", "Sign in", None, "main", False, True),
+            "authentication_or_permission_change",
+        ),
+        (
+            "browser_click",
+            ElementRef(
+                1,
+                "e1",
+                "link",
+                "click",
+                "Download report",
+                "Download report",
+                None,
+                "main",
+                False,
+                True,
+                download=True,
+            ),
+            "download",
+        ),
+        (
+            "browser_click",
+            ElementRef(
+                1,
+                "e1",
+                "button",
+                "click",
+                "Unknown target",
+                "Unknown target",
+                None,
+                "main",
+                False,
+                True,
+                target_url="not a url",
+            ),
+            "unclassifiable_target_url",
+        ),
+    ],
+)
+async def test_risky_routes_fail_closed_through_real_handlers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    element: ElementRef,
+    reason: str,
+) -> None:
+    adapter = FakeBrowserAdapter([_element_observation(element)])
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    registry = _registry(tmp_path, adapter, tier)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+        return _choice("e1", 0.9, ("e1",), element.affordance)
+
+    async def page_gate(**_kwargs: object) -> PageStateDecision:
+        return PageStateDecision(True, None, None)
+
+    async def deny(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("deny", "layer0", reason=reason)
+
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    monkeypatch.setattr(
+        "zeta.tools.browser.evaluate_page_state_with_provider", page_gate
+    )
+    monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+
+    result = await registry.execute(
+        ToolCall(
+            "risky",
+            tool_name,
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": element.role,
+                "affordance": element.affordance,
+            },
+        )
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
+    assert adapter.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_low_confidence_risky_choice_escalates_without_acting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delete = ElementRef(
+        1,
+        "e1",
+        "button",
+        "click",
+        "Delete record",
+        "Delete record",
+        None,
+        "main",
+        False,
+        True,
+    )
+    alternatives = (
+        ElementRef(
+            1,
+            "e2",
+            "button",
+            "click",
+            "Delete another record",
+            "Delete another record",
+            None,
+            "main",
+            False,
+            True,
+        ),
+        ElementRef(
+            1,
+            "e3",
+            "button",
+            "click",
+            "Delete one more record",
+            "Delete one more record",
+            None,
+            "main",
+            False,
+            True,
+        ),
+    )
+    adapter = FakeBrowserAdapter([_element_observation(delete, *alternatives)])
+    registry = _registry(tmp_path, adapter)
+    registry.browser_goal = "choose a delete record"
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+        return _choice(None, 0.7, ("e1", "e2", "e3"))
+
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    result = await registry.execute(
+        ToolCall(
+            "delete-choice",
+            "browser_click",
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "click",
+            },
+        )
+    )
+
+    assert result["isError"] is False
+    assert _structured(result)["candidate_ids"] == ["e1", "e2", "e3"]
+    assert adapter.clicks == []
+
+
+@pytest.mark.asyncio
+async def test_benign_navigation_does_not_require_optional_safety_tier(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(tmp_path, adapter)
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://example.test/next"})
+    )
+
+    assert result["isError"] is False
+    assert adapter.navigations == ["https://example.test/next"]
+
+
+@pytest.mark.asyncio
+async def test_risky_navigation_without_safety_tier_fails_closed(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(tmp_path, adapter)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://other.test/next"})
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
+    assert adapter.navigations == []
+
+
+@pytest.mark.asyncio
+async def test_external_navigation_uses_safety_handler_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    registry = _registry(tmp_path, adapter, tier)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def deny(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("deny", "layer0", reason="external_origin")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://other.test/next"})
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
+    assert adapter.navigations == []
 
 
 @pytest.mark.asyncio

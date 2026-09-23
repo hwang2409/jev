@@ -7,10 +7,15 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
-from ...core.safety import BrowserRiskEvidence, browser_action_requires_safety
+from ...core.abort import AbortSignal
+from ...core.safety import (
+    BrowserRiskEvidence,
+    browser_action_requires_safety,
+)
 from ...protocol.types import StructuredToolResult
 from ...providers import jev
 from ...routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
+from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
     BrowserError,
@@ -73,7 +78,10 @@ def _adapter_factory(registry: ToolRegistry):
 
 
 async def _browser_navigate(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     url = arguments["url"]
     if not isinstance(url, str) or not _is_absolute_http_url(url):
@@ -98,9 +106,16 @@ async def _browser_navigate(
             download=False,
             durable_state_change=False,
         )
-        safety_error = await _check_browser_safety(registry, evidence)
-        if safety_error is not None:
-            return safety_error
+        if browser_action_requires_safety(evidence):
+            safety_error = await _check_browser_safety(
+                registry,
+                evidence,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+            )
+            if safety_error is not None:
+                return safety_error
         state = await session.navigate(url)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
@@ -119,13 +134,25 @@ async def _browser_state(
 
 
 async def _browser_click(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
-    return await _run_element_action(registry, arguments, "click")
+    return await _run_element_action(
+        registry,
+        arguments,
+        "click",
+        abort_signal=abort_signal,
+        execution_context=execution_context,
+    )
 
 
 async def _browser_type(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     return await _run_element_action(
         registry,
@@ -133,21 +160,40 @@ async def _browser_type(
         "type",
         text=arguments.get("text"),
         replace=arguments.get("replace", True),
+        abort_signal=abort_signal,
+        execution_context=execution_context,
     )
 
 
 async def _browser_select(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     return await _run_element_action(
-        registry, arguments, "select", value=arguments.get("value")
+        registry,
+        arguments,
+        "select",
+        value=arguments.get("value"),
+        abort_signal=abort_signal,
+        execution_context=execution_context,
     )
 
 
 async def _browser_submit(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
-    return await _run_element_action(registry, arguments, "submit")
+    return await _run_element_action(
+        registry,
+        arguments,
+        "submit",
+        abort_signal=abort_signal,
+        execution_context=execution_context,
+    )
 
 
 async def _run_element_action(
@@ -158,6 +204,8 @@ async def _run_element_action(
     text: object = None,
     replace: object = True,
     value: object = None,
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     try:
         snapshot_id = arguments["snapshot_id"]
@@ -272,7 +320,13 @@ async def _run_element_action(
             durable_state_change=element.durable_state_change or action == "submit",
         )
         if browser_action_requires_safety(evidence):
-            safety_error = await _check_browser_safety(registry, evidence)
+            safety_error = await _check_browser_safety(
+                registry,
+                evidence,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+            )
             if safety_error is not None:
                 return safety_error
         _action, state = await session.action(
@@ -515,7 +569,12 @@ def _has_authentication_language(*values: str) -> bool:
 
 
 async def _check_browser_safety(
-    registry: ToolRegistry, evidence: BrowserRiskEvidence
+    registry: ToolRegistry,
+    evidence: BrowserRiskEvidence,
+    arguments: dict[str, object],
+    *,
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult | None:
     safety_tier = registry.safety_tier
     if safety_tier is None:
@@ -529,13 +588,25 @@ async def _check_browser_safety(
         outcome = safety_tier.fail_closed(exc)
     if outcome.decision == "allow":
         return None
-    if outcome.decision == "ask":
-        message = (
-            "browser action requires approval: "
-            f"{outcome.reason or 'safety threshold not met'}"
+    if (
+        outcome.decision == "ask"
+        and registry.approval_policy is not None
+        and abort_signal is not None
+        and execution_context is not None
+    ):
+        gate_result, _execution_signal = await registry._approval_gate.run(
+            execution_context.tool_call,
+            arguments,
+            abort_signal,
+            lambda current: registry._next_abort_generation(current),
+            execution_context.lifecycle_sink,
+            skip_approval=True,
+            safety_outcome=outcome,
         )
-    else:
-        message = safety_tier.teaching_error(outcome)
+        if gate_result is None:
+            return None
+        return _browser_error(gate_result.content, "safety_denied")
+    message = safety_tier.teaching_error(outcome)
     return _browser_error(message, "safety_denied")
 
 

@@ -12,7 +12,7 @@ from typing import Protocol
 
 from ..protocol.types import Message, MessageRole, ToolCall, ToolResult, ToolUseContent
 from .abort import AbortSignal
-from .safety import SafetyTier
+from .safety import SafetyOutcome, SafetyTier
 from .store import ConversationStore
 
 
@@ -580,16 +580,33 @@ class ApprovalGate:
         skip_approval: bool = False,
         persist_request: bool = True,
         safety_cwd: str | None = None,
+        safety_outcome: SafetyOutcome | None = None,
     ) -> tuple[ToolResult | None, AbortSignal]:
         execution_signal = signal
         force_ask = False
         safety_label: str | None = None
+        if safety_outcome is not None:
+            if self.safety_tier is None:
+                return ToolResult(
+                    tool_call.id,
+                    "browser safety tier is not configured for this risky action",
+                    True,
+                ), execution_signal
+            if safety_outcome.decision == "deny":
+                return ToolResult(
+                    tool_call.id,
+                    self.safety_tier.teaching_error(safety_outcome),
+                    True,
+                ), execution_signal
+            force_ask = safety_outcome.decision == "ask"
+            if force_ask:
+                safety_label = self.safety_tier.approval_label(safety_outcome)
         safety_applies = (
             self.safety_tier is not None
             and self.policy is not None
             and self.safety_tier.applies(tool_call.name)
         )
-        if (
+        if safety_outcome is None and (
             safety_applies
             and self.policy is not None
             and self.safety_tier is not None

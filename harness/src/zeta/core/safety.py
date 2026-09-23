@@ -1034,33 +1034,42 @@ def _url_origin(value: str) -> str | None:
 
 
 def _browser_layer0_reason(evidence: BrowserRiskEvidence) -> str | None:
+    _classification, reason = _browser_layer0_classify(evidence)
+    return reason
+
+
+def _browser_layer0_classify(
+    evidence: BrowserRiskEvidence,
+) -> tuple[str, str | None]:
+    """Classify browser evidence before calling the shared Jev scorer."""
+
     if evidence.action not in _BROWSER_ACTIONS:
-        return "unclassifiable_action"
+        return "escalate", "unclassifiable_action"
     if not evidence.role or _url_origin(evidence.current_origin) is None:
-        return "unclassifiable_origin"
+        return "escalate", "unclassifiable_origin"
     if evidence.target_url is not None:
         target_origin = _url_origin(evidence.target_url)
         if target_origin is None:
-            return "unclassifiable_target_url"
+            return "escalate", "unclassifiable_target_url"
         if target_origin != _url_origin(evidence.current_origin):
-            return "external_origin"
+            return "escalate", "external_origin"
     if evidence.form_action_origin is not None:
         form_origin = _url_origin(evidence.form_action_origin)
         if form_origin is None:
-            return "unclassifiable_form_action_origin"
+            return "escalate", "unclassifiable_form_action_origin"
         if form_origin != _url_origin(evidence.current_origin):
-            return "external_form_action_origin"
+            return "escalate", "external_form_action_origin"
     if evidence.payment_language or _BROWSER_PAYMENT_WORDS.search(evidence.text):
-        return "payment_or_financial_commitment"
+        return "analyzable", "payment_or_financial_commitment"
     if evidence.authentication_language or _BROWSER_AUTH_WORDS.search(evidence.text):
-        return "authentication_or_permission_change"
+        return "analyzable", "authentication_or_permission_change"
     if evidence.download:
-        return "download"
+        return "analyzable", "download"
     if evidence.durable_state_change:
-        return "durable_state_change"
+        return "analyzable", "durable_state_change"
     if evidence.action == "click" and _BROWSER_DESTRUCTIVE_WORDS.search(evidence.text):
-        return "destructive_action"
-    return None
+        return "analyzable", "destructive_action"
+    return "analyzable", None
 
 
 def browser_action_requires_safety(evidence: BrowserRiskEvidence) -> bool:
@@ -1131,12 +1140,8 @@ class SafetyTier:
     ) -> SafetyOutcome:
         """Evaluate risky browser evidence through the shared safety policy."""
 
-        layer0_reason = _browser_layer0_reason(evidence)
-        command = json.dumps(asdict(evidence), sort_keys=True)
-        outcome = await self._evaluate_jev(command, evidence.current_origin)
-        if outcome.layer in {"jev_error_failclosed", "safety_error_failclosed"}:
-            return self._finish(outcome)
-        if layer0_reason is not None:
+        layer0_classification, layer0_reason = _browser_layer0_classify(evidence)
+        if layer0_classification != "analyzable":
             return self._finish(
                 SafetyOutcome(
                     "deny" if self.headless else "ask",
@@ -1144,6 +1149,8 @@ class SafetyTier:
                     reason=layer0_reason,
                 )
             )
+        command = json.dumps(asdict(evidence), sort_keys=True)
+        outcome = await self._evaluate_jev(command, evidence.current_origin)
         return self._finish(outcome)
 
     async def _evaluate_jev(self, command: str, cwd: str) -> SafetyOutcome:
