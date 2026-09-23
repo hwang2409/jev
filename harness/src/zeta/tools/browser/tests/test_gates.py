@@ -246,6 +246,56 @@ async def test_real_provider_errors_follow_the_failed_gate(
     ) == expected
 
 
+@pytest.mark.asyncio
+async def test_malformed_non_active_gate_uses_active_gate_for_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 200
+        text = "backend error"
+
+        def json(self) -> dict[str, object]:
+            answers = {
+                name: {"noul": 0.9}
+                for name in (
+                    "page_loaded_and_stable",
+                    "goal_element_present",
+                    "action_is_the_next_step",
+                    "action_succeeded",
+                    "dead_end",
+                    "needs_different_approach",
+                )
+            }
+            answers["goal_element_present"] = {"noul": "not-a-number"}
+            return {"answers": answers}
+
+    class Client:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, _url: str, **_kwargs: object) -> Response:
+            return Response()
+
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    assert await evaluate_page_state_with_provider(
+        goal="continue",
+        action="click",
+        page_state={},
+        candidates=[],
+        deterministic_loaded=True,
+        deterministic_attached=True,
+        gate="page_loaded_and_stable",
+    ) == PageStateDecision(False, "observe", "page_load_failed")
+
+
 def test_untagged_provider_failure_uses_distinct_last_resort_decision() -> None:
     assert conservative_provider_error_decision(
         None, jev.JevRouterError("provider failure")
