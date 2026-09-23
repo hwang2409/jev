@@ -6,6 +6,7 @@ from typing import Any
 
 import httpx
 import pytest
+from jm.answers import ChoiceAnswer, NoulAnswer, ScoreAnswer
 
 import zeta.providers.anthropic as anthropic_module
 from zeta.core.fake import FakeBackend, ScriptedTurn
@@ -67,7 +68,7 @@ def _provider_response(
     choice_confidence: float = 0.95,
 ) -> jev.JevResponse:
     questions = request["questions"]
-    answers: dict[str, dict[str, Any]] = {}
+    answers: dict[str, ChoiceAnswer | NoulAnswer | ScoreAnswer] = {}
     for question_id, question in questions.items():
         question_type = question["type"]
         if question_type == "choice":
@@ -77,42 +78,37 @@ def _provider_response(
             confidence = (
                 choice_confidence if question_id == "element_id" else 0.95
             )
-            answers[question_id] = {
-                "type": "choice",
-                "choice": choice,
-                "probabilities": {
+            answers[question_id] = ChoiceAnswer(
+                choice,
+                {
                     candidate_id: 1.0 if candidate_id == choice else 0.0
                     for candidate_id in choices
                 },
-                "confidence": confidence,
-            }
+                confidence,
+            )
         elif question_type == "score":
             criteria = question["criteria"]
-            answers[question_id] = {
-                "type": "score",
-                "score": 0.95,
-                "legend": {str(index): value for index, value in enumerate(criteria)},
-                "probabilities": {
+            answers[question_id] = ScoreAnswer(
+                0.95,
+                {str(index): value for index, value in enumerate(criteria)},
+                {
                     str(index): 0.95 if index == 1 else 0.05
                     for index in range(len(criteria))
                 },
-                "confidence": 0.95,
-            }
+                0.95,
+            )
         else:
-            answers[question_id] = {
-                "type": "noul",
-                "noul": (
-                    0.05
-                    if question_id
-                    in {
-                        "dead_end",
-                        "needs_different_approach",
-                        "touches_outside_cwd",
-                        "plausibly_irreversible",
-                    }
-                    else 0.95
-                ),
-            }
+            answers[question_id] = NoulAnswer(
+                0.05
+                if question_id
+                in {
+                    "dead_end",
+                    "needs_different_approach",
+                    "touches_outside_cwd",
+                    "plausibly_irreversible",
+                }
+                else 0.95
+            )
     return jev.JevResponse(answers=answers, usage={})
 
 

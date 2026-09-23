@@ -26,19 +26,7 @@ def _call_confidence(choice_confidence: float, nouls: list[float]) -> float:
 
 
 def _answer_confidence(answer: dict[str, Any]) -> float:
-    raw_confidence = answer.get("confidence")
-    if raw_confidence is not None:
-        return float(raw_confidence)
-    probabilities = {
-        str(choice): float(probability)
-        for choice, probability in answer.get("probabilities", {}).items()
-    }
-    if len(probabilities) <= 1:
-        return 1.0
-    largest_probability = max(probabilities.values())
-    return (len(probabilities) * largest_probability - 1) / (
-        len(probabilities) - 1
-    )
+    return float(answer["confidence"])
 
 
 class JevRouterError(RuntimeError):

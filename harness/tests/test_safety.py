@@ -1,74 +1,30 @@
 from __future__ import annotations
 
-
 import io
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 from evals.run_evals import parse_events
-
-
 from zeta.cli.main import build_parser
-
-
+from zeta.config.settings import ResolvedConfig
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-
-
 from zeta.core.fake import FakeBackend, ScriptedTurn
-
-
 from zeta.core.loop import AgentLoop
-
-
 from zeta.core.project_context import ProjectContext
-
-
 from zeta.core.safety import (
-    _LAYER0_RULES,
     BrowserRiskEvidence,
     SafetyTier,
-    _resolved_argv,
-    layer0_classify,
-    layer0_reason,
 )
-
-
 from zeta.core.session import SessionManager
-
-
 from zeta.core.store import ConversationStore
-
-
-from zeta.providers import jev
-
-
-from zeta.runtime.composition import compose_runtime
-
-
-from zeta.runtime.driver import drive_turn
-
-
-from zeta.config.settings import ResolvedConfig
-
-
-from zeta.skills import SkillCatalog
-
-
-from zeta.skills.agent_catalog import AgentCatalog
-
-
-from zeta.tools import ToolRegistry
-
-
-from zeta.tools.exec import run_inline_shell_batch
-
-
 from zeta.protocol.types import TextContent, ToolCall
+from zeta.providers import jev
+from zeta.runtime.composition import compose_runtime
+from zeta.runtime.driver import drive_turn
+from zeta.skills import SkillCatalog
+from zeta.skills.agent_catalog import AgentCatalog
+from zeta.tools import ToolRegistry
 
 
 def _score(
@@ -501,7 +457,7 @@ async def test_off_flag_preserves_pre_feature_provider_and_event_bytes(
 
 
 @pytest.mark.asyncio
-async def test_missing_jev_api_key_fails_closed(
+async def test_missing_gateway_key_fails_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     for name in ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY"):
