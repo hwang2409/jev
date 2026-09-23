@@ -7,9 +7,12 @@ import json
 import sys
 from typing import TextIO
 
+from jm._transport import _resolve_gateway_key as resolve_gateway_key
 from jm.answers import ErrorResponse, answers_to_dict
-from jm.api import GatewayClient, resolve_gateway_key
+from jm.client import JevClient
 from jm.runner import State
+
+GatewayClient = JevClient
 
 SMOKE_STATE = {
     "focus": 'Caregiver reply: "yes, I can take the Saturday morning shift"',

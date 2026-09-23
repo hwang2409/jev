@@ -38,7 +38,7 @@ class ChoiceAnswer:
 @dataclass(frozen=True, slots=True)
 class ScoreAnswer:
     score: float
-    legend: dict[str, str] = field(default_factory=dict)
+    legend: dict[str, Any] = field(default_factory=dict)
     probabilities: dict[str, float] = field(default_factory=dict)
     confidence: float | None = None
     type: Literal["score"] = "score"
@@ -353,7 +353,10 @@ def parse_judge_response(
         if question_id not in questions:
             raise ValueError(f"unknown question id: {question_id}")
         answers[question_id] = _parse_answer(
-            raw_answer, _question_type(questions[question_id]), question_id
+            raw_answer,
+            _question_type(questions[question_id]),
+            question_id,
+            questions[question_id],
         )
 
     missing = tuple(
@@ -372,7 +375,9 @@ def _question_type(question: Any) -> str:
     return question_type
 
 
-def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answer:
+def _parse_answer(
+    raw_answer: Any, question_type: str, question_id: str, question: Any
+) -> Answer:
     if not isinstance(raw_answer, Mapping):
         raise ValueError(f"answer for {question_id} must be an object")
     answer_type = raw_answer.get("type")
@@ -398,8 +403,17 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
             raise ValueError(
                 f"choice answer for {question_id} requires a string choice"
             )
+        option_values = _question_values(question)
+        if option_values is not None and choice not in option_values:
+            raise ValueError(f"choice answer for {question_id} has an unknown choice")
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _confidence(raw_answer, probabilities, question_id)
+        _validate_probability_keys(probabilities, option_values, question_id)
+        confidence = _confidence(
+            raw_answer,
+            probabilities,
+            question_id,
+            _criteria_count(question),
+        )
         return ChoiceAnswer(choice, probabilities, confidence)
     if question_type == "score":
         _require_keys(
@@ -411,12 +425,19 @@ def _parse_answer(raw_answer: Any, question_type: str, question_id: str) -> Answ
         score = _number(raw_answer.get("score"), question_id, "score")
         legend = raw_answer.get("legend", {})
         if not isinstance(legend, Mapping) or not all(
-            isinstance(key, str) and isinstance(value, str)
-            for key, value in legend.items()
+            isinstance(key, str) for key in legend
         ):
-            raise ValueError(f"score answer for {question_id} requires a string legend")
+            raise ValueError(f"score answer for {question_id} requires a legend")
         probabilities = _probabilities(raw_answer.get("probabilities"), question_id)
-        confidence = _confidence(raw_answer, probabilities, question_id)
+        score_values = _question_values(question)
+        score_keys = _score_keys(question, score_values)
+        _validate_probability_keys(probabilities, score_keys, question_id)
+        confidence = _confidence(
+            raw_answer,
+            probabilities,
+            question_id,
+            _criteria_count(question),
+        )
         return ScoreAnswer(score, dict(legend), probabilities, confidence)
     raise ValueError(f"unknown question type for {question_id}: {question_type!r}")
 
@@ -448,17 +469,94 @@ def _number(value: Any, question_id: str, field_name: str) -> float:
 
 
 def _confidence(
-    answer: Mapping[str, Any], probabilities: Mapping[str, float], question_id: str
+    answer: Mapping[str, Any],
+    probabilities: Mapping[str, float],
+    question_id: str,
+    criteria_count: int | None = None,
 ) -> float | None:
     if "confidence" in answer:
         return _number(answer.get("confidence"), question_id, "confidence")
-    option_count = len(probabilities)
+    option_count = criteria_count or len(probabilities)
     if option_count == 0:
         return None
     if option_count == 1:
         return 1.0
     largest_probability = max(probabilities.values())
     return (option_count * largest_probability - 1) / (option_count - 1)
+
+
+def _question_values(question: Any) -> list[Any] | None:
+    if not isinstance(question, Mapping):
+        return None
+    for field_name in ("options", "choices", "levels"):
+        values = question.get(field_name)
+        if isinstance(values, Mapping):
+            return list(values)
+        if isinstance(values, (list, tuple)):
+            return [
+                item.get("value", item.get("id"))
+                if isinstance(item, Mapping)
+                else item
+                for item in values
+            ]
+    criteria = question.get("criteria")
+    if isinstance(criteria, Mapping):
+        return list(criteria)
+    if isinstance(criteria, (list, tuple)):
+        return list(criteria)
+    return None
+
+
+def _criteria_count(question: Any) -> int | None:
+    values = _question_values(question)
+    if values is None:
+        return None
+    return len(values)
+
+
+def _score_keys(question: Any, values: list[Any] | None) -> list[Any] | None:
+    if not isinstance(question, Mapping):
+        return values
+    criteria = question.get("criteria")
+    if isinstance(criteria, Mapping):
+        return list(criteria)
+    if isinstance(criteria, (list, tuple)) and values is not None:
+        return [str(index) for index in range(len(values))]
+    return values
+
+
+def score_legend_for_question(question: Any) -> dict[str, Any]:
+    values = _question_values(question)
+    if values is None:
+        return {}
+    criteria = question.get("criteria") if isinstance(question, Mapping) else None
+    if isinstance(criteria, Mapping):
+        return {str(level): value for level, value in criteria.items()}
+    return {str(level): value for level, value in enumerate(values)}
+
+
+def probability_keys_for_question(question: Any) -> tuple[str, ...]:
+    values = _question_values(question)
+    if values is None:
+        return ()
+    if isinstance(question, Mapping) and question.get("type") == "score":
+        values = _score_keys(question, values)
+    return tuple(str(value) for value in values)
+
+
+def _validate_probability_keys(
+    probabilities: Mapping[str, float],
+    values: list[Any] | None,
+    question_id: str,
+) -> None:
+    if values is None:
+        return
+    allowed = {str(value) for value in values}
+    unknown = set(probabilities) - allowed
+    if unknown:
+        raise ValueError(
+            f"probabilities for {question_id} have unknown keys: {sorted(unknown)}"
+        )
 
 
 def _require_number(value: Any, description: str) -> None:
