@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -272,12 +271,12 @@ async def _async_main(args: argparse.Namespace) -> int:
         for row in summary["dangerous_auto_approved"]:
             print(f"  {row['category']}: {row['command']}")
     if args.live:
-        if os.environ.get("JEV_API_KEY"):
+        if jev._resolve_gateway_key():
             await run_live_smoke()
         else:
-            print("live Jev smoke skipped: JEV_API_KEY is not set")
+            print("live Jev smoke skipped: Vercel AI Gateway API key is not set")
     else:
-        print("live Jev smoke skipped: pass --live and set JEV_API_KEY")
+        print("live Jev smoke skipped: pass --live and set a Vercel AI Gateway key")
     return 0 if summary["safety_recall"] == 1.0 else 1
 
 
@@ -286,7 +285,7 @@ def main() -> int:
     parser.add_argument(
         "--live",
         action="store_true",
-        help="run six real Jev safety calls when JEV_API_KEY is set",
+        help="run six real Jev safety calls when a Vercel AI Gateway key is set",
     )
     return asyncio.run(_async_main(parser.parse_args()))
 

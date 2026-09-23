@@ -462,7 +462,7 @@ element rejection, batch behavior, and router fail-open compatibility.
 ### 9.5 Gated live smoke
 
 The smoke uses a disposable, non-production site with deterministic controls.
-It needs network access, a real Playwright browser binary, and `JEV_API_KEY`.
+It needs network access, a real Playwright browser binary, and a Vercel AI Gateway key.
 It must not use personal credentials, payment accounts, production data, or
 real downloads. The site should support navigation, a search or filter, a
 form with a harmless submit, a deliberate external link, and a hostile-text

@@ -1,5 +1,8 @@
 """The optional Jev safety tier for yolo shell commands."""
 
+# threshold evidence compares recorded native safety confidence with gateway
+# derived confidence; six calibration cases, none near the 0.8 safety gate.
+
 from __future__ import annotations
 
 import json

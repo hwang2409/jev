@@ -131,7 +131,7 @@ def _install_transport(
 ) -> _Transport:
     transport = _Transport(responder)
     monkeypatch.setattr(jev.httpx, "AsyncClient", lambda **_kwargs: transport)
-    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
     return transport
 
 

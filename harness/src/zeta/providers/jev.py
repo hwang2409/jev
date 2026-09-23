@@ -4,17 +4,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
+import re
+import time
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
 
 from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
+API_URL = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+MODEL = "typesafe-ai/jev"
+GATEWAY_KEY_NAMES = ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY")
+GATEWAY_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+    "ai-evaluation-model-specification-version": "4",
+    "ai-gateway-auth-method": "api-key",
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-model-id": MODEL,
+}
 _MAX_ATTEMPTS = 3
+_MAX_WAIT_SECONDS = 300.0
 
 
 def _noul_confidence(value: float) -> float:
@@ -29,6 +45,135 @@ def _call_confidence(choice_confidence: float, nouls: list[float]) -> float:
     return min(
         [choice_confidence, *(_noul_confidence(value) for value in nouls)]
     )
+
+
+def _answer_confidence(answer: dict[str, Any]) -> float:
+    raw_confidence = answer.get("confidence")
+    if raw_confidence is not None:
+        return float(raw_confidence)
+    probabilities = {
+        str(choice): float(probability)
+        for choice, probability in answer.get("probabilities", {}).items()
+    }
+    if len(probabilities) <= 1:
+        return 1.0
+    largest_probability = max(probabilities.values())
+    return (len(probabilities) * largest_probability - 1) / (
+        len(probabilities) - 1
+    )
+
+
+def _gateway_questions(questions: dict[str, Any]) -> dict[str, Any]:
+    return {
+        question_id: (
+            {**question, "type": "boolean"}
+            if isinstance(question, dict) and question.get("type") == "noul"
+            else question
+        )
+        for question_id, question in questions.items()
+    }
+
+
+def _normalize_gateway_response(
+    payload: Any, questions: dict[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        raise TypeError("response must be an object")
+    answers = payload.get("answers")
+    if not isinstance(answers, dict):
+        raise TypeError("response requires an answers object")
+    normalized_answers: dict[str, Any] = {}
+    for question_id, raw_answer in answers.items():
+        question = questions.get(question_id)
+        if isinstance(question, dict) and question.get("type") == "noul":
+            if not isinstance(raw_answer, dict):
+                raise ValueError("boolean answer must be an object")
+            if "noul" in raw_answer and raw_answer.get("type") != "boolean":
+                normalized_answers[question_id] = raw_answer
+                continue
+            if raw_answer.get("type") != "boolean":
+                raise ValueError("gateway noul answer must have boolean type")
+            normalized_answers[question_id] = {
+                "type": "noul",
+                "noul": raw_answer["probability"],
+            }
+        else:
+            normalized_answer = raw_answer
+            if (
+                isinstance(raw_answer, dict)
+                and isinstance(question, dict)
+                and question.get("type") in {"choice", "score"}
+                and "confidence" not in raw_answer
+            ):
+                probabilities = raw_answer.get("probabilities", {})
+                criteria = question.get("criteria")
+                option_count = (
+                    len(criteria)
+                    if isinstance(criteria, (dict, list))
+                    else len(probabilities)
+                )
+                if option_count <= 1 or not probabilities:
+                    derived_confidence = 1.0
+                else:
+                    derived_confidence = (
+                        option_count * max(probabilities.values()) - 1
+                    ) / (option_count - 1)
+                normalized_answer = {
+                    **raw_answer,
+                    "confidence": derived_confidence,
+                }
+            normalized_answers[question_id] = normalized_answer
+    usage = payload.get("usage", {})
+    if not isinstance(usage, dict):
+        raise TypeError("usage must be an object")
+    usage = dict(usage)
+    for gateway_key, native_key in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+    ):
+        if gateway_key in usage:
+            usage[native_key] = usage.pop(gateway_key)
+    return {**payload, "answers": normalized_answers, "usage": usage}
+
+
+def _resolve_gateway_key() -> str | None:
+    for name in GATEWAY_KEY_NAMES:
+        value = os.environ.get(name)
+        if value:
+            return value
+    try:
+        zshrc = (Path.home() / ".zshrc").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for name in GATEWAY_KEY_NAMES:
+        match = re.search(
+            rf"^\s*(?:export\s+)?{name}=[\"']?([^\"'\s#]+)",
+            zshrc,
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    return None
+
+
+def _retry_after(response: Any) -> float | None:
+    headers = getattr(response, "headers", {})
+    value = headers.get("Retry-After")
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = retry_at.timestamp() - time.time()
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(_MAX_WAIT_SECONDS, seconds)
 
 
 class JevRouterError(RuntimeError):
@@ -192,7 +337,6 @@ def _build_search_result_score_request(
 ) -> dict[str, Any]:
     return {
         "state": {"goal": goal[:500], "results": results},
-        "model": MODEL,
         "questions": {
             _search_result_id(item): {
                 "type": "score",
@@ -231,7 +375,7 @@ def parse_search_result_score_response(
         for item_id in item_ids:
             answer = answers[item_id]
             score = float(answer["score"])
-            confidence = float(answer["confidence"])
+            confidence = _answer_confidence(answer)
             if not 0 <= score <= 1 or not 0 <= confidence <= 1:
                 raise ValueError(
                     "search result scores and confidence must be between 0 and 1"
@@ -308,7 +452,6 @@ def build_request(
             "current_step": step,
             "recent_steps": list(history[-5:]),
         },
-        "model": MODEL,
         "questions": {
             "tool": {
                 "type": "choice",
@@ -383,7 +526,6 @@ def build_safety_request(
             "cwd": cwd,
             "task_excerpt": task_excerpt[:500],
         },
-        "model": MODEL,
         "questions": {
             "score": {
                 "type": "choice",
@@ -431,7 +573,6 @@ def build_browser_element_request(
             "candidates": candidates,
             "recent_actions": list(recent_actions or [])[-3:],
         },
-        "model": MODEL,
         "questions": {
             "element_id": {
                 "type": "choice",
@@ -490,7 +631,7 @@ def parse_safety_response(data: dict[str, Any]) -> SafetyScoreResult:
             str(level): float(probability)
             for level, probability in score_answer["probabilities"].items()
         }
-        confidence = float(score_answer["confidence"])
+        confidence = _answer_confidence(score_answer)
         nouls = [
             float(answers["touches_outside_cwd"]["noul"]),
             float(answers["plausibly_irreversible"]["noul"]),
@@ -552,7 +693,7 @@ def parse_browser_element_response(
             str(choice): float(probability)
             for choice, probability in element_answer["probabilities"].items()
         }
-        confidence = float(element_answer["confidence"])
+        confidence = _answer_confidence(element_answer)
         nouls = [
             float(answers["goal_element_present"]["noul"]),
             float(answers["page_loaded_and_stable"]["noul"]),
@@ -728,7 +869,6 @@ def build_auto_route_request(
         )
     return {
         "state": state,
-        "model": MODEL,
         "questions": questions,
     }
 
@@ -791,12 +931,12 @@ def parse_response(data: dict[str, Any]) -> RouteResult:
         return RouteResult(
             tool=tool["choice"],
             probabilities=tool["probabilities"],
-            confidence=tool["confidence"],
+            confidence=_answer_confidence(tool),
             needs_tool=answers["needs_tool"]["noul"],
             step_clarity=answers["step_clarity"]["noul"],
             usage=data["usage"],
             call_confidence=_call_confidence(
-                tool["confidence"],
+                _answer_confidence(tool),
                 [
                     answers["needs_tool"]["noul"],
                     answers["step_clarity"]["noul"],
@@ -823,7 +963,6 @@ def build_triage_request(
             "recent_tool_actions": list(recent_tool_actions or [])[-3:],
             "items": items,
         },
-        "model": MODEL,
         "questions": {
             item["id"]: {
                 "type": "noul",
@@ -935,11 +1074,11 @@ async def auto_route(
         return AutoRouteResult(
             tool=tool["choice"],
             probabilities=tool["probabilities"],
-            confidence=tool["confidence"],
+            confidence=_answer_confidence(tool),
             needs_tool=answers["needs_tool"]["noul"],
             usage=dict(usage),
             call_confidence=_call_confidence(
-                tool["confidence"], [answers["needs_tool"]["noul"]]
+                _answer_confidence(tool), [answers["needs_tool"]["noul"]]
             ),
             memory_relevance=memory_relevance,
         )
@@ -950,24 +1089,33 @@ async def auto_route(
 async def _post_json(
     body: dict[str, Any], *, gate: str | None = None
 ) -> dict[str, Any]:
-    key = os.environ.get("JEV_API_KEY")
+    key = _resolve_gateway_key()
     if not key:
-        raise JevRouterError("JEV_API_KEY is not set", gate=gate)
-    headers = {"Authorization": f"Bearer {key}"}
+        raise JevRouterError("Vercel AI Gateway API key is not set", gate=gate)
+    gateway_body = {
+        "providerOptions": {"gateway": {"zeroDataRetention": True}},
+        "state": body["state"],
+        "questions": _gateway_questions(body["questions"]),
+    }
+    headers = {"Authorization": f"Bearer {key}", **GATEWAY_HEADERS}
     delay = 1.0
     async with httpx.AsyncClient(timeout=60.0) as client:
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 response = await client.post(
-                    API_URL, json=body, headers=headers, timeout=60.0
+                    API_URL, json=gateway_body, headers=headers, timeout=60.0
                 )
             except httpx.HTTPError as exc:
                 raise JevRouterError(
                     f"Jev request failed: {exc}", gate=gate
                 ) from exc
             if response.status_code in {429, 529} and attempt < _MAX_ATTEMPTS - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
+                # hint honored as given; jm parity (PR #24)
+                retry_after = _retry_after(response)
+                await asyncio.sleep(
+                    delay if retry_after is None else retry_after
+                )
+                delay = min(300.0, delay * 2)
                 continue
             if response.status_code >= 400:
                 detail = getattr(response, "text", "").strip()
@@ -985,7 +1133,12 @@ async def _post_json(
                 ) from exc
             if not isinstance(data, dict):
                 raise JevRouterError("Jev response must be an object", gate=gate)
-            return data
+            try:
+                return _normalize_gateway_response(data, body["questions"])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise JevRouterError(
+                    f"Jev response had invalid gateway answers: {exc}", gate=gate
+                ) from exc
     raise JevRouterError("Jev request failed after retries", gate=gate)
 
 
@@ -999,7 +1152,6 @@ def build_memory_relevance_request(
             "query": query,
             "memory_candidates": _memory_candidates_state(candidates),
         },
-        "model": MODEL,
         "questions": _memory_relevance_questions(candidates, [
             "query",
             "memory_candidates",
@@ -1034,42 +1186,13 @@ async def triage(
 ) -> TriageResult:
     """Ask Jev which tool results can be dropped during compaction."""
 
-    key = os.environ.get("JEV_API_KEY")
-    if not key:
-        raise JevRouterError("JEV_API_KEY is not set")
     body = build_triage_request(
         task,
         items,
         latest_assistant_text=latest_assistant_text,
         recent_tool_actions=recent_tool_actions,
     )
-    headers = {"Authorization": f"Bearer {key}"}
-    delay = 1.0
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        for attempt in range(_MAX_ATTEMPTS):
-            try:
-                response = await client.post(
-                    API_URL, json=body, headers=headers, timeout=60.0
-                )
-            except httpx.HTTPError as exc:
-                raise JevRouterError(f"Jev request failed: {exc}") from exc
-            if response.status_code in {429, 529} and attempt < _MAX_ATTEMPTS - 1:
-                await asyncio.sleep(delay)
-                delay *= 2
-                continue
-            if response.status_code >= 400:
-                detail = getattr(response, "text", "").strip()
-                suffix = f": {detail}" if detail else ""
-                raise JevRouterError(
-                    f"Jev request failed with HTTP {response.status_code}{suffix}",
-                    status_code=response.status_code,
-                )
-            try:
-                data = response.json()
-            except ValueError as exc:
-                raise JevRouterError("Jev response was not valid JSON") from exc
-            return parse_triage_response(data, [item["id"] for item in items])
-    raise JevRouterError("Jev request failed after retries")
+    return parse_triage_response(await _post_json(body), [item["id"] for item in items])
 
 
 __all__ = [

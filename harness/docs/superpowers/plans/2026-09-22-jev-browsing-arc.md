@@ -594,7 +594,7 @@ async def test_browser_choice_quotes_state_and_uses_least_confident_judgment(
     })]
     Client.requests = []
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
 
     result = await jev.choose_browser_element(
         "continue checkout",

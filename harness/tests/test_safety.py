@@ -504,7 +504,8 @@ async def test_off_flag_preserves_pre_feature_provider_and_event_bytes(
 async def test_missing_jev_api_key_fails_closed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    for name in ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY"):
+        monkeypatch.delenv(name, raising=False)
 
     outcome = await SafetyTier(cwd=tmp_path, headless=True).evaluate(
         "exec", "printf safe", str(tmp_path)

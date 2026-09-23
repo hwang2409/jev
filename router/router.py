@@ -1,15 +1,29 @@
-"""Jev-backed tool router: one systemone call routes an agent step to a tool."""
+"""Jev-backed tool router: one gateway call routes an agent step to a tool."""
 
+import math
 import os
+import re
 import time
 from dataclasses import dataclass
+from datetime import UTC
+from email.utils import parsedate_to_datetime
+from pathlib import Path
 
 import requests
-
 from catalog import CATALOG
 
-API_URL = "https://api.typesafe.ai/v1/systemone"
-MODEL = "jev-latest"
+API_URL = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+MODEL = "typesafe-ai/jev"
+GATEWAY_KEY_NAMES = ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY")
+GATEWAY_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+    "ai-evaluation-model-specification-version": "4",
+    "ai-gateway-auth-method": "api-key",
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-model-id": MODEL,
+}
+_MAX_WAIT_SECONDS = 300.0
 
 
 @dataclass
@@ -31,7 +45,6 @@ def build_request(
             "current_step": step,
             "recent_steps": list(history[-5:]),
         },
-        "model": MODEL,
         "questions": {
             "tool": {
                 "type": "choice",
@@ -64,13 +77,14 @@ def build_request(
 def parse_response(data: dict) -> RouteResult:
     answers = data["answers"]
     tool = answers["tool"]
+    tool_confidence = _answer_confidence(tool)
     return RouteResult(
         tool=tool["choice"],
         probabilities=tool["probabilities"],
-        confidence=tool["confidence"],
+        confidence=tool_confidence,
         needs_tool=answers["needs_tool"]["noul"],
         step_clarity=answers["step_clarity"]["noul"],
-        usage=data["usage"],
+        usage=_normalize_usage(data["usage"]),
     )
 
 
@@ -83,16 +97,141 @@ def route(
     api_key: str | None = None,
 ) -> RouteResult:
     body = build_request(task, step, history or [], catalog or CATALOG)
-    key = api_key or os.environ["JEV_API_KEY"]
+    key = api_key or _resolve_gateway_key()
+    if not key:
+        raise KeyError("Vercel AI Gateway API key is not set")
     sess = session or requests.Session()
-    headers = {"Authorization": f"Bearer {key}"}
+    gateway_body = {
+        "providerOptions": {"gateway": {"zeroDataRetention": True}},
+        "state": body["state"],
+        "questions": _gateway_questions(body["questions"]),
+    }
+    headers = {"Authorization": f"Bearer {key}", **GATEWAY_HEADERS}
     delay = 1.0
     for attempt in range(3):
-        resp = sess.post(API_URL, json=body, headers=headers, timeout=60)
+        resp = sess.post(API_URL, json=gateway_body, headers=headers, timeout=60)
         if resp.status_code in (429, 529) and attempt < 2:
-            time.sleep(delay)
-            delay *= 2
+            # hint honored as given; jm parity (PR #24)
+            retry_after = _retry_after(resp)
+            time.sleep(delay if retry_after is None else retry_after)
+            delay = min(300.0, delay * 2)
             continue
         resp.raise_for_status()
-        return parse_response(resp.json())
+        return parse_response(_normalize_gateway_response(resp.json(), body["questions"]))
     raise AssertionError("unreachable")
+
+
+def _answer_confidence(answer: dict) -> float:
+    raw_confidence = answer.get("confidence")
+    if raw_confidence is not None:
+        return float(raw_confidence)
+    probabilities = {
+        str(choice): float(probability)
+        for choice, probability in answer.get("probabilities", {}).items()
+    }
+    if len(probabilities) <= 1:
+        return 1.0
+    return (len(probabilities) * max(probabilities.values()) - 1) / (
+        len(probabilities) - 1
+    )
+
+
+def _gateway_questions(questions: dict) -> dict:
+    return {
+        question_id: (
+            {**question, "type": "boolean"}
+            if isinstance(question, dict) and question.get("type") == "noul"
+            else question
+        )
+        for question_id, question in questions.items()
+    }
+
+
+def _normalize_gateway_response(data: dict, questions: dict) -> dict:
+    answers = data["answers"]
+    normalized = {}
+    for question_id, answer in answers.items():
+        if isinstance(answer, dict) and answer.get("type") == "boolean":
+            normalized[question_id] = {
+                "type": "noul",
+                "noul": answer["probability"],
+            }
+            continue
+        question = questions.get(question_id)
+        if (
+            isinstance(answer, dict)
+            and isinstance(question, dict)
+            and question.get("type") in {"choice", "score"}
+            and "confidence" not in answer
+        ):
+            probabilities = answer.get("probabilities", {})
+            criteria = question.get("criteria")
+            option_count = (
+                len(criteria)
+                if isinstance(criteria, (dict, list))
+                else len(probabilities)
+            )
+            if option_count <= 1 or not probabilities:
+                confidence = 1.0
+            else:
+                confidence = (
+                    option_count * max(probabilities.values()) - 1
+                ) / (option_count - 1)
+            normalized[question_id] = {**answer, "confidence": confidence}
+        else:
+            normalized[question_id] = answer
+    return {
+        **data,
+        "answers": normalized,
+        "usage": _normalize_usage(data.get("usage", {})),
+    }
+
+
+def _normalize_usage(usage: dict) -> dict:
+    normalized = dict(usage)
+    for gateway_key, native_key in (
+        ("inputTokens", "input_tokens"),
+        ("outputTokens", "output_tokens"),
+    ):
+        if gateway_key in normalized:
+            normalized[native_key] = normalized.pop(gateway_key)
+    return normalized
+
+
+def _resolve_gateway_key() -> str | None:
+    for name in GATEWAY_KEY_NAMES:
+        value = os.environ.get(name)
+        if value:
+            return value
+    try:
+        zshrc = (Path.home() / ".zshrc").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for name in GATEWAY_KEY_NAMES:
+        match = re.search(
+            rf"^\s*(?:export\s+)?{name}=[\"']?([^\"'\s#]+)",
+            zshrc,
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    return None
+
+
+def _retry_after(response) -> float | None:
+    value = getattr(response, "headers", {}).get("Retry-After")
+    if value is None:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        try:
+            retry_at = parsedate_to_datetime(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        if retry_at.tzinfo is None:
+            retry_at = retry_at.replace(tzinfo=UTC)
+        seconds = retry_at.timestamp() - time.time()
+    if not math.isfinite(seconds) or seconds < 0:
+        return None
+    return min(_MAX_WAIT_SECONDS, seconds)

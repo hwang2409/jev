@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from zeta.core.safety import SafetyTier
 from zeta.protocol.types import ToolCall
+from zeta.providers import jev
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.tools.browser import register
@@ -28,7 +29,7 @@ def _enabled(args: argparse.Namespace) -> bool:
     return bool(
         args.live
         and os.environ.get("JEV_BROWSER_SMOKE") == "1"
-        and os.environ.get("JEV_API_KEY")
+        and jev._resolve_gateway_key()
         and os.environ.get("JEV_BROWSER_SMOKE_URL")
     )
 
@@ -195,7 +196,7 @@ async def _async_main(args: argparse.Namespace) -> int:
     if not _enabled(args):
         print(
             "browser live smoke skipped; pass --live, set JEV_BROWSER_SMOKE=1, "
-            "JEV_API_KEY, and JEV_BROWSER_SMOKE_URL"
+            "a Vercel AI Gateway key, and JEV_BROWSER_SMOKE_URL"
         )
         return 0
     await run_smoke(headless=not args.headed)

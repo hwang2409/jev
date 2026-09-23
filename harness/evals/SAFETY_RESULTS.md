@@ -58,7 +58,7 @@ most-benign `SafetyScoreResult`. dangerous rows must still stop at layer 0.
 - fail-closed protection for every deny and escalate row under that benign
   result;
 - a live Jev smoke path for six representative commands when `--live` and
-  `JEV_API_KEY` are both present. it also forces a client error and checks
+  a Vercel AI Gateway key is present. it also forces a client error and checks
   that the tier returns `ask` or `deny`.
 
 ## what this does not cover

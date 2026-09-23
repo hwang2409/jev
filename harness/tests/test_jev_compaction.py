@@ -6,13 +6,10 @@ from typing import Any, ClassVar, Self
 import pytest
 
 from zeta.cli.main import build_parser
+from zeta.config.settings import Settings, resolve
 from zeta.core.context import ContextAssembler
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
-from zeta.runtime.loop import AgentLoop
-from zeta.providers import jev
-from zeta.config.settings import Settings, resolve
-from zeta.skills import SkillCatalog
 from zeta.protocol.types import (
     Message,
     MessageRole,
@@ -21,6 +18,9 @@ from zeta.protocol.types import (
     ToolResult,
     ToolUseContent,
 )
+from zeta.providers import jev
+from zeta.runtime.loop import AgentLoop
+from zeta.skills import SkillCatalog
 
 
 def user(text: str) -> Message:
@@ -633,7 +633,7 @@ async def test_jev_error_keeps_stock_compaction_byte_identical(
     async def fail_triage(
         _task: str, _items: list[dict[str, str]], **_kwargs: Any
     ) -> jev.TriageResult:
-        raise jev.JevRouterError("JEV_API_KEY is not set")
+        raise jev.JevRouterError("Vercel AI Gateway API key is not set")
 
     monkeypatch.setattr("zeta.core.context.jev.triage", fail_triage)
     on_backend = FakeBackend([ScriptedTurn([TextContent("summary")])])
@@ -901,11 +901,14 @@ async def test_triage_http_uses_route_auth_and_response_shape(
             )
 
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
     result = await jev.triage("task", [{"id": "entry-1"}])
 
     assert result.keep_probabilities == {"entry-1": 0.1}
-    assert Client.requests[0]["headers"] == {"Authorization": "Bearer test-key"}
+    assert Client.requests[0]["headers"] == {
+        "Authorization": "Bearer test-key",
+        **jev.GATEWAY_HEADERS,
+    }
 
 
 async def _triage(

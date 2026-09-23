@@ -8,6 +8,8 @@ provider APIs (pi-style). No claude/codex CLI or app-server subprocesses.
 Experimental. Isolated from the Wiki app; Wiki may consume it later as a
 dependency behind a flag.
 
+Jev calls use the Vercel AI Gateway transport.
+
 ## composer attachments
 
 Use `@"a b.txt"` for a quoted path, or `@path/to/file` for a path-like

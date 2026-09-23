@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from .jev import (
-    MODEL,
     BrowserPageStateResult,
     JevRouterError,
     _noul_confidence,
@@ -109,7 +108,6 @@ def build_browser_page_state_request(
         questions.pop("action_succeeded")
     return {
         "state": state,
-        "model": MODEL,
         "questions": questions,
     }
 

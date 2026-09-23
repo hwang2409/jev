@@ -218,7 +218,7 @@ async def test_real_provider_errors_follow_the_failed_gate(
             return Response()
 
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
 
     expected = {
         "page_loaded_and_stable": PageStateDecision(
@@ -289,7 +289,7 @@ async def test_malformed_non_active_gate_uses_active_gate_for_routing(
             return Response()
 
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("JEV_API_KEY", "test-key")
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
 
     assert await evaluate_page_state_with_provider(
         goal="continue",

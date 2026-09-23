@@ -1,5 +1,8 @@
 """Shared confidence settings for provider-backed routing."""
 
+# threshold evidence compares derived confidence with the true Jev baseline
+# in router/results/20260917-202530.json; 30 cases, none near the 0.8 gate.
+
 ROUTE_TOPK_CONFIDENCE = 0.8
 """Choice cutoff shared by tool and browser-element routing."""
 
