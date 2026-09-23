@@ -27,8 +27,8 @@ from .answers import (
     SkipSummary,
     TypedResponse,
 )
-from .api import GATEWAY_MODEL
 from .cache import CacheStore, build_cache_preimage, cache_key
+from .client import GATEWAY_MODEL
 from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
     Preset,

@@ -10,7 +10,7 @@ from typing import Any
 
 import yaml
 
-from .api import GATEWAY_MODEL
+from .client import GATEWAY_MODEL
 
 SCHEMA = "jm.preset/v1"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})

@@ -10,9 +10,9 @@ from pathlib import Path
 from typing import TextIO
 
 from .answers import NoulAnswer, ResultRecord, ScoreAnswer
-from .api import GatewayClient, resolve_gateway_key
 from .cache import CacheStore
 from .chunkers import chunk_file, chunk_input
+from .client import JevClient, resolve_gateway_key
 from .presets import (
     Preset,
     PresetError,
@@ -216,7 +216,7 @@ def _judgment_command(
     )
 
     if judge_fn is None:
-        client = GatewayClient()
+        client = JevClient()
         active_judge = client
     else:
         client = None
