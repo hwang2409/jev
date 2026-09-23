@@ -794,6 +794,15 @@ FormedState = State
 
 
 _WORD_TOKEN = re.compile(r"\w+", re.UNICODE)
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+
+
+@dataclass(frozen=True, slots=True)
+class BM25CorpusStats:
+    document_count: int
+    average_length: float
+    document_frequency: Mapping[str, int]
 
 
 def tokenize(value: str) -> tuple[str, ...]:
@@ -820,6 +829,38 @@ def _state_tokens(state: State, fields: Sequence[str]) -> tuple[str, ...]:
     return tokenize(" ".join(values))
 
 
+def bm25_score(
+    query_tokens: Sequence[str],
+    document_tokens: Sequence[str],
+    corpus_stats: BM25CorpusStats,
+) -> float:
+    """Score one document with the pinned BM25 parameters."""
+    length = len(document_tokens)
+    counts: dict[str, int] = {}
+    for token in document_tokens:
+        counts[token] = counts.get(token, 0) + 1
+    score = 0.0
+    for token in query_tokens:
+        frequency = counts.get(token, 0)
+        if not frequency:
+            continue
+        df = corpus_stats.document_frequency[token]
+        idf = math.log(
+            1
+            + (corpus_stats.document_count - df + 0.5)
+            / (df + 0.5)
+        )
+        denominator = frequency + _BM25_K1 * (
+            1
+            - _BM25_B
+            + _BM25_B * length / corpus_stats.average_length
+            if corpus_stats.average_length
+            else 1
+        )
+        score += idf * ((frequency * (_BM25_K1 + 1)) / denominator)
+    return score
+
+
 def bm25_rank(
     states: Sequence[State], query: str, fields: Sequence[str]
 ) -> tuple[State, ...]:
@@ -834,27 +875,14 @@ def bm25_rank(
         for token in set(query_tokens)
     }
     average_length = sum(len(document) for document in documents) / len(documents)
-    k1 = 1.2
-    b = 0.75
+    corpus_stats = BM25CorpusStats(
+        len(formed),
+        average_length,
+        document_frequency,
+    )
     scored: list[tuple[float, str, int, State]] = []
     for index, (state, document) in enumerate(zip(formed, documents)):
-        length = len(document)
-        counts: dict[str, int] = {}
-        for token in document:
-            counts[token] = counts.get(token, 0) + 1
-        score = 0.0
-        for token in query_tokens:
-            frequency = counts.get(token, 0)
-            if not frequency:
-                continue
-            df = document_frequency[token]
-            idf = math.log(1 + (len(formed) - df + 0.5) / (df + 0.5))
-            denominator = frequency + k1 * (
-                1 - b + b * length / average_length
-                if average_length
-                else 1
-            )
-            score += idf * ((frequency * (k1 + 1)) / denominator)
+        score = bm25_score(query_tokens, document, corpus_stats)
         scored.append((score, state.state_ref, index, state))
     scored.sort(key=lambda item: (-item[0], item[1], item[2]))
     return tuple(item[3] for item in scored)

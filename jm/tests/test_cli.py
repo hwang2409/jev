@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import io
 import json
-import math
 import os
 import subprocess
 import sys
@@ -16,6 +15,7 @@ import yaml
 from jm.answers import JudgeResponse, NoulAnswer
 from jm.cache import CacheStore
 from jm.cli import main
+from jm.runner import BM25CorpusStats, State, bm25_rank, bm25_score, tokenize
 
 ROOT = Path(__file__).parents[1]
 
@@ -258,20 +258,33 @@ def test_jgrep_prefilter_pins_bm25_document_frequency_and_parameters(
         cache_store=CacheStore(tmp_path),
     )
 
-    document_count = 3
-    average_length = 5 / 3
-    k1 = 1.2
-    b = 0.75
-    needle_idf = (1 + (document_count - 2 + 0.5) / (2 + 0.5))
-    rare_idf = (1 + (document_count - 2 + 0.5) / (2 + 0.5))
-    c_score = sum(
-        math.log(idf)
-        * ((1 * (k1 + 1)) / (1 + k1 * (1 - b + b * 2 / average_length)))
-        for idf in (needle_idf, rare_idf)
+    states = tuple(
+        State(state_ref, focus)
+        for state_ref, focus in (
+            ("p1", "needle needle"),
+            ("p2", "rare"),
+            ("p3", "needle rare"),
+        )
+    )
+    query_tokens = tokenize("needle rare")
+    corpus_stats = BM25CorpusStats(
+        document_count=3,
+        average_length=5 / 3,
+        document_frequency={"needle": 2, "rare": 2},
+    )
+    scores = tuple(
+        bm25_score(query_tokens, tokenize(state.focus), corpus_stats)
+        for state in states
     )
 
     assert code == 2
-    assert c_score == pytest.approx(0.8689142725551417)
+    assert scores == pytest.approx(
+        (0.6118390439885317, 0.561960861054684, 0.8689142725551416)
+    )
+    ranked_refs = [
+        state.state_ref for state in bm25_rank(states, "needle rare", ("focus",))
+    ]
+    assert ranked_refs == ["p3", "p1", "p2"]
     assert calls == ["stdin#P3"]
 
 
@@ -450,6 +463,206 @@ def test_generic_run_prefilter_accepts_cli_query_source(tmp_path: Path) -> None:
     assert calls == ["stdin#P1"]
 
 
+def test_preset_literal_query_source_ignores_invocation_query(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "literal",
+        "query": "needle",
+        "fields": ["focus"],
+    }
+    path = tmp_path / "literal.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        ["run", "--preset", str(path), "--query", "other"],
+        input_text="needle\n\nother\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == ["stdin#P1"]
+
+
+def test_preset_cli_query_source_requires_and_uses_cli_query(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "cli",
+        "fields": ["focus"],
+    }
+    path = tmp_path / "cli-query.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "other",
+            "--prefilter-query",
+            "needle",
+        ],
+        input_text="needle\n\nother\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == ["stdin#P1"]
+
+
+def test_prefilter_field_override_replaces_preset_fields(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "literal",
+        "query": "needle",
+        "fields": ["context.query"],
+    }
+    path = tmp_path / "field-override.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "unused",
+            "--prefilter-fields",
+            "focus",
+        ],
+        input_text="other\n\nneedle\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == ["stdin#P2"]
+
+
+def test_prefilter_query_override_replaces_preset_query(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "literal",
+        "query": "other",
+        "fields": ["focus"],
+    }
+    path = tmp_path / "query-override.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "unused",
+            "--prefilter-query",
+            "needle",
+        ],
+        input_text="needle\n\nother\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == ["stdin#P1"]
+
+
+@pytest.mark.parametrize(
+    ("fields", "message"),
+    [
+        ("", "must not be empty"),
+        ("focus,focus", "duplicates"),
+        ("context.missing", "not in state_fields"),
+    ],
+)
+def test_invalid_cli_prefilter_fields_are_usage_errors(
+    fields: str, message: str, tmp_path: Path
+) -> None:
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return _judge(*args)
+
+    code, records, stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            fields,
+        ],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 64
+    assert records == []
+    assert calls == []
+    assert message in stderr
+
+
+@pytest.mark.parametrize("command", ["jgrep", "run"])
+def test_negative_max_chunks_is_rejected_before_judging(
+    command: str,
+) -> None:
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return _judge(*args)
+
+    argv = [command]
+    if command == "run":
+        argv.extend(["--preset", "jgrep"])
+    argv.extend(["--query", "needle", "--max-chunks", "-1"])
+    code, records, stderr = _invoke(argv, judge_fn=judge)
+
+    assert code == 64
+    assert records == []
+    assert calls == []
+    assert "non-negative" in stderr
+
+
 def test_prefilter_rejects_duplicate_state_references_before_judging(
     tmp_path: Path,
 ) -> None:
@@ -488,6 +701,46 @@ def test_prefilter_rejects_duplicate_state_references_before_judging(
     assert code == 2
     assert calls == []
     assert "duplicate state reference" in stderr.getvalue()
+
+
+def test_repeated_record_identity_is_fatal_before_cache_or_judging(
+    tmp_path: Path,
+) -> None:
+    class CountingCacheStore(CacheStore):
+        def __init__(self) -> None:
+            super().__init__(tmp_path / "cache")
+            self.lookups = 0
+
+        def get(self, *args, **kwargs):
+            self.lookups += 1
+            return super().get(*args, **kwargs)
+
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _filter_judge(state)
+
+    cache = CountingCacheStore()
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        ["jfilter", "--predicate", "needle"],
+        stdin=io.StringIO(
+            '{"id":"same","value":"needle"}\n'
+            '{"id":"same","value":"other"}\n'
+        ),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=judge,
+        cache_store=cache,
+    )
+
+    assert code == 2
+    assert calls == []
+    assert cache.lookups == 0
+    assert stdout.getvalue() == ""
+    assert "duplicate record identity 'same'" in stderr.getvalue()
 
 
 def test_prefilter_ignores_unlisted_context_data(tmp_path: Path) -> None:

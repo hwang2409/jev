@@ -129,6 +129,36 @@ def test_prefilter_ranks_before_scan_cap_and_assigns_one_skip_reason() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    "prefilter",
+    [
+        None,
+        {
+            "ranker": "bm25",
+            "top": 1,
+            "fields": ("focus",),
+            "query": "needle",
+        },
+    ],
+)
+def test_negative_max_chunks_is_rejected_on_both_admission_paths(prefilter) -> None:
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return FakeJudge()(*args)
+
+    with pytest.raises(ValueError, match="max_chunks must be non-negative"):
+        Runner(judge).run(
+            [State("a", "needle")],
+            {"matches": {"type": "noul"}},
+            max_chunks=-1,
+            prefilter=prefilter,
+        )
+
+    assert calls == []
+
+
 def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
     calls = []
     preset = resolve_preset("jgrep")

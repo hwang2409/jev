@@ -17,7 +17,7 @@ from jm.chunkers import (
     chunk_record,
     decode_stdin,
 )
-from jm.runner import State, StateLimits, validate_state
+from jm.runner import State, StateInputError, StateLimits, validate_state
 
 
 def test_default_byte_limits_are_pinned() -> None:
@@ -137,14 +137,11 @@ def test_record_rejects_non_scalar_identity_per_record(value: object) -> None:
 
 
 def test_record_rejects_duplicate_stable_refs() -> None:
-    result = chunk_input(
-        "record",
-        '{"id":1,"value":"first"}\n{"id":"1","value":"second"}\n',
-    )
-    assert [state.state_ref for state in result.admitted] == ["1"]
-    assert len(result.rejections) == 1
-    assert result.rejections[0].state_ref == "1"
-    assert result.rejections[0].reason == "input_error"
+    with pytest.raises(StateInputError, match="duplicate record identity '1'"):
+        chunk_input(
+            "record",
+            '{"id":1,"value":"first"}\n{"id":"1","value":"second"}\n',
+        )
 
 
 def test_record_jsonl_rejects_bad_lines_and_continues() -> None:
