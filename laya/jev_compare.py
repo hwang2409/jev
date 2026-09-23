@@ -15,11 +15,8 @@ def _call_case(client: JevClient, case: dict) -> JevResponse:
 
 def _render_response(response: JevResponse) -> dict:
     return {
-        "answers": {
-            question_id: asdict(answer)
-            for question_id, answer in response.answers.items()
-        },
-        "usage": dict(response.usage or {}),
+        question_id: asdict(answer)
+        for question_id, answer in response.answers.items()
     }
 
 
@@ -33,6 +30,13 @@ def main(client: JevClient | None = None) -> None:
             ms = (time.perf_counter() - started) * 1000
             print(f"\n=== {name} ({ms:.0f} ms) ===")
             print(json.dumps(_render_response(response), indent=2, default=str))
+            print(
+                json.dumps(
+                    {"usage": dict(response.usage or {})},
+                    indent=2,
+                    default=str,
+                )
+            )
     finally:
         if owns_client:
             client.close()
