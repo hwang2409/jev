@@ -129,6 +129,22 @@ def test_parse_rejects_confidence_on_noul() -> None:
         )
 
 
+def test_parse_rejects_consistency_on_gateway_noul() -> None:
+    with pytest.raises(ValueError, match="unknown fields"):
+        parse_judge_response(
+            {
+                "answers": {
+                    "matches": {
+                        "type": "noul",
+                        "noul": 0.5,
+                        "consistency": {"samples": 2, "mean": 0.5, "stddev": 0.0},
+                    }
+                }
+            },
+            {"matches": QUESTIONS["matches"]},
+        )
+
+
 @pytest.mark.parametrize(
     "question_id,answer",
     [

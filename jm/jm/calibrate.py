@@ -7,7 +7,6 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, TextIO
-from uuid import uuid4
 
 from .answers import (
     Answer,
@@ -21,7 +20,7 @@ from .answers import (
 )
 from .cache import CacheEntry, CacheStore
 from .presets import Preset
-from .runner import State
+from .runner import State, _repeat_state
 
 CALIBRATION_SCHEMA = "jm.calibration/v1"
 
@@ -293,12 +292,6 @@ def _state_for_entry(entry: CacheEntry) -> State:
             f"cache entry {entry.cache_key} has no state reference"
         )
     return State(state_ref, focus, context)
-
-
-def _repeat_state(state: State) -> State:
-    context = dict(state.context)
-    context["uid"] = uuid4().hex
-    return State(state.state_ref, state.focus, context)
 
 
 def _comparison_record(

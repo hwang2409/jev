@@ -497,11 +497,7 @@ def _answer_value(
                 lower = float(mean) - consistency_sigma * float(stddev)
                 upper = float(mean) + consistency_sigma * float(stddev)
                 threshold_value = float(threshold)
-                if (
-                    lower <= threshold_value <= upper
-                    or math.isclose(threshold_value, lower, rel_tol=1e-12)
-                    or math.isclose(threshold_value, upper, rel_tol=1e-12)
-                ):
+                if lower <= threshold_value <= upper:
                     raise IndeterminateGate(
                         "consistency interval overlaps the threshold"
                     )

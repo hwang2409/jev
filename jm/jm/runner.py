@@ -519,6 +519,7 @@ class Runner:
         consistency_live_calls = 0
         consistency_usage: dict[str, int | float] = {}
         consistency_lock = Lock()
+        consistency_call_lock = Lock()
 
         def judge_state(
             state: State,
@@ -549,9 +550,15 @@ class Runner:
                         return cached.response, True
 
                 try:
-                    response = self.judge_fn(
-                        call_state, runtime_questions, runtime_model
-                    )
+                    if consistency is None:
+                        response = self.judge_fn(
+                            call_state, runtime_questions, runtime_model
+                        )
+                    else:
+                        with consistency_call_lock:
+                            response = self.judge_fn(
+                                call_state, runtime_questions, runtime_model
+                            )
                 except Exception:
                     response = ErrorResponse("request failed")
                 if consistency is not None:
@@ -835,6 +842,11 @@ def _validate_consistency(
     sigma: float,
     questions: Mapping[str, Any],
 ) -> None:
+    if any(
+        "context.uid" in _question_state_fields(question)
+        for question in questions.values()
+    ):
+        raise PresetUsageError("question state_fields must not refer to context.uid")
     if consistency is not None and (
         isinstance(consistency, bool)
         or not isinstance(consistency, int)
@@ -862,6 +874,19 @@ def _question_type(question: Any) -> str | None:
     else:
         value = getattr(question, "type", None)
     return value if isinstance(value, str) else None
+
+
+def _question_state_fields(question: Any) -> tuple[str, ...]:
+    if isinstance(question, Mapping):
+        instructions = question.get("instructions")
+    else:
+        instructions = getattr(question, "instructions", None)
+    if not isinstance(instructions, Mapping):
+        return ()
+    fields = instructions.get("state_fields")
+    if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
+        return ()
+    return tuple(field for field in fields if isinstance(field, str))
 
 
 def _repeat_state(state: State) -> State:

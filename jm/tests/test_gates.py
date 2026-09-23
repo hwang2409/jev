@@ -257,7 +257,7 @@ def test_gate_coverage_errors_fail_closed_even_when_policy_is_false() -> None:
     ("policy", "sigma", "exit_code"),
     [
         ("any(matches_query.noul >= 0.69)", 2.0, 1),
-        ("any(matches_query.noul >= 0.70)", 2.0, 2),
+        ("any(matches_query.noul >= 0.7000000000000001)", 2.0, 2),
         ("any(matches_query.noul >= 0.95)", 2.0, 0),
         ("any(matches_query.noul < 0.69)", 2.0, 0),
         ("any(matches_query.noul < 0.90)", 2.0, 2),

@@ -223,6 +223,8 @@ def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
         "risk": {"type": "score"},
     }
     values = iter((0.2, 0.4, 0.6))
+    kinds = iter(("first", "second", "third"))
+    risks = iter((1.0, 2.0, 3.0))
     uids: list[str] = []
 
     def judge(state, *_args):
@@ -230,8 +232,8 @@ def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
         return JudgeResponse(
             {
                 "match": NoulAnswer(next(values)),
-                "kind": ChoiceAnswer("first"),
-                "risk": ScoreAnswer(1.0),
+                "kind": ChoiceAnswer(next(kinds)),
+                "risk": ScoreAnswer(next(risks)),
             },
             usage={"input_tokens": 10, "output_tokens": 2},
         )
@@ -252,6 +254,8 @@ def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
     assert answers["match"]["consistency"]["stddev"] == pytest.approx(
         (0.08 / 3) ** 0.5
     )
+    assert answers["kind"]["choice"] == "first"
+    assert answers["risk"]["score"] == 1.0
     assert "consistency" not in answers["kind"]
     assert "consistency" not in answers["risk"]
     assert result.stats.consistency_usage == {"input_tokens": 30, "output_tokens": 6}
