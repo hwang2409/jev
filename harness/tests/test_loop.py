@@ -14,10 +14,7 @@ from zeta.core.context import ContextAssembler
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.loop import AgentLoop
 from zeta.core.store import ConversationStore
-from zeta.runtime.loop import _validated_tool_result
 from zeta.prompts import load_identity
-from zeta.skills import SkillCatalog
-from zeta.tools import ToolRegistry, ToolStreamPublisher
 from zeta.protocol.types import (
     CompletionBackend,
     ErrorInfo,
@@ -32,6 +29,11 @@ from zeta.protocol.types import (
     ToolSchema,
     ToolUseContent,
 )
+from zeta.runtime.loop import _validated_tool_result
+from zeta.skills import SkillCatalog
+from zeta.tools import ToolRegistry, ToolStreamPublisher
+from zeta.tools.browser import register as register_browser
+from zeta.tools.browser.catalog import BrowserCatalog, CatalogEntry
 
 pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
@@ -51,6 +53,52 @@ def anthropic_request_bytes(
 
 async def collect(events: AsyncIterator[StreamEvent]) -> list[StreamEvent]:
     return [event async for event in events]
+
+
+def test_browser_catalog_context_survives_turn_reset(tmp_path: Path) -> None:
+    store = ConversationStore(tmp_path)
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    register_browser(registry)
+    loop = AgentLoop(
+        FakeBackend([]),
+        store,
+        registry=registry,
+        router_mode=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    catalog = BrowserCatalog(
+        1,
+        1,
+        "https://example.test/",
+        "Example",
+        "",
+        (
+            CatalogEntry(
+                "e1",
+                "button",
+                "Continue",
+                "click",
+                "Continue",
+                None,
+                "main",
+                False,
+                True,
+            ),
+        ),
+        frozenset(),
+    )
+    schemas = loop._active_tool_schemas()
+
+    registry.set_browser_catalog(catalog)
+    registry.start_user_turn("next step")
+
+    assert loop.browser_catalog() == catalog
+    assert loop._browser_catalog_state()["snapshot_id"] == 1
+    assert loop._active_tool_schemas() == schemas
 
 
 class ParallelChildFailureBackend(CompletionBackend):

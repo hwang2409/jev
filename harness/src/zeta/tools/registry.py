@@ -74,6 +74,7 @@ _logger = logging.getLogger(__name__)
 ToolHook = Callable[[str, dict[str, Any]], bool | str | Awaitable[bool | str] | None]
 ToolHandlerFactory = Callable[["ToolRegistry"], ToolHandler]
 RouterToolsSink = Callable[[list[str] | None], None]
+RouterBrowserCatalogSink = Callable[[Any | None], None]
 MemoryStoreSink = Callable[[str], None]
 
 def _bind_handler(handler: ToolHandler, registry: ToolRegistry) -> ToolHandler:
@@ -491,6 +492,7 @@ class ToolRegistry:
         self._agent_runner: Callable[..., Awaitable[ToolHandlerResult]] | None = None
         self.router_tools_sink: RouterToolsSink | None = None
         self.router_recent_steps: list[str] | None = None
+        self.router_browser_catalog_sink: RouterBrowserCatalogSink | None = None
         self.memory_store_sink: MemoryStoreSink | None = None
         self.background_tasks = BackgroundTaskRegistry(
             session_dir=session_store.session_dir if session_store is not None else None,
@@ -504,6 +506,7 @@ class ToolRegistry:
         self._browser_session_factory: Callable[[ToolRegistry], Any] | None = None
         self._browser_session_closed = False
         self.browser_catalog: Any | None = None
+        self.router_browser_catalog: Any | None = None
         self.browser_adapter_factory: Callable[[], Any] | None = None
         self.browser_goal: str | None = None
         self.skill_catalog = skill_catalog
@@ -649,6 +652,8 @@ class ToolRegistry:
         clone._browser_session = None
         clone._browser_session_closed = False
         clone.browser_catalog = None
+        clone.router_browser_catalog = None
+        clone.router_browser_catalog_sink = None
         clone.browser_goal = None
         clone._session_store = store
         clone._todo_store = self._todo_store or store
@@ -686,6 +691,14 @@ class ToolRegistry:
         self.browser_goal = goal
         if self._browser_session is not None:
             self._browser_session.reset_turn_state()
+
+    def set_browser_catalog(self, catalog: Any | None) -> None:
+        """Publish the current browser catalog to browser tools and the router."""
+
+        self.browser_catalog = catalog
+        self.router_browser_catalog = catalog
+        if self.router_browser_catalog_sink is not None:
+            self.router_browser_catalog_sink(catalog)
 
     def bind_approval_store(self, store: ConversationStore) -> None:
         if self.approval_policy is not None:
@@ -732,6 +745,11 @@ class ToolRegistry:
 
     def set_router_tools_sink(self, sink: RouterToolsSink | None) -> None:
         self.router_tools_sink = sink
+
+    def set_router_browser_catalog_sink(
+        self, sink: RouterBrowserCatalogSink | None
+    ) -> None:
+        self.router_browser_catalog_sink = sink
 
     def set_router_recent_steps(self, steps: list[str] | None) -> None:
         self.router_recent_steps = steps

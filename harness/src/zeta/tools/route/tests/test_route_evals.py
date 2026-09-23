@@ -1,62 +1,25 @@
 from __future__ import annotations
 
-
 import io
-
-
 import json
-
-
 from pathlib import Path
-
 
 import pytest
 
-
-import evals.run_evals as eval_runner
-
-
 from evals.run_evals import (
-    _print_report,
     build_command,
-    contains_forbidden_call_shapes,
-    contains_forbidden_tool,
     contains_ordered_subsequence,
-    load_tasks,
-    main,
     parse_events,
-    qualified_tool_calls,
-    run_evals,
-    run_subprocess,
-    verify_checks,
 )
-
-
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-
-
 from zeta.core.fake import FakeBackend, ScriptedTurn
-
-
 from zeta.core.store import ConversationStore
-
-
-from zeta.runtime.loop import AgentLoop
-
-
-from zeta.runtime.driver import drive_turn
-
-
-from zeta.skills import SkillCatalog
-
-
-from zeta.tools import route as route_module
-
-
-from zeta.tools.registry import ToolRegistry
-
-
 from zeta.protocol.types import TextContent, ToolCall
+from zeta.runtime.driver import drive_turn
+from zeta.runtime.loop import AgentLoop
+from zeta.skills import SkillCatalog
+from zeta.tools import route as route_module
+from zeta.tools.registry import ToolRegistry
 
 
 async def _run_tool_event(
