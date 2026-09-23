@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
+from zeta.skills import SkillCatalog
+from zeta.tools.browser import register
 from zeta.tools.browser.adapter import (
     ActionObservation,
+    BrowserError,
     BrowserTimeoutError,
     ElementRef,
     ElementUnavailableError,
@@ -11,9 +16,12 @@ from zeta.tools.browser.adapter import (
     FakeBrowserAdapter,
     NavigationRaceError,
     PageObservation,
+    PlaywrightBrowserAdapter,
     SearchResultCandidate,
     SnapshotLimits,
+    make_browser_adapter_factory,
 )
+from zeta.tools.registry import ToolRegistry
 
 
 def test_browser_value_types_construct_with_plain_values() -> None:
@@ -169,3 +177,87 @@ async def test_fake_navigation_advances_scripted_snapshots() -> None:
     second_result = await adapter.navigate(third.url, 100)
 
     assert second_result.snapshot_id > first_result.snapshot_id
+
+
+@pytest.mark.asyncio
+async def test_playwright_adapter_uses_local_fixture_for_the_browser_contract() -> None:
+    pytest.importorskip("playwright")
+    fixture = Path(__file__).parent / "fixtures" / "adapter.html"
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+
+    await adapter.launch()
+    try:
+        observation = await adapter.navigate(fixture.as_uri(), 2_000)
+        assert observation.url.startswith("file://")
+        assert observation.title == "adapter fixture"
+        assert all(isinstance(element, ElementRef) for element in observation.elements)
+        assert "locator" not in repr(observation)
+
+        button = next(element for element in observation.elements if element.role == "button")
+        action = await adapter.click(button, 1_000)
+        assert action.changed is True
+
+        refreshed = await adapter.observe(SnapshotLimits())
+        query = next(element for element in refreshed.elements if element.name == "query")
+        choice = next(element for element in refreshed.elements if element.name == "choice")
+        await adapter.type_text(query, "updated", True, 1_000)
+        refreshed = await adapter.observe(SnapshotLimits())
+        choice = next(element for element in refreshed.elements if element.name == "choice")
+        await adapter.select(choice, "two", 1_000)
+
+        extracted = await adapter.extract(None, [], 2_000)
+        assert isinstance(extracted.value, str)
+        assert "updated" in extracted.value or "local browser fixture" in extracted.value
+        search = await adapter.extract_search_results(None, 2_000)
+        assert search.results is not None
+        assert search.results[0].result_id == "result-1"
+    finally:
+        await adapter.close()
+        await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_playwright_adapter_rejects_stale_and_detached_element_refs() -> None:
+    pytest.importorskip("playwright")
+    fixture = Path(__file__).parent / "fixtures" / "adapter.html"
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+
+    await adapter.launch()
+    try:
+        observation = await adapter.navigate(fixture.as_uri(), 2_000)
+        button = next(element for element in observation.elements if element.role == "button")
+        await adapter.observe(SnapshotLimits())
+        with pytest.raises(ElementUnavailableError):
+            await adapter.click(button, 1_000)
+
+        current = await adapter.observe(SnapshotLimits())
+        current_button = next(element for element in current.elements if element.role == "button")
+        await adapter._page.evaluate("document.querySelector('#continue').remove()")
+        with pytest.raises(ElementUnavailableError):
+            await adapter.click(current_button, 1_000)
+    finally:
+        await adapter.close()
+
+
+def test_browser_adapter_selection_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("ZETA_BROWSER_ADAPTER", raising=False)
+    disabled = make_browser_adapter_factory()
+    with pytest.raises(BrowserError, match="ZETA_BROWSER_ADAPTER=playwright"):
+        disabled()
+
+    selected = make_browser_adapter_factory(mode="playwright")
+    adapter = selected()
+    assert isinstance(adapter, PlaywrightBrowserAdapter)
+
+
+def test_browser_register_wires_the_configured_adapter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("ZETA_BROWSER_ADAPTER", "playwright")
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+    register(registry)
+
+    assert isinstance(registry.browser_adapter_factory(), PlaywrightBrowserAdapter)
