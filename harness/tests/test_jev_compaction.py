@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar, Self
+from typing import Any, ClassVar
 
 import pytest
 
@@ -884,31 +884,23 @@ async def test_triage_http_uses_route_auth_and_response_shape(
         def __init__(self, **_kwargs: Any) -> None:
             pass
 
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
+        async def aclose(self) -> None:
             return None
 
-        async def post(self, url: str, **kwargs: Any) -> Response:
-            self.requests.append({"url": url, **kwargs})
-            return Response(
-                200,
-                {
-                    "answers": {"entry-1": {"noul": 0.1}},
-                    "usage": {"input_tokens": 3},
-                },
-            )
+        async def evaluate_async(
+            self, state: dict[str, Any], questions: dict[str, Any]
+        ) -> dict[str, Any]:
+            self.requests.append({"state": state, "questions": questions})
+            return {
+                "answers": {"entry-1": {"noul": 0.1}},
+                "usage": {"input_tokens": 3},
+            }
 
-    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
+    monkeypatch.setattr(jev, "JevClient", Client)
     result = await jev.triage("task", [{"id": "entry-1"}])
 
     assert result.keep_probabilities == {"entry-1": 0.1}
-    assert Client.requests[0]["headers"] == {
-        "Authorization": "Bearer test-key",
-        **jev.GATEWAY_HEADERS,
-    }
+    assert Client.requests[0]["state"]["task"] == "task"
 
 
 async def _triage(

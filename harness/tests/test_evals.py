@@ -1,24 +1,14 @@
 from __future__ import annotations
 
-
 import io
-
-
 import json
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 import evals.run_evals as eval_runner
-
-
 from evals.run_evals import (
     _print_report,
-    build_command,
     contains_forbidden_call_shapes,
     contains_forbidden_tool,
     contains_ordered_subsequence,
@@ -30,33 +20,15 @@ from evals.run_evals import (
     run_subprocess,
     verify_checks,
 )
-
-
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-
-
 from zeta.core.fake import FakeBackend, ScriptedTurn
-
-
 from zeta.core.store import ConversationStore
-
-
-from zeta.runtime.loop import AgentLoop
-
-
-from zeta.runtime.driver import drive_turn
-
-
-from zeta.skills import SkillCatalog
-
-
-from zeta.tools import route as route_module
-
-
-from zeta.tools.registry import ToolRegistry
-
-
 from zeta.protocol.types import TextContent, ToolCall
+from zeta.runtime.driver import drive_turn
+from zeta.runtime.loop import AgentLoop
+from zeta.skills import SkillCatalog
+from zeta.tools import route as route_module
+from zeta.tools.registry import ToolRegistry
 
 
 async def _run_tool_event(
@@ -1039,10 +1011,22 @@ def test_verify_normalized_equals_rejects_extra_output(tmp_path: Path) -> None:
     ) == [False]
 
 
-def test_memory_injection_eval_requires_gateway_key(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+def test_memory_injection_eval_does_not_preflight_gateway_key(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(eval_runner.jev, "_resolve_gateway_key", lambda: None)
+    tasks = [{"id": "task", "prompt": "prompt", "setup": {}, "checks": []}]
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(eval_runner, "load_tasks", lambda _path: tasks)
+    monkeypatch.setattr(
+        eval_runner,
+        "run_evals",
+        lambda loaded, modes, out, *, memory_injection: captured.update(
+            loaded=loaded,
+            modes=modes,
+            out=out,
+            memory_injection=memory_injection,
+        ),
+    )
 
     assert main(
         [
@@ -1052,8 +1036,11 @@ def test_memory_injection_eval_requires_gateway_key(
             "--tasks-file",
             str(tmp_path / "tasks.jsonl"),
         ]
-    ) == 2
-    assert "Vercel AI Gateway API key is required" in capsys.readouterr().err
+    ) == 0
+    assert captured["loaded"] == tasks
+    assert captured["modes"] == ("stock",)
+    assert isinstance(captured["out"], Path)
+    assert captured["memory_injection"] is True
 
 
 def test_run_subprocess_records_timeout_and_partial_stream(tmp_path: Path) -> None:

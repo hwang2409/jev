@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Self
+from typing import Any
 
 import httpx
 import pytest
@@ -39,34 +39,25 @@ def hostile_page_cases() -> list[tuple[str, str, str]]:
     ]
 
 
-class _Response:
-    def __init__(self, data: dict[str, Any], status_code: int = 200) -> None:
-        self.status_code = status_code
-        self._data = data
-        self.text = ""
-
-    def json(self) -> dict[str, Any]:
-        return self._data
-
-
 class _Transport:
     def __init__(self, responder: Any) -> None:
         self.responder = responder
         self.requests: list[dict[str, Any]] = []
 
-    async def __aenter__(self) -> Self:
-        return self
-
-    async def __aexit__(self, *_args: object) -> None:
+    async def aclose(self) -> None:
         return None
 
-    async def post(self, _url: str, **kwargs: Any) -> _Response:
-        request = kwargs["json"]
+    async def evaluate_async(
+        self, state: dict[str, Any], questions: dict[str, Any]
+    ) -> dict[str, Any]:
+        request = {"state": state, "questions": questions}
         self.requests.append(request)
         response = self.responder(request)
         if isinstance(response, BaseException):
-            raise response
-        return _Response(response)
+            if isinstance(response, jev.JevError):
+                raise response
+            raise jev.JevError(str(response)) from response
+        return response
 
 
 def _provider_response(
@@ -130,8 +121,7 @@ def _install_transport(
     responder: Any = _provider_response,
 ) -> _Transport:
     transport = _Transport(responder)
-    monkeypatch.setattr(jev.httpx, "AsyncClient", lambda **_kwargs: transport)
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
+    monkeypatch.setattr(jev, "JevClient", lambda: transport)
     return transport
 
 

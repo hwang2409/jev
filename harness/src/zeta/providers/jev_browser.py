@@ -7,8 +7,8 @@ from typing import Any
 from .jev import (
     BrowserPageStateResult,
     JevRouterError,
+    _evaluate,
     _noul_confidence,
-    _post_json,
 )
 
 _BROWSER_PAGE_STATE_GATES = frozenset(
@@ -201,7 +201,7 @@ async def judge_browser_page_state(
     if active_gate not in _BROWSER_PAGE_STATE_GATES:
         raise ValueError(f"unknown browser page-state gate: {active_gate}")
     return parse_browser_page_state_response(
-        await _post_json(
+        await _evaluate(
             build_browser_page_state_request(
                 goal,
                 action,
