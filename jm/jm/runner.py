@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from os import PathLike
 from typing import Any, Protocol, TextIO
 
+from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
 from .answers import (
     CacheStatus,
     CanonicalRecord,
@@ -28,7 +29,6 @@ from .answers import (
     TypedResponse,
 )
 from .cache import CacheStore, build_cache_preimage, cache_key
-from .client import GATEWAY_MODEL
 from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
     Preset,

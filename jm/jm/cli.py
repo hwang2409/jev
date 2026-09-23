@@ -9,10 +9,11 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TextIO
 
+from ._transport import _resolve_gateway_key as resolve_gateway_key
 from .answers import NoulAnswer, ResultRecord, ScoreAnswer
 from .cache import CacheStore
 from .chunkers import chunk_file, chunk_input
-from .client import JevClient, resolve_gateway_key
+from .client import JevClient
 from .presets import (
     Preset,
     PresetError,
