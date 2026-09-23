@@ -838,6 +838,33 @@ def test_missing_or_partial_preset_metadata_fails_before_live_calls(
     assert records[-1]["within_tolerance"] is None
 
 
+def test_malformed_different_preset_entry_fails_before_live_calls(
+    tmp_path: Path,
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    path = next(store.root.rglob("*.json"))
+    path.write_text(
+        json.dumps({"preset": "jfilter", "preimage": {"preset": "jfilter"}}),
+        encoding="utf-8",
+    )
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
 def test_mixed_preset_cache_entries_fail_before_live_calls(tmp_path: Path) -> None:
     preset = resolve_preset("jgrep")
     store = CacheStore(tmp_path)

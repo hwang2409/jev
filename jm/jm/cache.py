@@ -207,13 +207,14 @@ class CacheStore:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, Mapping):
                     raise ValueError("cache entry must be an object")
-                preimage = payload.get("preimage")
+                expected_key = payload.get("cache_key")
+                if not isinstance(expected_key, str):
+                    raise ValueError("cache entry has no cache key")
+                if path != self.path_for(expected_key):
+                    raise ValueError("cache key does not match path")
+                entry = _parse_entry(payload, expected_key)
                 payload_preset = payload.get("preset")
-                preimage_preset = (
-                    preimage.get("preset")
-                    if isinstance(preimage, Mapping)
-                    else None
-                )
+                preimage_preset = entry.preimage.get("preset")
                 if not (
                     isinstance(payload_preset, str)
                     and payload_preset
@@ -224,14 +225,6 @@ class CacheStore:
                     raise ValueError("cache entry has invalid preset metadata")
                 if payload_preset != preset:
                     continue
-                expected_key = payload.get("cache_key")
-                if not isinstance(expected_key, str):
-                    raise ValueError("cache entry has no cache key")
-                if path != self.path_for(expected_key):
-                    raise ValueError("cache key does not match path")
-                entry = _parse_entry(payload, expected_key)
-                if entry.preset != preset:
-                    raise ValueError("cache entry has a mixed preset")
                 if entry.cache_key in seen:
                     raise ValueError("duplicate cache key")
                 seen.add(entry.cache_key)
