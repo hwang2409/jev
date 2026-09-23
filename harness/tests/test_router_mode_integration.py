@@ -16,7 +16,7 @@ import pytest
 import zeta.tools.route as route_module
 
 
-from zeta.cli import build_parser
+from zeta.cli.main import build_parser
 
 
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
@@ -28,7 +28,7 @@ from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
 
 
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 
 
 from zeta.providers.jev import JevRouterError, RouteResult
@@ -37,7 +37,7 @@ from zeta.providers.jev import JevRouterError, RouteResult
 from zeta.runtime.driver import drive_turn
 
 
-from zeta.settings import load_settings, resolve
+from zeta.config.settings import load_settings, resolve
 
 
 from zeta.skills import SkillCatalog
@@ -46,7 +46,7 @@ from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
 
 
-from zeta.types import TextContent, ToolCall, ToolResult
+from zeta.protocol.types import TextContent, ToolCall, ToolResult
 
 
 async def collect(events):
@@ -253,7 +253,7 @@ async def test_child_loop_inherits_jev_compaction_mode(
         jev_compaction=jev_compaction,
         skill_catalog=SkillCatalog.empty(),
     )
-    import zeta.loop as loop_module
+    import zeta.runtime.loop as loop_module
 
     captured: list[bool] = []
     captured_styles: list[str] = []

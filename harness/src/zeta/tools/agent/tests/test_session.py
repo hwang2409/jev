@@ -43,7 +43,7 @@ from rich.cells import cell_len
 from rich.console import Console
 
 
-from zeta.cli import build_parser, main
+from zeta.cli.main import build_parser, main
 
 
 from zeta.core.abort import AbortGenerationRegistry
@@ -85,7 +85,7 @@ from zeta.tui.app import TUIApp, create_app
 from zeta.tui.layout import CONTENT_MARGIN, content_width
 
 
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     StreamEvent,

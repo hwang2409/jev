@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from ...types import StructuredToolResult
+from ...protocol.types import StructuredToolResult
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 
 UNDETERMINED = "undetermined"

@@ -22,7 +22,7 @@ from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 @pytest.mark.asyncio

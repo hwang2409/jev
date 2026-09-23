@@ -1,13 +1,23 @@
 """Interactive terminal interface for zeta."""
 
-from .app import TUIApp
+import importlib
 
 __all__ = ["TUIApp", "main"]
 
+_EXPORTS = {
+    "TUIApp": (".app", "TUIApp"),
+    "main": ("..cli.main", "main"),
+}
+
 
 def __getattr__(name: str) -> object:
-    if name == "main":
-        from ..cli import main
-
-        return main
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    try:
+        module_name, attribute_name = _EXPORTS[name]
+    except KeyError as error:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        ) from error
+    module = importlib.import_module(module_name, __name__)
+    value = getattr(module, attribute_name)
+    globals()[name] = value
+    return value

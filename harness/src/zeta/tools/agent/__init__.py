@@ -12,7 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from ...agent_receipt import (
+from ...agent.receipt import (
     MAX_AGENT_RESULT_BYTES,
     agent_stats,
     build_agent_progress,
@@ -29,8 +29,8 @@ from ...core.checkpoints import (
 )
 from ...core.session_files import child_directory, read_session_file
 from ...core.store import ConversationStore
-from ...model_catalog import known_model_names
-from ...types import (
+from ...models.catalog import known_model_names
+from ...protocol.types import (
     Message,
     MessageRole,
     StructuredContentValue,

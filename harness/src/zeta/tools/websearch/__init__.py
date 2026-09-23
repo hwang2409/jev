@@ -10,7 +10,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 import httpx
 
 from ...core.abort import AbortSignal
-from ...types import StructuredToolResult
+from ...protocol.types import StructuredToolResult
 from ..fetch import (
     MAX_OUTPUT_BYTES,
     MAX_RESPONSE_BYTES,

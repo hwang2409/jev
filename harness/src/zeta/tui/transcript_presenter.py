@@ -10,7 +10,7 @@ from rich.live import Live
 from rich.padding import Padding
 from rich.text import Text
 
-from ..types import StreamEvent, StreamEventType
+from ..protocol.types import StreamEvent, StreamEventType
 from .layout import CONTENT_MARGIN
 from .render import render_event
 from .transcript import (

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfoNotFoundError
 
 from ..core.session import env_home
 from ..providers.factory import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
-from ..settings import load_settings
+from ..config.settings import load_settings
 from .models import Job, parse_job
 from .store import SQLiteStore
 

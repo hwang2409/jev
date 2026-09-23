@@ -185,7 +185,7 @@ async def test_login_action_uses_failed_provider_before_model_revert(tmp_path, v
     from tests.test_server import _event
     from zeta.core.fake import FakeBackend
     from zeta.server import model_selection
-    from zeta.types import ErrorInfo, StreamEvent, StreamEventType
+    from zeta.protocol.types import ErrorInfo, StreamEvent, StreamEventType
 
     server = ZetaServer(home=tmp_path / "zeta", port=0, provider="claude", model="claude-sonnet-4-6",
                         backend_factory=lambda provider, model, home: (FakeBackend([]), model))

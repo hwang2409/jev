@@ -20,9 +20,9 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from ..agent_receipt import ensure_agent_receipt_text, terminal_state
+from ..agent.receipt import ensure_agent_receipt_text, terminal_state
 from ..tools.exec import MacroDisplay
-from ..types import (
+from ..protocol.types import (
     ErrorInfo,
     RedactedThinkingContent,
     StreamEvent,

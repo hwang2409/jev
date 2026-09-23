@@ -34,7 +34,7 @@ from zeta.tools import ToolRegistry, websearch
 from zeta.tools import fetch as fetch_tool
 
 
-from zeta.types import ToolCall, flatten_tool_content
+from zeta.protocol.types import ToolCall, flatten_tool_content
 
 
 _ASYNC_CLIENT = httpx.AsyncClient

@@ -15,7 +15,7 @@ from urllib.parse import urljoin, urlsplit
 import httpx
 
 from ...core.abort import AbortSignal
-from ...types import StructuredToolResult, ToolTextBlock
+from ...protocol.types import StructuredToolResult, ToolTextBlock
 from ..registry import ToolRegistry, _success_result, text_block
 
 HTTP_TIMEOUT_SECONDS = 15.0

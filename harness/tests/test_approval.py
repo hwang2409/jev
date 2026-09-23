@@ -22,7 +22,7 @@ from zeta.core.store import ConversationIntegrityError, ConversationStore
 from zeta.providers import jev
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolAbortSignal, ToolRegistry
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     StreamEvent,

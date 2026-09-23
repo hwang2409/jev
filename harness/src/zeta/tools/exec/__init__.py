@@ -12,7 +12,7 @@ from typing import Any
 from uuid import uuid4
 
 from ...core.abort import AbortSignal
-from ...types import (
+from ...protocol.types import (
     StreamEvent,
     StructuredToolResult,
     ToolCall,

@@ -5,15 +5,15 @@ from typing import Any, ClassVar, Self
 
 import pytest
 
-from zeta.cli import build_parser
+from zeta.cli.main import build_parser
 from zeta.core.context import ContextAssembler
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 from zeta.providers import jev
-from zeta.settings import Settings, resolve
+from zeta.config.settings import Settings, resolve
 from zeta.skills import SkillCatalog
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     TextContent,

@@ -423,7 +423,7 @@ def block_real_http_connections(monkeypatch: pytest.MonkeyPatch) -> None:
 def stock_router_mode(monkeypatch: pytest.MonkeyPatch) -> None:
     """Keep legacy AgentLoop tests on stock full-toolset behavior."""
 
-    from zeta.loop import AgentLoop
+    from zeta.runtime.loop import AgentLoop
 
     original_init = AgentLoop.__init__
 

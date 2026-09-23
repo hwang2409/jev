@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .types import ErrorInfo
+from ..protocol.types import ErrorInfo
 
 MAX_AGENT_DEPTH = 2
 # Hard cap on caller-supplied `max_turns` for one agent tree. Preset defaults

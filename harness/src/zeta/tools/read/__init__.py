@@ -10,8 +10,8 @@ from pathlib import Path
 from typing import Any, BinaryIO, Protocol
 
 from ...core.abort import AbortSignal
-from ...images import detect_image_media_type
-from ...types import StructuredToolResult
+from ...media.images import detect_image_media_type
+from ...protocol.types import StructuredToolResult
 from .._shared.sandbox import open_target
 from ..registry import (
     ToolRegistry,

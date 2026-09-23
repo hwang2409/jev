@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from ...core.abort import AbortSignal
-from ...types import StructuredToolResult
+from ...protocol.types import StructuredToolResult
 from .._shared.process import _kill_and_reap, tool_subprocess_env
 from .._shared.sandbox import expand_user_path
 from ..registry import (

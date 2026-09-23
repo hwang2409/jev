@@ -12,22 +12,22 @@ from pathlib import Path
 from typing import Any, Protocol
 from uuid import uuid4
 
-from .core.abort import AbortSignal
-from .core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
-from .core.commands.custom_commands import CustomCommand, InlineShellResult
-from .core.slash import (
+from ..core.abort import AbortSignal
+from ..core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
+from ..core.commands.custom_commands import CustomCommand, InlineShellResult
+from ..core.slash import (
     SlashCommandRegistry,
     SlashModelInput,
     SlashPromptError,
 )
-from .submission import Submission
-from .tools.exec import (
+from .model import Submission
+from ..tools.exec import (
     forget_macro_display,
     register_macro_display,
     run_inline_shell_batch,
 )
-from .tui.composer import UndoCandidate, parse_input
-from .types import StreamEvent, StreamEventType, ToolCall
+from ..tui.composer import UndoCandidate, parse_input
+from ..protocol.types import StreamEvent, StreamEventType, ToolCall
 
 
 class SubmissionState(StrEnum):

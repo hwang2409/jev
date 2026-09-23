@@ -8,11 +8,11 @@ import sys
 
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from .core.commands.completion import completion_script
-from .core.login_flow import run_login
-from .core.session import SessionError, env_home
-from .providers.login import build_login_provider, pkce_values
-from .tui.app import create_app
+from ..core.commands.completion import completion_script
+from ..core.login_flow import run_login
+from ..core.session import SessionError, env_home
+from ..providers.login import build_login_provider, pkce_values
+from ..tui.app import create_app
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,11 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="anthropic",
         help="OAuth provider (default: anthropic)",
     )
-    from .session_cli import add_subcommand as _add_session_subcommand
+    from .session import add_subcommand as _add_session_subcommand
 
     _add_session_subcommand(commands)
 
-    from .automations.cli import add_subcommand as _add_automation_subcommand
+    from ..automations.cli import add_subcommand as _add_automation_subcommand
 
     _add_automation_subcommand(commands)
     serve_parser = commands.add_parser(
@@ -220,15 +220,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"logged in as {handle}" if handle else "ok")
         return 0
     if args.command == "automation":
-        from .automations.cli import run as run_automation
+        from ..automations.cli import run as run_automation
 
         return run_automation(args)
     if args.command == "session":
-        from .session_cli import run as _run_session
+        from .session import run as _run_session
 
         return _run_session(args)
     if args.command == "serve":
-        from .server import ZetaServer, run_server
+        from ..server import ZetaServer, run_server
 
         server = ZetaServer(
             cwd=args.cwd,
@@ -250,7 +250,7 @@ def main(argv: list[str] | None = None) -> int:
         print(completion_script(args.shell), end="")
         return 0
     if args.prompt is not None:
-        from .headless import run_headless
+        from ..runtime.headless import run_headless
 
         return run_headless(args, args.prompt)
     if args.format != "text":

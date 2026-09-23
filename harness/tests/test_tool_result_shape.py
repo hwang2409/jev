@@ -7,7 +7,7 @@ import pytest
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.tools.registry import validate_tool_result
-from zeta.types import (
+from zeta.protocol.types import (
     StructuredContentValue,
     StructuredToolResult,
     ToolCall,

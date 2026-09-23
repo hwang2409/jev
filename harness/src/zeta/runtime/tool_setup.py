@@ -7,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from ..core.store import ConversationStore
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
-from ..types import ToolSchema
+from ..protocol.types import ToolSchema
 from ..tools.registry import ToolHandler, ToolRegistry
 
 

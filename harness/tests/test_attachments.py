@@ -25,7 +25,7 @@ from zeta.tui.composer import (
     build_key_bindings,
     build_user_message,
 )
-from zeta.types import ImageContent, MessageRole, TextContent
+from zeta.protocol.types import ImageContent, MessageRole, TextContent
 
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"

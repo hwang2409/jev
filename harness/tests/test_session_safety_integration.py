@@ -25,7 +25,7 @@ from threading import Event
 import pytest
 
 
-from zeta.cli import main
+from zeta.cli.main import main
 
 
 from zeta.core import session as session_module
@@ -37,7 +37,7 @@ from zeta.core.session import SessionError, SessionInUseError, SessionManager
 from zeta.core.store import ConversationStore
 
 
-from zeta.types import Message, MessageRole, TextContent
+from zeta.protocol.types import Message, MessageRole, TextContent
 
 
 def closed_session(tmp_path):
@@ -360,7 +360,7 @@ asyncio.run(main())
 
         async def delete_cli():
             cli = await asyncio.create_subprocess_exec(
-                sys.executable, "-c", "from zeta.cli import main; raise SystemExit(main())", "session", "delete", sid, "--force",
+                sys.executable, "-c", "from zeta.cli.main import main; raise SystemExit(main())", "session", "delete", sid, "--force",
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, env=env,
             )
             stdout, stderr = await asyncio.wait_for(cli.communicate(), 10)
@@ -459,7 +459,7 @@ def test_composer_persistence_survives_directory_swap(tmp_path, monkeypatch):
     from pathlib import Path
     from types import SimpleNamespace
 
-    from zeta.persistence import DraftPersistence
+    from zeta.tui.persistence import DraftPersistence
     from zeta.tui import composer
 
     png = bytes.fromhex(

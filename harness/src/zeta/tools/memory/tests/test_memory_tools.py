@@ -37,7 +37,7 @@ from zeta.core.approval import ApprovalPolicy
 from zeta.core.store import ConversationStore
 
 
-from zeta.settings import load_settings
+from zeta.config.settings import load_settings
 
 
 from zeta.skills import SkillCatalog
@@ -52,7 +52,7 @@ from zeta.tools import memory as memory_tools
 from zeta.tools.route import build_catalog
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 MEMORY_SEARCH_DESCRIPTION = (

@@ -41,7 +41,7 @@ from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
 
 
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 
 
 from zeta.runtime.driver import drive_turn
@@ -56,7 +56,7 @@ from zeta.tools import route as route_module
 from zeta.tools.registry import ToolRegistry
 
 
-from zeta.types import TextContent, ToolCall
+from zeta.protocol.types import TextContent, ToolCall
 
 
 async def _run_tool_event(

@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
-from ..types import Message, MessageRole, TextContent
+from ..protocol.types import Message, MessageRole, TextContent
 
 AgentType = Literal["general", "explore", "plan", "run"]
 

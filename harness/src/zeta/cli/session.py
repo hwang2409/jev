@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import IO
 
-from .core.session import (
+from ..core.session import (
     SessionError,
     SessionManager,
     env_home,

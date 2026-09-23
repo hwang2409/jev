@@ -19,7 +19,7 @@ from zeta.tools import ToolRegistry
 from zeta.tools.agent import ChildApprovalPolicy
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 import asyncio
@@ -91,7 +91,7 @@ from zeta.runtime.unattended import build_unattended_loop
 from zeta.skills import discover_session_skills
 
 
-from zeta.types import TextContent
+from zeta.protocol.types import TextContent
 
 
 START = datetime(2026, 9, 9, 11, 0, tzinfo=UTC)

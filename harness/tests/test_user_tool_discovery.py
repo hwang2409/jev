@@ -12,7 +12,7 @@ from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.fake import FakeBackend
 from zeta.core.slash import create_slash_registry
 from zeta.core.store import ConversationStore
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.tools._shared.user_discovery import (
@@ -20,7 +20,7 @@ from zeta.tools._shared.user_discovery import (
     trust_project_tools,
 )
 from zeta.tui.app import TUIApp
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 def _echo_source(name: str, description: str = "echo tool") -> str:
