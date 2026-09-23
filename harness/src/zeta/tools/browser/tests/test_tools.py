@@ -888,7 +888,7 @@ async def test_browser_extract_returns_ranked_search_results(
     assert structured["triage"]["decision"] == "accepted"
     assert [item["result_id"] for item in structured["ranked_results"]] == ["b", "a"]
     assert structured["ranked_results"][0]["relevance_score"] == pytest.approx(0.9)
-    assert "search triage: status=ranked decision=accepted" in _text(result)
+    assert "search triage: status=ranked decision=accepted warnings=none" in _text(result)
 
 
 @pytest.mark.asyncio

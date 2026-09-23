@@ -530,10 +530,12 @@ def _triage_receipt(triage: Mapping[str, object]) -> str:
     status = triage.get("status", "unknown")
     decision = triage.get("decision", "unknown")
     warnings = triage.get("warnings", [])
-    warning_text = ""
-    if isinstance(warnings, list) and warnings:
-        warning_text = f" warnings={','.join(str(warning) for warning in warnings)}"
-    return f"search triage: status={status} decision={decision}{warning_text}"
+    warning_text = (
+        ",".join(str(warning) for warning in warnings)
+        if isinstance(warnings, list) and warnings
+        else "none"
+    )
+    return f"search triage: status={status} decision={decision} warnings={warning_text}"
 
 
 def register(registry: ToolRegistry) -> None:
