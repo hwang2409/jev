@@ -147,23 +147,34 @@ class JevClient:
         started: float,
         attempts: int,
     ) -> JevResponse:
-        try:
-            payload = response.json()
-            normalized = _normalize_gateway_response(payload, questions)
-            parsed = _parse_judge_response(normalized, questions)
-            usage = _normalize_usage(payload.get("usage"))
-        except (TypeError, ValueError, KeyError) as exc:
+        parsed_response = _parse_gateway_response(response, questions)
+        if parsed_response is None:
             raise JevError(
                 "malformed answer",
                 http_status=response.status_code,
                 attempts=attempts,
-            ) from exc
+            ) from None
+        payload, parsed, usage = parsed_response
         return _replace(
             parsed,
             served_model=_served_model(payload),
             usage=usage,
             latency_ms=round((_time.monotonic() - started) * 1000),
         )
+
+
+def _parse_gateway_response(
+    response: _TransportResponse,
+    questions: _Mapping[str, _Any],
+) -> tuple[_Mapping[str, _Any], JevResponse, dict[str, _Any] | None] | None:
+    try:
+        payload = response.json()
+        normalized = _normalize_gateway_response(payload, questions)
+        parsed = _parse_judge_response(normalized, questions)
+        usage = _normalize_usage(payload.get("usage"))
+    except (TypeError, ValueError, KeyError):
+        return None
+    return payload, parsed, usage
 
 
 def _require_gateway_key() -> str:

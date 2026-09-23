@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import traceback
 from pathlib import Path
 
 import httpx
@@ -185,6 +186,33 @@ def test_client_rejects_gateway_noul_shape_in_public_answer_direction(
             client.evaluate(State("case#1", "focus"), {"is_match": {"type": "noul"}})
     finally:
         client.close()
+
+
+def test_client_does_not_leak_malformed_response_data(monkeypatch) -> None:
+    gateway_key = "gw_live_response_key_123"
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: _response(
+                    request,
+                    answers={gateway_key: {"type": "noul", "noul": 0.5}},
+                )
+            )
+        )
+    )
+    try:
+        with pytest.raises(JevError) as error:
+            client.evaluate(State("case#1", "focus"), {"is_match": {"type": "noul"}})
+    finally:
+        client.close()
+
+    assert gateway_key not in error.value.message
+    assert gateway_key not in repr(error.value.args)
+    assert error.value.__cause__ is None
+    assert error.value.__context__ is None
+    formatted = "".join(traceback.format_exception(error.value))
+    assert gateway_key not in formatted
 
 
 @pytest.mark.parametrize(
