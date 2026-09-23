@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from jmap.presets import (
+from jm.presets import (
     PresetNotFoundError,
     PresetUsageError,
     PresetValidationError,
@@ -17,8 +17,15 @@ from jmap.presets import (
 )
 
 ROOT = Path(__file__).parents[1]
-PRESETS = ROOT / "jmap" / "presets"
-PLAN = ROOT / "docs" / "superpowers" / "plans" / "2026-09-22-jmap-v1.md"
+PRESETS = ROOT / "jm" / "presets"
+HISTORICAL_TOOL_NAME = "j" + "map"
+PLAN = (
+    ROOT
+    / "docs"
+    / "superpowers"
+    / "plans"
+    / f"2026-09-22-{HISTORICAL_TOOL_NAME}-v1.md"
+)
 BUILTINS = ("jgrep", "jfilter", "diff-risk-heat")
 
 
@@ -60,8 +67,16 @@ def test_builtins_have_expected_metadata_and_batteries() -> None:
 def test_builtins_match_the_plan_blocks_byte_for_byte() -> None:
     plan = PLAN.read_text(encoding="utf-8")
     for name in BUILTINS:
-        marker = f"`jmap/jmap/presets/{name}.yml`:\n\n```yaml\n"
-        block = plan.split(marker, 1)[1].split("\n```", 1)[0] + "\n"
+        marker = (
+            f"`{HISTORICAL_TOOL_NAME}/{HISTORICAL_TOOL_NAME}/presets/"
+            f"{name}.yml`:\n\n```yaml\n"
+        )
+        block = (
+            plan.split(marker, 1)[1]
+            .split("\n```", 1)[0]
+            .replace(HISTORICAL_TOOL_NAME, "jm")
+            + "\n"
+        )
         assert (PRESETS / f"{name}.yml").read_text(encoding="utf-8") == block
 
 
@@ -152,7 +167,7 @@ def test_lookup_order_is_explicit_then_cwd_then_builtin_then_user(
         (directory / "jgrep.yml").write_text(content, encoding="utf-8")
     explicit = tmp_path / "explicit.yml"
     explicit.write_text(content, encoding="utf-8")
-    monkeypatch.setenv("JMAP_PRESETS", str(user))
+    monkeypatch.setenv("JM_PRESETS", str(user))
 
     assert resolve_preset("jgrep", explicit_path=explicit).path == explicit.resolve()
     assert resolve_preset("jgrep", cwd=cwd, package_dir=builtins).path == (
@@ -212,7 +227,7 @@ def test_malformed_preset_has_clear_error_without_traceback(tmp_path: Path) -> N
 def test_duplicate_yaml_keys_are_rejected(tmp_path) -> None:
     path = tmp_path / "duplicate.yml"
     path.write_text(
-        """schema: jmap.preset/v1\nschema: jmap.preset/v1\n""",
+        """schema: jm.preset/v1\nschema: jm.preset/v1\n""",
         encoding="utf-8",
     )
     with pytest.raises(PresetValidationError, match="duplicate"):

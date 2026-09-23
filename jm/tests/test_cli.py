@@ -11,9 +11,9 @@ from pathlib import Path
 
 import pytest
 
-from jmap.answers import JudgeResponse, NoulAnswer
-from jmap.cache import CacheStore
-from jmap.cli import main
+from jm.answers import JudgeResponse, NoulAnswer
+from jm.cache import CacheStore
+from jm.cli import main
 
 ROOT = Path(__file__).parents[1]
 
@@ -85,7 +85,7 @@ def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
         def read(self):
             raise AssertionError("stdin should not be read")
 
-    monkeypatch.setattr("jmap.cli.resolve_gateway_key", lambda: None)
+    monkeypatch.setattr("jm.cli.resolve_gateway_key", lambda: None)
     stderr = io.StringIO()
     code = main(
         ["run", "--preset", "jgrep", "--query", "launch"],
@@ -151,7 +151,7 @@ def test_preset_parameters_are_validated_before_processing(argv, message) -> Non
 
 
 def test_invalid_pretty_template_is_usage_error_before_judging(tmp_path: Path) -> None:
-    preset = ROOT / "jmap" / "presets" / "jgrep.yml"
+    preset = ROOT / "jm" / "presets" / "jgrep.yml"
     path = tmp_path / "invalid-template.yml"
     content = preset.read_text(encoding="utf-8").replace(
         "pretty_template: '{state_ref}\\t{answers.matches_query.noul}'",
@@ -358,7 +358,7 @@ def test_preset_and_cache_commands_have_non_judgment_stdout(tmp_path: Path) -> N
 def test_module_and_script_help_are_available() -> None:
     environment = os.environ.copy()
     module = subprocess.run(
-        [sys.executable, "-m", "jmap", "--help"],
+        [sys.executable, "-m", "jm", "--help"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -366,7 +366,7 @@ def test_module_and_script_help_are_available() -> None:
         env=environment,
     )
     script = subprocess.run(
-        ["uv", "run", "jmap", "--help"],
+        ["uv", "run", "jm", "--help"],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -374,16 +374,16 @@ def test_module_and_script_help_are_available() -> None:
         env=environment,
     )
     assert module.returncode == script.returncode == 0
-    assert "jmap run" in module.stdout or "run" in module.stdout
-    assert "jmap run" in script.stdout or "run" in script.stdout
+    assert "jm run" in module.stdout or "run" in module.stdout
+    assert "jm run" in script.stdout or "run" in script.stdout
 
 
 def test_module_accepts_file_path_arguments_before_judgment(tmp_path: Path) -> None:
     path = tmp_path / "note.md"
     path.write_text("launch decision\n", encoding="utf-8")
     commands = (
-        [sys.executable, "-m", "jmap"],
-        ["uv", "run", "jmap"],
+        [sys.executable, "-m", "jm"],
+        ["uv", "run", "jm"],
     )
     for command in commands:
         environment = {

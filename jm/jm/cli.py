@@ -39,7 +39,7 @@ class _OperationalError(RuntimeError):
 
 def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
-        prog="jmap",
+        prog="jm",
         description="Apply typed Jev questions to finite input states.",
     )
     commands = parser.add_subparsers(dest="command", required=True)
@@ -158,11 +158,11 @@ def main(
     except SystemExit:
         raise
     except (_UsageError, _OperationalError, PresetError, ValueError) as exc:
-        errors.write(f"jmap: error: {exc}\n")
+        errors.write(f"jm: error: {exc}\n")
         errors.flush()
         return getattr(exc, "exit_code", 64)
     except OSError as exc:
-        errors.write(f"jmap: error: {exc}\n")
+        errors.write(f"jm: error: {exc}\n")
         errors.flush()
         return 2
 
@@ -390,7 +390,7 @@ def _available_presets() -> tuple[Preset, ...]:
     locations = (
         Path.cwd(),
         Path(__file__).with_name("presets"),
-        Path(os.environ.get("JMAP_PRESETS", "~/.config/jmap/presets")).expanduser(),
+        Path(os.environ.get("JM_PRESETS", "~/.config/jm/presets")).expanduser(),
     )
     found: dict[str, Preset] = {}
     for directory in locations:

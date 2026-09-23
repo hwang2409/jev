@@ -1,4 +1,4 @@
-schema: jmap.preset/v1
+schema: jm.preset/v1
 name: jfilter
 version: "1"
 model: typesafe-ai/jev

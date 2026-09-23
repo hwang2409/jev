@@ -12,7 +12,7 @@ import yaml
 
 from .api import GATEWAY_MODEL
 
-SCHEMA = "jmap.preset/v1"
+SCHEMA = "jm.preset/v1"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 RESERVED_QUESTION_IDS = frozenset({"any", "all", "not"})
@@ -329,13 +329,13 @@ def resolve_preset(
         if package_dir is not None
         else Path(__file__).with_name("presets")
     )
-    configured_user_dir = os.environ.get("JMAP_PRESETS")
+    configured_user_dir = os.environ.get("JM_PRESETS")
     if user_dir is not None:
         user = Path(user_dir)
     elif configured_user_dir:
         user = Path(configured_user_dir).expanduser()
     else:
-        user = Path("~/.config/jmap/presets").expanduser()
+        user = Path("~/.config/jm/presets").expanduser()
 
     locations = (search_cwd, builtins, user)
     for directory in locations:

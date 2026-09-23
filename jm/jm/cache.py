@@ -12,7 +12,7 @@ from typing import Any, TextIO
 
 from .answers import JudgeResponse, answer_to_dict, parse_judge_response
 
-CACHE_SCHEMA = "jmap-answer/v1"
+CACHE_SCHEMA = "jm-answer/v1"
 PROTOCOL_VERSION = CACHE_SCHEMA
 _CHUNKING_SHAPES = (
     frozenset({"by", "max_chunks", "limits"}),
@@ -117,8 +117,8 @@ class CacheStore:
     """A local content-addressed store for complete typed answers."""
 
     def __init__(self, root: str | os.PathLike[str] | None = None) -> None:
-        configured = os.environ.get("JMAP_CACHE_DIR")
-        self.root = Path(root or configured or "~/.cache/jmap").expanduser()
+        configured = os.environ.get("JM_CACHE_DIR")
+        self.root = Path(root or configured or "~/.cache/jm").expanduser()
 
     def path_for(self, key: str) -> Path:
         digest = _digest(key)

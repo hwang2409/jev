@@ -7,15 +7,15 @@ import json
 
 import pytest
 
-from jmap.answers import ErrorResponse, JudgeResponse, NoulAnswer, ScoreAnswer
-from jmap.cache import (
+from jm.answers import ErrorResponse, JudgeResponse, NoulAnswer, ScoreAnswer
+from jm.cache import (
     CacheStore,
     build_cache_preimage,
     cache_key,
     canonical_json_bytes,
 )
-from jmap.presets import resolve_preset
-from jmap.runner import FakeJudge, Runner, State, StateLimits
+from jm.presets import resolve_preset
+from jm.runner import FakeJudge, Runner, State, StateLimits
 
 QUESTIONS = {
     "matches_query": {
@@ -50,7 +50,7 @@ def _preimage() -> dict[str, object]:
 def test_cache_key_has_the_exact_canonical_preimage() -> None:
     preimage = _preimage()
     expected = (
-        b'{"cache_schema":"jmap-answer/v1","chunking":{"by":"para",'
+        b'{"cache_schema":"jm-answer/v1","chunking":{"by":"para",'
         b'"context_paragraphs":0,"limits":{"context_field_bytes":4096,'
         b'"focus_bytes":16384,"state_bytes":32768},"max_chunks":512},'
         b'"model":"typesafe-ai/jev",'
@@ -82,7 +82,7 @@ def test_cache_key_ignores_object_insertion_order() -> None:
 def test_each_key_input_perturbation_changes_the_digest() -> None:
     baseline = _preimage()
     paths = [
-        ("cache_schema", "jmap-answer/v2"),
+        ("cache_schema", "jm-answer/v2"),
         ("model", "jev-2.0.0"),
         ("preset", "jfilter"),
         ("preset_version", "2"),
@@ -247,7 +247,7 @@ def test_malformed_and_partial_files_are_cache_misses(tmp_path) -> None:
     entry = store.publish(_preimage(), response)
     path = store.path_for(entry.cache_key)
     payload = json.loads(path.read_text(encoding="utf-8"))
-    payload["cache_schema"] = "jmap-answer/v0"
+    payload["cache_schema"] = "jm-answer/v0"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert store.get(entry.cache_key, QUESTIONS) is None
 
