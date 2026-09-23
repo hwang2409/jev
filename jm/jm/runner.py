@@ -28,7 +28,7 @@ from .answers import (
     SkipSummary,
     TypedResponse,
 )
-from .cache import CacheStore, build_cache_preimage, cache_key
+from .cache import CACHE_SCHEMA, CacheStore, build_cache_preimage, cache_key
 from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
     Preset,
@@ -408,6 +408,7 @@ class Runner:
                     questions=runtime_questions,
                     state=state,
                     limits=runtime_limits if loaded_preset is None else None,
+                    cache_schema=CACHE_SCHEMA,
                 )
                 cached = cache_store.get(cache_key(preimage), runtime_questions)
                 if cached is not None:
@@ -441,7 +442,7 @@ class Runner:
                 and isinstance(response, JudgeResponse)
                 and response.complete
             ):
-                cache_store.publish(preimage, response)
+                cache_store.publish(preimage, response, usage=response.usage)
             return response, state_meta
 
         def write(record: CanonicalRecord, visible: bool = True) -> None:
