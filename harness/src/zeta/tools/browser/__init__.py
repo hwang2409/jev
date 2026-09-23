@@ -7,9 +7,16 @@ from collections.abc import Mapping
 from typing import Any
 from urllib.parse import urlsplit
 
+from ...core.abort import AbortSignal
+from ...core.safety import (
+    BrowserRiskEvidence,
+    SafetyOutcome,
+    browser_action_requires_safety,
+)
 from ...protocol.types import StructuredToolResult
 from ...providers import jev
 from ...routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
+from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
     BrowserError,
@@ -72,7 +79,10 @@ def _adapter_factory(registry: ToolRegistry):
 
 
 async def _browser_navigate(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     url = arguments["url"]
     if not isinstance(url, str) or not _is_absolute_http_url(url):
@@ -81,7 +91,33 @@ async def _browser_navigate(
             "invalid_arguments",
         )
     try:
-        state = await _session(registry).navigate(url)
+        session = _session(registry)
+        current_url = url
+        if session.state is not None:
+            current_url = session.state.observation.url
+        evidence = BrowserRiskEvidence(
+            action="navigate",
+            role="navigation",
+            text=url,
+            current_origin=_origin(current_url) or "",
+            target_url=url,
+            form_action_origin=None,
+            payment_language=False,
+            authentication_language=False,
+            download=False,
+            durable_state_change=False,
+        )
+        if browser_action_requires_safety(evidence):
+            safety_error = await _check_browser_safety(
+                registry,
+                evidence,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+            )
+            if safety_error is not None:
+                return safety_error
+        state = await session.navigate(url)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
     return _state_result(state)
@@ -99,13 +135,25 @@ async def _browser_state(
 
 
 async def _browser_click(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
-    return await _run_element_action(registry, arguments, "click")
+    return await _run_element_action(
+        registry,
+        arguments,
+        "click",
+        abort_signal=abort_signal,
+        execution_context=execution_context,
+    )
 
 
 async def _browser_type(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     return await _run_element_action(
         registry,
@@ -113,21 +161,40 @@ async def _browser_type(
         "type",
         text=arguments.get("text"),
         replace=arguments.get("replace", True),
+        abort_signal=abort_signal,
+        execution_context=execution_context,
     )
 
 
 async def _browser_select(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     return await _run_element_action(
-        registry, arguments, "select", value=arguments.get("value")
+        registry,
+        arguments,
+        "select",
+        value=arguments.get("value"),
+        abort_signal=abort_signal,
+        execution_context=execution_context,
     )
 
 
 async def _browser_submit(
-    registry: ToolRegistry, arguments: dict[str, object]
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
-    return await _run_element_action(registry, arguments, "submit")
+    return await _run_element_action(
+        registry,
+        arguments,
+        "submit",
+        abort_signal=abort_signal,
+        execution_context=execution_context,
+    )
 
 
 async def _run_element_action(
@@ -138,6 +205,8 @@ async def _run_element_action(
     text: object = None,
     replace: object = True,
     value: object = None,
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     try:
         snapshot_id = arguments["snapshot_id"]
@@ -237,6 +306,30 @@ async def _run_element_action(
             role=selected_entry.role,
             affordance=selected_entry.affordance,
         )
+        evidence = BrowserRiskEvidence(
+            action=action,
+            role=element.role,
+            text=" ".join(part for part in (element.text, element.name) if part),
+            current_origin=_origin(current_state.observation.url) or "",
+            target_url=element.target_url,
+            form_action_origin=element.form_action_origin,
+            payment_language=_has_payment_language(element.text, element.name),
+            authentication_language=_has_authentication_language(
+                element.text, element.name
+            ),
+            download=element.download,
+            durable_state_change=element.durable_state_change or action == "submit",
+        )
+        if browser_action_requires_safety(evidence):
+            safety_error = await _check_browser_safety(
+                registry,
+                evidence,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+            )
+            if safety_error is not None:
+                return safety_error
         _action, state = await session.action(
             action,
             element,
@@ -423,6 +516,120 @@ def _element_schema(
 def _is_absolute_http_url(url: str) -> bool:
     parsed = urlsplit(url)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _origin(url: str) -> str | None:
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return None
+    try:
+        port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname.casefold()
+    if port is None or (parsed.scheme == "http" and port == 80) or (
+        parsed.scheme == "https" and port == 443
+    ):
+        return f"{parsed.scheme.casefold()}://{host}"
+    return f"{parsed.scheme.casefold()}://{host}:{port}"
+
+
+def _has_payment_language(*values: str) -> bool:
+    text = " ".join(values).casefold()
+    return any(
+        word in text
+        for word in (
+            "buy",
+            "checkout",
+            "donate",
+            "pay",
+            "payment",
+            "purchase",
+            "subscribe",
+            "transfer",
+        )
+    )
+
+
+def _has_authentication_language(*values: str) -> bool:
+    text = " ".join(values).casefold()
+    return any(
+        word in text
+        for word in (
+            "account",
+            "authenticate",
+            "authentication",
+            "login",
+            "log-in",
+            "password",
+            "permission",
+            "sign-in",
+            "token",
+        )
+    )
+
+
+async def _check_browser_safety(
+    registry: ToolRegistry,
+    evidence: BrowserRiskEvidence,
+    arguments: dict[str, object],
+    *,
+    abort_signal: AbortSignal | None = None,
+    execution_context: ToolExecutionContext | None = None,
+) -> StructuredToolResult | None:
+    safety_tier = registry.safety_tier
+    if safety_tier is None:
+        return _browser_error(
+            "browser safety tier is not configured for this risky action",
+            "safety_denied",
+        )
+    try:
+        outcome = await safety_tier.evaluate_browser_action(evidence)
+    except Exception as exc:  # noqa: BLE001 - safety must fail closed
+        outcome = safety_tier.fail_closed(exc)
+    if outcome.decision == "allow":
+        return None
+    if (
+        outcome.decision == "ask"
+        and registry.approval_policy is not None
+        and abort_signal is not None
+        and execution_context is not None
+    ):
+        gate_result, _execution_signal = await registry._approval_gate.run(
+            execution_context.tool_call,
+            arguments,
+            abort_signal,
+            lambda current: registry._next_abort_generation(current),
+            execution_context.lifecycle_sink,
+            skip_approval=True,
+            safety_outcome=outcome,
+            approval_label=_browser_approval_label(registry, evidence, outcome),
+        )
+        if gate_result is None:
+            return None
+        return _browser_error(gate_result.content, "safety_denied")
+    message = safety_tier.teaching_error(outcome)
+    return _browser_error(message, "safety_denied")
+
+
+def _browser_approval_label(
+    registry: ToolRegistry,
+    evidence: BrowserRiskEvidence,
+    outcome: SafetyOutcome,
+) -> str:
+    safety_tier = registry.safety_tier
+    if safety_tier is None:
+        return "browser action requires approval"
+    details = [
+        f"action={evidence.action}",
+        f"target_text={evidence.text or 'unknown'}",
+    ]
+    if evidence.target_url is not None:
+        details.append(f"destination={evidence.target_url}")
+    if evidence.form_action_origin is not None:
+        details.append(f"form_action={evidence.form_action_origin}")
+    details.append(f"risk_reason={outcome.reason or 'safety_threshold_not_met'}")
+    return f"{safety_tier.approval_label(outcome)}; " + ", ".join(details)
 
 
 def _browser_goal(

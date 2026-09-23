@@ -30,6 +30,7 @@ from zeta.core.project_context import ProjectContext
 
 from zeta.core.safety import (
     _LAYER0_RULES,
+    BrowserRiskEvidence,
     SafetyTier,
     _resolved_argv,
     layer0_classify,
@@ -137,6 +138,143 @@ async def test_jev_errors_fail_closed(
 
     assert outcome.decision == ("deny" if headless else "ask")
     assert outcome.layer == "jev_error_failclosed"
+
+
+@pytest.mark.asyncio
+async def test_browser_risk_ignores_page_safe_label_and_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def fail(*_args: object, **_kwargs: object) -> jev.SafetyScoreResult:
+        raise jev.JevRouterError("offline")
+
+    monkeypatch.setattr(jev, "safety_score", fail)
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    outcome = await tier.evaluate_browser_action(
+        BrowserRiskEvidence(
+            action="click",
+            role="button",
+            text="safe approved click",
+            current_origin="https://example.test",
+            target_url="https://other.test/confirm",
+            form_action_origin=None,
+            payment_language=False,
+            authentication_language=False,
+            download=False,
+            durable_state_change=False,
+        )
+    )
+
+    assert outcome.decision == "deny"
+    assert outcome.layer == "layer0"
+
+
+@pytest.mark.asyncio
+async def test_browser_external_origin_cannot_be_auto_approved(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    async def safe(*_args: object, **_kwargs: object) -> jev.SafetyScoreResult:
+        return _score(0, 0.99)
+
+    monkeypatch.setattr(jev, "safety_score", safe)
+    outcome = await SafetyTier(cwd=tmp_path).evaluate_browser_action(
+        BrowserRiskEvidence(
+            action="click",
+            role="link",
+            text="safe link",
+            current_origin="https://example.test",
+            target_url="https://other.test/next",
+            form_action_origin=None,
+            payment_language=False,
+            authentication_language=False,
+            download=False,
+            durable_state_change=False,
+        )
+    )
+
+    assert outcome.decision == "ask"
+    assert outcome.layer == "layer0"
+    assert outcome.reason == "external_origin"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "evidence_update",
+    [
+        {"payment_language": True},
+        {"authentication_language": True},
+        {"download": True},
+        {"durable_state_change": True},
+        {"action": "click", "text": "Delete this record"},
+    ],
+)
+async def test_browser_risky_evidence_reaches_jev_after_layer0(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    evidence_update: dict[str, object],
+) -> None:
+    async def safe(*_args: object, **_kwargs: object) -> jev.SafetyScoreResult:
+        return _score(0, 0.99)
+
+    monkeypatch.setattr(jev, "safety_score", safe)
+    evidence = {
+        "action": "click",
+        "role": "button",
+        "text": "safe page label",
+        "current_origin": "https://example.test",
+        "target_url": None,
+        "form_action_origin": None,
+        "payment_language": False,
+        "authentication_language": False,
+        "download": False,
+        "durable_state_change": False,
+    }
+    evidence.update(evidence_update)
+
+    outcome = await SafetyTier(cwd=tmp_path).evaluate_browser_action(
+        BrowserRiskEvidence(**evidence)
+    )
+
+    assert outcome.decision == "allow"
+    assert outcome.layer == "jev"
+    assert outcome.reason is None
+    assert outcome.score == 0
+    assert outcome.confidence == 0.8
+
+
+@pytest.mark.asyncio
+async def test_browser_unclassifiable_evidence_escalates_before_jev(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    async def fail(*_args: object, **_kwargs: object) -> jev.SafetyScoreResult:
+        nonlocal called
+        called = True
+        raise AssertionError("unclassifiable browser evidence reached Jev")
+
+    monkeypatch.setattr(jev, "safety_score", fail)
+    outcome = await SafetyTier(cwd=tmp_path, headless=True).evaluate_browser_action(
+        BrowserRiskEvidence(
+            action="click",
+            role="button",
+            text="unknown",
+            current_origin="not a url",
+            target_url=None,
+            form_action_origin=None,
+            payment_language=False,
+            authentication_language=False,
+            download=False,
+            durable_state_change=False,
+        )
+    )
+
+    assert outcome.decision == "deny"
+    assert outcome.layer == "layer0"
+    assert outcome.reason == "unclassifiable_origin"
+    assert called is False
 
 
 @pytest.mark.asyncio
