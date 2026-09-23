@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import string
@@ -31,7 +32,7 @@ _REQUIRED_FIELDS = frozenset(
         "output",
     }
 )
-_OPTIONAL_FIELDS = frozenset({"description"})
+_OPTIONAL_FIELDS = frozenset({"description", "calibration"})
 _OUTPUT_FIELDS = frozenset(
     {
         "record_type",
@@ -142,6 +143,8 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         raise PresetValidationError(f"model must be {GATEWAY_MODEL!r}")
     if "description" in root:
         _string(root["description"], "description")
+    if "calibration" in root:
+        _validate_calibration(root["calibration"])
 
     chunking = _mapping(root["chunking"], "chunking")
     _reject_unknown(
@@ -554,3 +557,49 @@ def _validate_threshold(value: Any, question_id: str, question: Any) -> None:
         raise PresetValidationError(
             f"{field_name}.{field} must be a number from 0 to 1"
         )
+
+
+def _validate_calibration(value: Any) -> None:
+    field_name = "calibration"
+    calibration = _mapping(value, field_name)
+    allowed = {
+        "schema",
+        "threshold_margin",
+        "max_choice_flips",
+        "max_probability_delta",
+        "max_score_delta",
+        "max_noul_delta",
+        "max_threshold_crossings",
+        "repeats",
+    }
+    _reject_unknown(calibration, allowed, field_name)
+    _require_fields(calibration, {"schema"}, field_name)
+    if calibration["schema"] != "jm.calibration/v1":
+        raise PresetValidationError("calibration.schema must be 'jm.calibration/v1'")
+    for name in (
+        "max_choice_flips",
+        "max_threshold_crossings",
+        "repeats",
+    ):
+        if name in calibration:
+            if name == "repeats":
+                _positive_integer(calibration[name], f"{field_name}.{name}")
+            else:
+                _nonnegative_integer(calibration[name], f"{field_name}.{name}")
+    for name in (
+        "threshold_margin",
+        "max_probability_delta",
+        "max_score_delta",
+        "max_noul_delta",
+    ):
+        if name in calibration:
+            amount = calibration[name]
+            if (
+                isinstance(amount, bool)
+                or not isinstance(amount, (int, float))
+                or not math.isfinite(float(amount))
+                or amount < 0
+            ):
+                raise PresetValidationError(
+                    f"{field_name}.{name} must be a finite non-negative number"
+                )

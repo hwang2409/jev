@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
 import sys
 from collections.abc import Callable, Mapping
@@ -12,6 +13,11 @@ from typing import TextIO
 from ._transport import _resolve_gateway_key as resolve_gateway_key
 from .answers import NoulAnswer, ResultRecord, ScoreAnswer
 from .cache import CacheStore
+from .calibrate import (
+    CalibrationTolerances,
+    run_calibration,
+    tolerances_for_preset,
+)
 from .chunkers import chunk_file, chunk_input
 from .client import JevClient
 from .presets import (
@@ -87,6 +93,20 @@ def _parser() -> argparse.ArgumentParser:
         command = cache_commands.add_parser(name, help=f"{name} cached answers")
         command.add_argument("--preset", required=True, help="preset name")
 
+    calibrate = commands.add_parser(
+        "calibrate", help="compare cached answers with the live model"
+    )
+    calibrate.add_argument("--preset", required=True, help="preset name or path")
+    calibrate.add_argument("--cache-dir", type=Path)
+    calibrate.add_argument("--threshold-margin", type=_nonnegative_float)
+    calibrate.add_argument("--max-choice-flips", type=_nonnegative_int)
+    calibrate.add_argument("--max-probability-delta", type=_nonnegative_float)
+    calibrate.add_argument("--max-score-delta", type=_nonnegative_float)
+    calibrate.add_argument("--max-noul-delta", type=_nonnegative_float)
+    calibrate.add_argument("--repeats", type=_positive_int)
+    calibrate.add_argument("--max-threshold-crossings", type=_nonnegative_int)
+    calibrate.add_argument("--format", choices=("jsonl",), default="jsonl")
+
     return parser
 
 
@@ -130,6 +150,16 @@ def _nonnegative_int(value: str) -> int:
     return number
 
 
+def _nonnegative_float(value: str) -> float:
+    try:
+        number = float(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a number") from exc
+    if not math.isfinite(number) or number < 0:
+        raise argparse.ArgumentTypeError("must be a finite non-negative number")
+    return number
+
+
 def main(
     argv: list[str] | None = None,
     *,
@@ -148,6 +178,10 @@ def main(
             return _preset_command(args, output)
         if args.command == "cache":
             return _cache_command(args, output, errors, cache_store)
+        if args.command == "calibrate":
+            return _calibration_command(
+                args, output, errors, judge_fn, cache_store
+            )
         return _judgment_command(
             args,
             stdin or sys.stdin,
@@ -166,6 +200,52 @@ def main(
         errors.write(f"jm: error: {exc}\n")
         errors.flush()
         return 2
+
+
+def _calibration_command(
+    args: argparse.Namespace,
+    stdout: TextIO,
+    stderr: TextIO,
+    judge_fn: Callable[[State, Mapping[str, object], str], object] | None,
+    cache_store: CacheStore | None,
+) -> int:
+    preset = resolve_preset_or_path(args.preset)
+    tolerances = tolerances_for_preset(preset)
+    overrides = {
+        "threshold_margin": args.threshold_margin,
+        "max_choice_flips": args.max_choice_flips,
+        "max_probability_delta": args.max_probability_delta,
+        "max_score_delta": args.max_score_delta,
+        "max_noul_delta": args.max_noul_delta,
+        "max_threshold_crossings": args.max_threshold_crossings,
+        "repeats": args.repeats,
+    }
+    values = tolerances.as_dict()
+    values.update({key: value for key, value in overrides.items() if value is not None})
+    resolved_tolerances = CalibrationTolerances(**values)
+    store = CacheStore(args.cache_dir) if args.cache_dir is not None else cache_store
+    active_store = store or CacheStore()
+    if judge_fn is None and not resolve_gateway_key():
+        raise _OperationalError(
+            "Vercel AI Gateway API key is not set; set it before running calibration"
+        )
+    client = None
+    active_judge = judge_fn
+    if active_judge is None:
+        client = JevClient()
+        active_judge = client
+    try:
+        return run_calibration(
+            preset,
+            active_store,
+            active_judge,
+            stdout=stdout,
+            stderr=stderr,
+            tolerances=resolved_tolerances,
+        )
+    finally:
+        if client is not None:
+            client.close()
 
 
 def _judgment_command(

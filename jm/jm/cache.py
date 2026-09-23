@@ -12,7 +12,8 @@ from typing import Any, TextIO
 
 from .answers import JudgeResponse, answer_to_dict, parse_judge_response
 
-CACHE_SCHEMA = "jm-answer/v1"
+LEGACY_CACHE_SCHEMA = "jm-answer/v1"
+CACHE_SCHEMA = "jm-answer/v2"
 PROTOCOL_VERSION = CACHE_SCHEMA
 _CHUNKING_SHAPES = (
     frozenset({"by", "max_chunks", "limits"}),
@@ -46,6 +47,7 @@ def build_cache_preimage(
     questions: Mapping[str, Any],
     state: Mapping[str, Any] | Any,
     limits: Mapping[str, int] | Any | None = None,
+    cache_schema: str = LEGACY_CACHE_SCHEMA,
 ) -> dict[str, Any]:
     """Build the exact section 6.1 cache-key object."""
     resolved_chunking = _json_value(chunking)
@@ -61,7 +63,7 @@ def build_cache_preimage(
 
     resolved_state = state.payload if hasattr(state, "payload") else state
     return {
-        "cache_schema": CACHE_SCHEMA,
+        "cache_schema": cache_schema,
         "model": model,
         "preset": preset,
         "preset_version": preset_version,
@@ -92,9 +94,10 @@ class CacheEntry:
         return str(self.preimage["preset_version"])
 
     def to_dict(self) -> dict[str, Any]:
+        schema = str(self.preimage.get("cache_schema", LEGACY_CACHE_SCHEMA))
         result: dict[str, Any] = {
             "cache_key": self.cache_key,
-            "cache_schema": CACHE_SCHEMA,
+            "cache_schema": schema,
             "created_at": self.created_at,
             "model": self.model,
             "preset": self.preset,
@@ -104,7 +107,7 @@ class CacheEntry:
                 question_id: answer_to_dict(answer)
                 for question_id, answer in self.response.answers.items()
             },
-            "protocol_version": PROTOCOL_VERSION,
+            "protocol_version": schema,
         }
         if self.usage is not None:
             result["usage"] = self.usage
@@ -143,17 +146,20 @@ class CacheStore:
         *,
         usage: Any = None,
     ) -> CacheEntry:
-        battery = preimage.get("question_battery")
+        write_preimage = dict(preimage)
+        write_preimage["cache_schema"] = CACHE_SCHEMA
+        battery = write_preimage.get("question_battery")
         if not isinstance(battery, Mapping) or set(response.answers) != set(battery):
             raise ValueError("response answer IDs do not match question battery")
         if not response.complete:
             raise ValueError("only complete responses can be cached")
-        key = cache_key(preimage)
+        resolved_usage = response.usage if usage is None else usage
+        key = cache_key(write_preimage)
         entry = CacheEntry(
             key,
-            _json_value(preimage),
+            _json_value(write_preimage),
             response,
-            _json_value(usage) if usage is not None else None,
+            _json_value(resolved_usage) if resolved_usage is not None else None,
             datetime.now(UTC).isoformat(),
         )
         path = self.path_for(key)
@@ -187,6 +193,52 @@ class CacheStore:
                 continue
             if preset is None or entry.preset == preset:
                 yield entry
+
+    def calibration_entries(self, preset: str) -> tuple[CacheEntry, ...]:
+        """Read every valid case for calibration without skipping bad files."""
+        answers_root = self.root / "answers"
+        if not answers_root.exists():
+            return ()
+
+        result: list[CacheEntry] = []
+        seen: set[str] = set()
+        for path in sorted(answers_root.glob("*/*/*.json")):
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(payload, Mapping):
+                    raise ValueError("cache entry must be an object")
+                preimage = payload.get("preimage")
+                payload_preset = payload.get("preset")
+                preimage_preset = (
+                    preimage.get("preset")
+                    if isinstance(preimage, Mapping)
+                    else None
+                )
+                if payload_preset != preset and preimage_preset != preset:
+                    continue
+                expected_key = payload.get("cache_key")
+                if not isinstance(expected_key, str):
+                    raise ValueError("cache entry has no cache key")
+                entry = _parse_entry(payload, expected_key)
+                if entry.preset != preset:
+                    raise ValueError("cache entry has a mixed preset")
+                if entry.cache_key in seen:
+                    raise ValueError("duplicate cache key")
+                seen.add(entry.cache_key)
+                result.append(entry)
+            except (
+                OSError,
+                TypeError,
+                KeyError,
+                ValueError,
+                json.JSONDecodeError,
+            ) as exc:
+                raise ValueError(
+                    f"invalid calibration cache entry {path}: {exc}"
+                ) from exc
+        return tuple(result)
+
+    read_calibration_entries = calibration_entries
 
     def clear(self, preset: str) -> int:
         removed = 0
@@ -248,10 +300,16 @@ def _parse_entry(
     preimage = payload.get("preimage")
     if not isinstance(preimage, Mapping) or cache_key(preimage) != expected_key:
         raise ValueError("cache preimage does not match key")
-    if payload.get("cache_schema") != CACHE_SCHEMA:
+    schema = payload.get("cache_schema")
+    if schema not in {LEGACY_CACHE_SCHEMA, CACHE_SCHEMA}:
         raise ValueError("unknown cache schema")
-    if payload.get("protocol_version") != PROTOCOL_VERSION:
+    if preimage.get("cache_schema") != schema:
+        raise ValueError("cache schema does not match preimage")
+    if payload.get("protocol_version") != schema:
         raise ValueError("unknown cache protocol")
+    for field_name in ("model", "preset", "preset_version"):
+        if field_name in payload and payload[field_name] != preimage.get(field_name):
+            raise ValueError(f"cache {field_name} does not match preimage")
     battery = preimage.get("question_battery")
     if not isinstance(battery, Mapping):
         raise ValueError("cache entry has no question battery")
@@ -263,6 +321,8 @@ def _parse_entry(
     if not response.complete:
         raise ValueError("partial cache entry")
     usage = payload.get("usage")
+    if usage is not None and not isinstance(usage, Mapping):
+        raise ValueError("cache entry has invalid usage")
     created_at = payload.get("created_at")
     if not isinstance(created_at, str):
         raise ValueError("cache entry has no creation time")
@@ -275,6 +335,12 @@ def _parse_entry(
             response.missing_questions,
             served_model=served_model,
         )
+    response = JudgeResponse(
+        response.answers,
+        response.missing_questions,
+        served_model=response.served_model,
+        usage=usage,
+    )
     return CacheEntry(expected_key, dict(preimage), response, usage, created_at)
 
 
