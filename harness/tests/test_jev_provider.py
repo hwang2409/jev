@@ -118,6 +118,23 @@ def browser_choice_response() -> Response:
     )
 
 
+def browser_page_state_response() -> Response:
+    return Response(
+        200,
+        {
+            "answers": {
+                "page_loaded_and_stable": {"noul": 0.9},
+                "goal_element_present": {"noul": 0.8},
+                "action_is_the_next_step": {"noul": 0.7},
+                "action_succeeded": {"noul": 0.6},
+                "dead_end": {"noul": 0.1},
+                "needs_different_approach": {"noul": 0.2},
+            },
+            "usage": {"input_tokens": 16, "output_tokens": 8},
+        },
+    )
+
+
 @pytest.mark.parametrize(
     "payload",
     [
@@ -422,6 +439,99 @@ async def test_browser_choice_wraps_http_timeout(
 
     with pytest.raises(jev.JevRouterError, match="Jev request failed: timed out"):
         await jev.choose_browser_element("continue", "click", {}, [])
+
+
+@pytest.mark.asyncio
+async def test_browser_page_state_request_names_each_gate_state_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    Client.responses = [browser_page_state_response()]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    result = await jev.judge_browser_page_state(
+        "continue checkout",
+        "click",
+        {"page_text": "neutral data", "url": "https://example.test"},
+        [{"element_id": "e17", "affordance": "click", "text": "Continue"}],
+        ["opened checkout"],
+        {"changed_url": True},
+    )
+
+    request = Client.requests[0]["json"]
+    assert request["state"]["action_result"] == {"changed_url": True}
+    questions = request["questions"]
+    assert set(questions) == {
+        "page_loaded_and_stable",
+        "goal_element_present",
+        "action_is_the_next_step",
+        "action_succeeded",
+        "dead_end",
+        "needs_different_approach",
+    }
+    assert questions["page_loaded_and_stable"]["instructions"]["state_fields"] == [
+        "page_state"
+    ]
+    assert questions["goal_element_present"]["instructions"]["state_fields"] == [
+        "page_state",
+        "candidates",
+    ]
+    assert questions["action_succeeded"]["instructions"]["state_fields"] == [
+        "goal",
+        "action",
+        "page_state",
+        "action_result",
+        "recent_actions",
+    ]
+    assert result.action_succeeded == 0.6
+    assert result.dead_end == 0.1
+    assert result.needs_different_approach == 0.2
+    assert result.call_confidence == pytest.approx(0.2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("response", "expected_message"),
+    [
+        (Response(200, {"answers": {}}), "invalid Jev browser page-state response"),
+        (Response(500), "HTTP 500"),
+    ],
+)
+async def test_browser_page_state_maps_malformed_and_api_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    response: Response,
+    expected_message: str,
+) -> None:
+    Client.responses = [response]
+    Client.requests = []
+    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    with pytest.raises(jev.JevRouterError, match=expected_message):
+        await jev.judge_browser_page_state("continue", "click", {}, [])
+
+
+@pytest.mark.asyncio
+async def test_browser_page_state_maps_timeout_as_a_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TimeoutClient(Client):
+        async def post(self, _url: str, **_kwargs: Any) -> Response:
+            raise jev.httpx.ReadTimeout("timed out")
+
+    monkeypatch.setattr(jev.httpx, "AsyncClient", TimeoutClient)
+    monkeypatch.setenv("JEV_API_KEY", "test-key")
+
+    with pytest.raises(jev.JevRouterError, match="Jev request failed: timed out"):
+        await jev.judge_browser_page_state("continue", "click", {}, [])
+
+
+def test_parse_browser_page_state_response_rejects_missing_or_out_of_range_gate() -> None:
+    with pytest.raises(jev.JevRouterError, match="invalid Jev browser page-state response"):
+        jev.parse_browser_page_state_response(
+            {"answers": {"page_loaded_and_stable": {"noul": 2.0}}}
+        )
 
 
 @pytest.mark.asyncio

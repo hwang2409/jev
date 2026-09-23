@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from zeta.tools.browser.gates import PageStateDecision, evaluate_page_state
+from zeta.providers import jev
+from zeta.tools.browser.gates import (
+    PageStateDecision,
+    conservative_provider_error_decision,
+    evaluate_page_state,
+    evaluate_page_state_with_provider,
+)
 
 
 @pytest.mark.parametrize(
@@ -124,3 +130,107 @@ def test_page_state_allows_a_clear_action_without_post_action_evidence() -> None
         deterministic_loaded=True,
         deterministic_attached=True,
     ) == PageStateDecision(True, None, None)
+
+
+@pytest.mark.parametrize(
+    ("action_succeeded", "expected"),
+    [
+        (0.1, PageStateDecision(True, "state", None)),
+        (0.3, PageStateDecision(True, "state", None)),
+        (0.5, PageStateDecision(True, "state", None)),
+        (0.7, PageStateDecision(True, "state", None)),
+        (0.9, PageStateDecision(True, None, None)),
+    ],
+)
+def test_action_failure_or_uncertainty_requests_a_fresh_state(
+    action_succeeded: float, expected: PageStateDecision
+) -> None:
+    assert evaluate_page_state(
+        page_loaded_and_stable=0.9,
+        goal_element_present=0.9,
+        action_is_the_next_step=0.9,
+        action_succeeded=action_succeeded,
+        dead_end=None,
+        needs_different_approach=None,
+        deterministic_loaded=True,
+        deterministic_attached=True,
+    ) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            jev.JevRouterError("Jev request failed: timed out"),
+            PageStateDecision(False, "observe", "page_load_failed"),
+        ),
+        (
+            jev.JevRouterError("invalid Jev browser page-state response"),
+            PageStateDecision(False, "observe", "page_load_failed"),
+        ),
+        (
+            jev.JevRouterError("Jev request failed with HTTP 500", status_code=500),
+            PageStateDecision(False, "observe", "page_load_failed"),
+        ),
+    ],
+)
+async def test_provider_errors_take_the_conservative_page_load_direction(
+    error: jev.JevRouterError, expected: PageStateDecision
+) -> None:
+    async def fail(**_kwargs: object) -> jev.BrowserPageStateResult:
+        raise error
+
+    assert await evaluate_page_state_with_provider(
+        goal="continue",
+        action="click",
+        page_state={},
+        candidates=[],
+        deterministic_loaded=True,
+        deterministic_attached=True,
+        provider=fail,
+    ) == expected
+
+
+@pytest.mark.asyncio
+async def test_provider_result_drives_all_page_state_gates() -> None:
+    async def judge(**_kwargs: object) -> jev.BrowserPageStateResult:
+        return jev.BrowserPageStateResult(
+            page_loaded_and_stable=0.9,
+            goal_element_present=0.9,
+            action_is_the_next_step=0.9,
+            action_succeeded=0.1,
+            dead_end=0.1,
+            needs_different_approach=0.1,
+            usage={},
+            call_confidence=0.8,
+        )
+
+    assert await evaluate_page_state_with_provider(
+        goal="continue",
+        action="click",
+        page_state={},
+        candidates=[],
+        deterministic_loaded=True,
+        deterministic_attached=True,
+        provider=judge,
+    ) == PageStateDecision(True, "state", None)
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected"),
+    [
+        ("page_loaded_and_stable", PageStateDecision(False, "observe", "page_load_failed")),
+        ("goal_element_present", PageStateDecision(False, "state", "goal_element_absent")),
+        ("action_is_the_next_step", PageStateDecision(False, "state", "action_not_next_step")),
+        ("action_succeeded", PageStateDecision(True, "state", None)),
+        ("dead_end", PageStateDecision(False, "stop", "dead_end")),
+        ("needs_different_approach", PageStateDecision(False, "reroute", "different_approach")),
+    ],
+)
+def test_provider_failure_maps_each_gate_to_its_safe_direction(
+    gate: str, expected: PageStateDecision
+) -> None:
+    assert conservative_provider_error_decision(
+        gate, jev.JevRouterError("provider failure")
+    ) == expected
