@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import io
 import json
+import os
 from datetime import date
 from pathlib import Path
 
 import pytest
 
+import jm.cache as cache_module
 from jm.answers import (
     ChoiceAnswer,
     ErrorResponse,
@@ -38,7 +40,7 @@ def _seed_preset(
     *,
     state_ref: str = "case#1",
 ) -> CacheStore:
-    store = CacheStore(tmp_path)
+    store = CacheStore(tmp_path / "cache")
     preimage = build_cache_preimage(
         model=preset.model,
         preset=preset.name,
@@ -918,6 +920,144 @@ def test_cache_path_digest_mismatch_fails_before_live_calls(tmp_path: Path) -> N
     wrong_path.parent.mkdir(parents=True, exist_ok=True)
     path.rename(wrong_path)
 
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def _rewrite_cache_entry(store: CacheStore, mutate) -> Path:
+    path = next(store.root.rglob("*.json"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    mutate(payload)
+    key = cache_key(payload["preimage"])
+    payload["cache_key"] = key
+    new_path = store.path_for(key)
+    new_path.parent.mkdir(parents=True, exist_ok=True)
+    path.unlink()
+    new_path.write_text(json.dumps(payload), encoding="utf-8")
+    return new_path
+
+
+@pytest.mark.parametrize("missing", ("model", "preset_version"))
+def test_missing_preimage_identity_fields_fail_before_live_calls(
+    tmp_path: Path, missing: str
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+
+    def mutate(payload: dict[str, object]) -> None:
+        del payload["preimage"][missing]
+        del payload[missing]
+
+    _rewrite_cache_entry(store, mutate)
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, stderr = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+    assert "traceback" not in stderr.lower()
+
+
+def test_digest_rebuilt_entry_missing_chunking_fails_before_live_calls(
+    tmp_path: Path,
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    _rewrite_cache_entry(store, lambda payload: payload["preimage"].pop("chunking"))
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def test_unknown_preimage_field_fails_before_live_calls(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    _rewrite_cache_entry(
+        store, lambda payload: payload["preimage"].update({"future": True})
+    )
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def test_unreadable_digest_directory_fails_before_live_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    blocked = next(store.root.rglob("*.json")).parent
+    original_scandir = os.scandir
+
+    def scandir(path):
+        if Path(path) == blocked:
+            raise PermissionError("permission denied")
+        return original_scandir(path)
+
+    monkeypatch.setattr(cache_module.os, "scandir", scandir)
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, stderr = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+    assert "permission denied" in stderr
+
+
+def test_orphan_cache_file_fails_before_live_calls(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    (store.root / "answers" / "orphan.json").write_text("{}", encoding="utf-8")
     calls = 0
 
     def judge(*_args):

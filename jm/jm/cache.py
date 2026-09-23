@@ -20,6 +20,31 @@ _CHUNKING_SHAPES = (
     frozenset({"by", "context_paragraphs", "max_chunks", "limits"}),
     frozenset({"by", "context_lines", "max_chunks", "limits"}),
 )
+_CACHE_PREIMAGE_FIELDS = frozenset(
+    {
+        "cache_schema",
+        "model",
+        "preset",
+        "preset_version",
+        "chunking",
+        "question_battery",
+        "state",
+    }
+)
+_CACHE_ENTRY_REQUIRED_FIELDS = frozenset(
+    {
+        "cache_key",
+        "cache_schema",
+        "created_at",
+        "model",
+        "preset",
+        "preset_version",
+        "preimage",
+        "answers",
+        "protocol_version",
+    }
+)
+_CACHE_ENTRY_OPTIONAL_FIELDS = frozenset({"usage", "served_model"})
 
 
 def canonical_json_bytes(value: Any) -> bytes:
@@ -196,13 +221,9 @@ class CacheStore:
 
     def calibration_entries(self, preset: str) -> tuple[CacheEntry, ...]:
         """Read every valid case for calibration without skipping bad files."""
-        answers_root = self.root / "answers"
-        if not answers_root.exists():
-            return ()
-
         result: list[CacheEntry] = []
         seen: set[str] = set()
-        for path in sorted(answers_root.glob("*/*/*.json")):
+        for path in self._calibration_paths():
             try:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, Mapping):
@@ -240,6 +261,41 @@ class CacheStore:
                     f"invalid calibration cache entry {path}: {exc}"
                 ) from exc
         return tuple(result)
+
+    def _calibration_paths(self) -> tuple[Path, ...]:
+        root_entries = _scan_directory(self.root, missing_ok=True)
+        if not root_entries:
+            return ()
+        if len(root_entries) != 1 or root_entries[0].name != "answers":
+            raise ValueError(f"unexpected path in calibration cache: {self.root}")
+
+        answers_entry = root_entries[0]
+        if not _is_directory(answers_entry):
+            raise ValueError("calibration cache answers path is not a directory")
+        first_level = _scan_directory(self.root / "answers")
+        paths: list[Path] = []
+        for first_entry in first_level:
+            if not _is_directory(first_entry) or not _is_shard(first_entry.name):
+                raise ValueError(
+                    f"unexpected path in calibration cache: {first_entry.path}"
+                )
+            second_level = _scan_directory(Path(first_entry.path))
+            for second_entry in second_level:
+                if not _is_directory(second_entry) or not _is_shard(
+                    second_entry.name
+                ):
+                    raise ValueError(
+                        f"unexpected path in calibration cache: {second_entry.path}"
+                    )
+                for file_entry in _scan_directory(Path(second_entry.path)):
+                    if not _is_file(file_entry) or not _is_digest_filename(
+                        file_entry.name
+                    ):
+                        raise ValueError(
+                            f"unexpected path in calibration cache: {file_entry.path}"
+                        )
+                    paths.append(Path(file_entry.path))
+        return tuple(sorted(paths))
 
     read_calibration_entries = calibration_entries
 
@@ -298,20 +354,30 @@ def _parse_entry(
 ) -> CacheEntry:
     if not isinstance(payload, Mapping):
         raise ValueError("cache entry must be an object")
+    unknown_fields = set(payload) - (
+        _CACHE_ENTRY_REQUIRED_FIELDS | _CACHE_ENTRY_OPTIONAL_FIELDS
+    )
+    if unknown_fields or not _CACHE_ENTRY_REQUIRED_FIELDS <= set(payload):
+        raise ValueError("cache entry has an invalid field set")
     if payload.get("cache_key") != expected_key:
         raise ValueError("cache key does not match path")
     preimage = payload.get("preimage")
-    if not isinstance(preimage, Mapping) or cache_key(preimage) != expected_key:
-        raise ValueError("cache preimage does not match key")
+    if not isinstance(preimage, Mapping):
+        raise ValueError("cache preimage must be an object")
+    if set(preimage) != _CACHE_PREIMAGE_FIELDS:
+        raise ValueError("cache preimage has an invalid field set")
     schema = payload.get("cache_schema")
     if schema not in {LEGACY_CACHE_SCHEMA, CACHE_SCHEMA}:
         raise ValueError("unknown cache schema")
-    if preimage.get("cache_schema") != schema:
+    _validate_preimage(preimage, schema)
+    if cache_key(preimage) != expected_key:
+        raise ValueError("cache preimage does not match key")
+    if payload["cache_schema"] != schema or preimage["cache_schema"] != schema:
         raise ValueError("cache schema does not match preimage")
     if payload.get("protocol_version") != schema:
         raise ValueError("unknown cache protocol")
     for field_name in ("model", "preset", "preset_version"):
-        if field_name in payload and payload[field_name] != preimage.get(field_name):
+        if payload[field_name] != preimage[field_name]:
             raise ValueError(f"cache {field_name} does not match preimage")
     battery = preimage.get("question_battery")
     if not isinstance(battery, Mapping):
@@ -345,6 +411,107 @@ def _parse_entry(
         usage=usage,
     )
     return CacheEntry(expected_key, dict(preimage), response, usage, created_at)
+
+
+def _validate_preimage(preimage: Mapping[str, Any], schema: str) -> None:
+    if preimage["cache_schema"] != schema:
+        raise ValueError("cache schema does not match preimage")
+    for field_name in ("model", "preset", "preset_version"):
+        value = preimage[field_name]
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"cache preimage has an invalid {field_name}")
+
+    chunking = preimage["chunking"]
+    if not isinstance(chunking, Mapping) or frozenset(chunking) not in _CHUNKING_SHAPES:
+        raise ValueError("cache preimage has invalid chunking")
+    if not isinstance(chunking["by"], str) or not chunking["by"]:
+        raise ValueError("cache preimage has invalid chunking.by")
+    for field_name in ("context_paragraphs", "context_lines", "max_chunks"):
+        if field_name in chunking and not _nonnegative_int(chunking[field_name]):
+            raise ValueError(f"cache preimage has invalid chunking.{field_name}")
+    limits = chunking["limits"]
+    if not isinstance(limits, Mapping) or set(limits) != {
+        "focus_bytes",
+        "context_field_bytes",
+        "state_bytes",
+    }:
+        raise ValueError("cache preimage has invalid chunking limits")
+    if any(not _positive_int(limits[name]) for name in limits):
+        raise ValueError("cache preimage has invalid chunking limits")
+
+    battery = preimage["question_battery"]
+    if not isinstance(battery, Mapping) or any(
+        not isinstance(question_id, str)
+        or not isinstance(question, Mapping)
+        or not isinstance(question.get("type"), str)
+        for question_id, question in battery.items()
+    ):
+        raise ValueError("cache preimage has an invalid question battery")
+
+    state = preimage["state"]
+    if not isinstance(state, Mapping) or set(state) != {"focus", "context"}:
+        raise ValueError("cache preimage has an invalid state")
+    if not isinstance(state["focus"], str) or not isinstance(
+        state["context"], Mapping
+    ):
+        raise ValueError("cache preimage has an invalid state")
+    state_ref = state["context"].get("state_ref")
+    if not isinstance(state_ref, str) or not state_ref:
+        raise ValueError("cache preimage has an invalid state reference")
+
+
+def _nonnegative_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _positive_int(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _scan_directory(
+    path: Path, *, missing_ok: bool = False
+) -> tuple[os.DirEntry[str], ...]:
+    try:
+        with os.scandir(path) as entries:
+            return tuple(sorted(entries, key=lambda entry: entry.name))
+    except FileNotFoundError:
+        if missing_ok:
+            return ()
+        raise ValueError(f"calibration cache directory disappeared: {path}") from None
+    except OSError as exc:
+        raise ValueError(
+            f"cannot read calibration cache directory {path}: {exc}"
+        ) from exc
+
+
+def _is_directory(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot inspect calibration cache path {entry.path}: {exc}"
+        ) from exc
+
+
+def _is_file(entry: os.DirEntry[str]) -> bool:
+    try:
+        return entry.is_file(follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError(
+            f"cannot inspect calibration cache path {entry.path}: {exc}"
+        ) from exc
+
+
+def _is_shard(name: str) -> bool:
+    return len(name) == 2 and all(character in "0123456789abcdef" for character in name)
+
+
+def _is_digest_filename(name: str) -> bool:
+    return (
+        len(name) == 69
+        and name.endswith(".json")
+        and all(character in "0123456789abcdef" for character in name[:-5])
+    )
 
 
 def _digest(key: str) -> str:
