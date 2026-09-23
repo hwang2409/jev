@@ -10,6 +10,8 @@ from typing import Any
 
 import httpx
 
+from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
+
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
 _MAX_ATTEMPTS = 3
@@ -87,6 +89,7 @@ class SafetyScoreResult:
 class BrowserElementChoiceResult:
     element_id: str | None
     affordance: str | None
+    candidate_ids: tuple[str, ...]
     probabilities: dict[str, float]
     confidence: float
     goal_element_present: float
@@ -94,6 +97,92 @@ class BrowserElementChoiceResult:
     action_is_the_next_step: float
     usage: dict[str, int]
     call_confidence: float
+
+
+def _element_description(item: dict[str, object]) -> str:
+    role = item.get("role")
+    affordance = item.get("affordance")
+    text = item.get("text")
+    name = item.get("name")
+    value_hint = item.get("value_hint")
+    landmark = item.get("landmark")
+    details = [str(role) if isinstance(role, str) and role else "element"]
+    if isinstance(affordance, str) and affordance:
+        details.append(f"supports {affordance}")
+    label = next(
+        (
+            value
+            for value in (text, name, value_hint)
+            if isinstance(value, str) and value
+        ),
+        None,
+    )
+    if label is not None:
+        details.append(f"labelled {label!r}")
+    if isinstance(name, str) and name and name != label:
+        details.append(f"named {name!r}")
+    if isinstance(landmark, str) and landmark:
+        details.append(f"in the {landmark} landmark")
+    if item.get("disabled") is True:
+        details.append("disabled")
+    if item.get("visible") is False:
+        details.append("hidden")
+    return " ".join(details)
+
+
+def _element_examples(item: dict[str, object]) -> list[str]:
+    affordance = item.get("affordance")
+    label = next(
+        (
+            value
+            for key in ("text", "name", "value_hint")
+            for value in [item.get(key)]
+            if isinstance(value, str) and value
+        ),
+        "this element",
+    )
+    subject = f"the {label} element"
+    examples_by_affordance = {
+        "click": [f"Click {subject}.", f"Use {subject} to continue."],
+        "submit": [f"Submit with {subject}.", f"Send the form using {subject}."],
+        "type": [f"Type into {subject}.", f"Enter text in {subject}."],
+        "select": [f"Select an option in {subject}."],
+        "extract": [f"Read the content from {subject}."],
+    }
+    examples = examples_by_affordance.get(str(affordance), [f"Use {subject}."])
+    return list(examples)
+
+
+def _browser_element_criteria(
+    candidates: list[dict[str, object]],
+) -> dict[str, dict[str, object]]:
+    descriptions = {
+        item["element_id"]: _element_description(item)
+        for item in candidates
+        if isinstance(item.get("element_id"), str)
+    }
+    criteria: dict[str, dict[str, object]] = {}
+    for item in candidates:
+        element_id = item.get("element_id")
+        if not isinstance(element_id, str):
+            continue
+        siblings = [
+            f"{sibling_id}: {description}"
+            for sibling_id, description in descriptions.items()
+            if sibling_id != element_id
+        ]
+        not_for = (
+            "Choose a different catalog element when it matches better: "
+            + "; ".join(siblings)
+            if siblings
+            else "Choose a different catalog element only when this one does not match."
+        )
+        criteria[element_id] = {
+            "what": _element_description(item),
+            "not_for": not_for,
+            "examples": _element_examples(item),
+        }
+    return criteria
 
 
 def build_request(
@@ -247,11 +336,7 @@ def build_browser_element_request(
                         "state fields."
                     ),
                 },
-                "criteria": {
-                    item["element_id"]: item
-                    for item in candidates
-                    if isinstance(item.get("element_id"), str)
-                },
+                "criteria": _browser_element_criteria(candidates),
             },
             "goal_element_present": {
                 "type": "noul",
@@ -367,9 +452,28 @@ def parse_browser_element_response(
         usage = data.get("usage", {})
         if not isinstance(usage, dict):
             raise TypeError("usage must be an object")
+        ranked_candidate_ids = tuple(
+            element_id
+            for element_id, _probability in sorted(
+                (
+                    (candidate_id, probabilities.get(candidate_id, 0.0))
+                    for candidate_id in candidate_by_id
+                ),
+                key=lambda item: -item[1],
+            )[:BROWSER_ELEMENT_TOPN]
+        )
+        if confidence >= BROWSER_ELEMENT_TOP1_CONFIDENCE:
+            candidate_ids = (
+                (element_id,) if element_id in candidate_by_id else ()
+            )
+            selected_element_id = element_id
+        else:
+            candidate_ids = ranked_candidate_ids
+            selected_element_id = None
         return BrowserElementChoiceResult(
-            element_id=element_id,
-            affordance=affordance,
+            element_id=selected_element_id,
+            affordance=affordance if selected_element_id is not None else None,
+            candidate_ids=candidate_ids,
             probabilities=probabilities,
             confidence=confidence,
             goal_element_present=nouls[0],
@@ -797,6 +901,8 @@ async def triage(
 
 __all__ = [
     "API_URL",
+    "BROWSER_ELEMENT_TOP1_CONFIDENCE",
+    "BROWSER_ELEMENT_TOPN",
     "MODEL",
     "AutoRouteResult",
     "BrowserElementChoiceResult",

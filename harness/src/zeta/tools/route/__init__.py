@@ -7,6 +7,7 @@ from typing import Any, TypedDict
 
 from ...runtime.execution import ToolExecutionContext
 from ...providers.jev import route_step
+from ...routing import ROUTE_TOPK_CONFIDENCE
 from ...protocol.types import StructuredToolResult
 from ..calendar import catalog_criteria
 from ..memory import catalog_criteria as memory_catalog_criteria
@@ -17,8 +18,6 @@ class RouteArguments(TypedDict):
     step: str
 
 
-ROUTE_TOPK_CONFIDENCE = 0.8
-"""Choice cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
 # TODO: calibrate this Choice threshold with route confidence data.
 
 LOW_CLARITY_NUDGE = 0.3
