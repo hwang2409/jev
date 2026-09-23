@@ -14,6 +14,7 @@ import yaml
 from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
 
 SCHEMA = "jm.preset/v1"
+SCHEMA_V2 = "jm.preset/v2"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 RESERVED_QUESTION_IDS = frozenset({"any", "all", "not"})
@@ -33,6 +34,9 @@ _REQUIRED_FIELDS = frozenset(
     }
 )
 _OPTIONAL_FIELDS = frozenset({"description", "calibration"})
+_PREFILTER_FIELDS = frozenset(
+    {"ranker", "top", "query_source", "fields", "query"}
+)
 _OUTPUT_FIELDS = frozenset(
     {
         "record_type",
@@ -101,6 +105,10 @@ class Preset:
         return str(self.data["name"])
 
     @property
+    def schema(self) -> str:
+        return str(self.data["schema"])
+
+    @property
     def version(self) -> str:
         return str(self.data["version"])
 
@@ -117,6 +125,11 @@ class Preset:
         return self.data["questions"]
 
     @property
+    def prefilter(self) -> Mapping[str, Any] | None:
+        value = self.data.get("prefilter")
+        return value if isinstance(value, Mapping) else None
+
+    @property
     def compatible_chunkers(self) -> tuple[str, ...]:
         return tuple(self.data["compatible_chunkers"])
 
@@ -129,13 +142,19 @@ class Preset:
 
 
 def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
-    """Validate and return one decoded v1 preset mapping."""
+    """Validate and return one decoded preset mapping."""
     root = _mapping(data, "preset")
-    _reject_unknown(root, _REQUIRED_FIELDS | _OPTIONAL_FIELDS, "preset")
+    schema = root.get("schema")
+    allowed_fields = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
+    if schema == SCHEMA_V2:
+        allowed_fields |= {"prefilter"}
+    _reject_unknown(root, allowed_fields, "preset")
     _require_fields(root, _REQUIRED_FIELDS, "preset")
 
-    if root["schema"] != SCHEMA:
-        raise PresetValidationError(f"schema must be {SCHEMA!r}")
+    if root["schema"] not in {SCHEMA, SCHEMA_V2}:
+        raise PresetValidationError(
+            f"schema must be {SCHEMA!r} or {SCHEMA_V2!r}"
+        )
     _string(root["name"], "name")
     _string(root["version"], "version")
     model = _string(root["model"], "model")
@@ -200,6 +219,13 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             )
         _validate_question(question, question_id)
 
+    if "prefilter" in root:
+        if schema != SCHEMA_V2:
+            raise PresetValidationError(
+                f"prefilter requires schema {SCHEMA_V2!r}"
+            )
+        _validate_prefilter(root["prefilter"], questions)
+
     thresholds = _mapping(root["thresholds"], "thresholds")
     for question_id, threshold in thresholds.items():
         if question_id not in questions:
@@ -223,6 +249,58 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
 
     return root
+
+
+def _validate_prefilter(
+    value: Any, questions: Mapping[str, Any]
+) -> None:
+    prefilter = _mapping(value, "prefilter")
+    _reject_unknown(prefilter, _PREFILTER_FIELDS, "prefilter")
+    _require_fields(
+        prefilter,
+        {"ranker", "top", "query_source", "fields"},
+        "prefilter",
+    )
+    if prefilter["ranker"] != "bm25":
+        raise PresetValidationError("prefilter.ranker must be 'bm25'")
+    _positive_integer(prefilter["top"], "prefilter.top")
+    query_source = _string(prefilter["query_source"], "prefilter.query_source")
+    if query_source not in {
+        "cli",
+        "context.query",
+        "context.predicate",
+        "literal",
+    }:
+        raise PresetValidationError(
+            "prefilter.query_source must be one of cli, context.query, "
+            "context.predicate, literal"
+        )
+    fields = _string_list(prefilter["fields"], "prefilter.fields")
+    if not fields:
+        raise PresetValidationError("prefilter.fields must not be empty")
+    if len(set(fields)) != len(fields):
+        raise PresetValidationError("prefilter.fields must not contain duplicates")
+    battery_fields = {
+        field
+        for question in questions.values()
+        for field in question["instructions"]["state_fields"]
+    }
+    unknown_fields = set(fields) - battery_fields
+    if unknown_fields:
+        raise PresetValidationError(
+            "prefilter.fields contains fields not in state_fields: "
+            f"{sorted(unknown_fields)}"
+        )
+    if query_source == "literal":
+        if "query" not in prefilter:
+            raise PresetValidationError(
+                "prefilter.query is required for literal query_source"
+            )
+        _string(prefilter["query"], "prefilter.query")
+    elif "query" in prefilter:
+        raise PresetValidationError(
+            "prefilter.query is only valid for literal query_source"
+        )
 
 
 def _validate_pretty_template(
@@ -373,6 +451,137 @@ def check_chunker_compatibility(
 ) -> str:
     """Compatibility alias for resolve_chunker."""
     return resolve_chunker(preset, by)
+
+
+def resolve_prefilter(
+    preset: Preset,
+    *,
+    command: str,
+    ranker: str | None = None,
+    top: int | None = None,
+    fields: str | None = None,
+    query: str | None = None,
+    invocation_query: str | None = None,
+    invocation_predicate: str | None = None,
+) -> dict[str, Any] | None:
+    """Resolve preset and explicit prefilter values."""
+    supplied = any(value is not None for value in (ranker, top, fields, query))
+    declared = preset.prefilter
+    if declared is None and not supplied:
+        return None
+    if ranker is None:
+        if declared is None:
+            raise PresetUsageError(
+                "prefilter options require --prefilter bm25"
+            )
+        effective_ranker = declared["ranker"]
+    else:
+        effective_ranker = ranker
+    if effective_ranker != "bm25":
+        raise PresetUsageError("--prefilter must be bm25")
+
+    if declared is None and preset.name == "diff-risk-heat":
+        raise PresetUsageError(
+            "diff-risk-heat requires a preset-declared review query"
+        )
+    if declared is None and fields is None:
+        raise PresetUsageError(
+            "--prefilter-fields is required without a preset prefilter"
+        )
+
+    resolved_top = top if top is not None else declared["top"] if declared else None
+    if (
+        resolved_top is None
+        or isinstance(resolved_top, bool)
+        or not isinstance(resolved_top, int)
+        or resolved_top <= 0
+    ):
+        raise PresetUsageError("prefilter top must be a positive integer")
+
+    if fields is not None:
+        resolved_fields = [item.strip() for item in fields.split(",")]
+        if not resolved_fields or any(not item for item in resolved_fields):
+            raise PresetUsageError("prefilter fields must not be empty")
+        if len(set(resolved_fields)) != len(resolved_fields):
+            raise PresetUsageError("prefilter fields must not contain duplicates")
+    else:
+        resolved_fields = list(declared["fields"]) if declared else []
+
+    battery_fields = {
+        field
+        for question in preset.questions.values()
+        for field in question["instructions"]["state_fields"]
+    }
+    unknown_fields = set(resolved_fields) - battery_fields
+    if unknown_fields:
+        raise PresetUsageError(
+            "prefilter fields are not in state_fields: "
+            f"{sorted(unknown_fields)}"
+        )
+    if not resolved_fields:
+        raise PresetUsageError("prefilter fields must not be empty")
+
+    if query is not None:
+        if not query.strip():
+            raise PresetUsageError("--prefilter-query must not be empty")
+        query_source = "cli"
+        resolved_query = query
+    elif declared is not None:
+        query_source = declared["query_source"]
+        resolved_query = declared.get("query")
+    else:
+        if command == "jgrep":
+            query_source = "context.query"
+            resolved_query = None
+        elif command == "jfilter":
+            query_source = "context.predicate"
+            resolved_query = None
+        else:
+            raise PresetUsageError(
+                "--prefilter-query is required without a preset query"
+            )
+
+    if query_source == "cli":
+        if not isinstance(resolved_query, str) or not resolved_query.strip():
+            raise PresetUsageError("--prefilter-query is required")
+    elif query_source == "context.query":
+        if not isinstance(invocation_query, str) or not invocation_query.strip():
+            raise PresetUsageError(
+                "prefilter query_source context.query requires --query"
+            )
+        resolved_query = invocation_query
+    elif query_source == "context.predicate":
+        if (
+            not isinstance(invocation_predicate, str)
+            or not invocation_predicate.strip()
+        ):
+            raise PresetUsageError(
+                "prefilter query_source context.predicate requires --predicate"
+            )
+        resolved_query = invocation_predicate
+    elif query_source == "literal":
+        if not isinstance(resolved_query, str) or not resolved_query.strip():
+            raise PresetUsageError("literal prefilter query must not be empty")
+    else:
+        raise PresetUsageError(f"unknown prefilter query source: {query_source}")
+
+    if preset.name == "diff-risk-heat" and (
+        declared is None or declared.get("query_source") != "literal"
+    ):
+        raise PresetUsageError(
+            "diff-risk-heat requires a preset-declared review query"
+        )
+
+    if command == "gate":
+        raise PresetUsageError("gate does not support prefiltering")
+
+    return {
+        "ranker": effective_ranker,
+        "top": resolved_top,
+        "query_source": query_source,
+        "fields": tuple(resolved_fields),
+        "query": resolved_query,
+    }
 
 
 def _candidate_paths(directory: Path, identifier: str) -> tuple[Path, ...]:

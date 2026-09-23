@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
+import re
 import string
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +33,7 @@ from .answers import (
 from .cache import CACHE_SCHEMA, CacheStore, build_cache_preimage, cache_key
 from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
 from .presets import (
+    SCHEMA_V2,
     Preset,
     PresetUsageError,
     resolve_preset,
@@ -103,6 +106,12 @@ class StateLimitError(ValueError):
     """A formed state exceeds a configured byte limit."""
 
 
+class StateInputError(ValueError):
+    """A formed input cannot be judged safely."""
+
+    exit_code = 2
+
+
 @dataclass(frozen=True, slots=True)
 class StateRejection:
     state_ref: str | None
@@ -112,7 +121,12 @@ class StateRejection:
     boundary: str | None = None
 
     def __post_init__(self) -> None:
-        if self.reason not in {"scan_cap", "context_limit", "input_error"}:
+        if self.reason not in {
+            "scan_cap",
+            "context_limit",
+            "input_error",
+            "prefiltered",
+        }:
             raise ValueError(f"unknown rejection reason: {self.reason}")
         if self.reason == "input_error":
             if not self.source_ref:
@@ -156,6 +170,7 @@ class StateAdmission:
     skipped: tuple[State, ...]
     max_chunks: int | None = None
     rejections: tuple[StateRejection, ...] = ()
+    skip_rejections: tuple[StateRejection, ...] = ()
 
     @property
     def discovered(self) -> int:
@@ -178,7 +193,11 @@ class StateAdmission:
 
     @property
     def skip_boundary(self) -> str | None:
-        if not self.skipped or self.max_chunks is None:
+        if not self.skipped:
+            return None
+        if self.skip_rejections:
+            return self.skip_rejections[0].boundary
+        if self.max_chunks is None:
             return None
         return f"max_chunks={self.max_chunks}"
 
@@ -196,7 +215,11 @@ def admit_states(
     max_chunks: int | None = None,
     rejections: Sequence[StateRejection] = (),
 ) -> StateAdmission:
-    if max_chunks is not None and max_chunks < 0:
+    if (
+        max_chunks is not None
+        and (isinstance(max_chunks, bool) or not isinstance(max_chunks, int)
+             or max_chunks < 0)
+    ):
         raise ValueError("max_chunks must be non-negative")
     formed = tuple(states)
     if max_chunks is None:
@@ -209,6 +232,51 @@ def admit_states(
         formed[len(admitted) :],
         max_chunks,
         tuple(rejections),
+    )
+
+
+def _admit_prefiltered_states(
+    states: Sequence[State],
+    *,
+    top: int,
+    max_chunks: int | None,
+    rejections: Sequence[StateRejection],
+    query: str,
+    fields: Sequence[str],
+) -> StateAdmission:
+    ranked = bm25_rank(states, query, fields)
+    shortlist = ranked[:top]
+    admitted = shortlist if max_chunks is None else shortlist[:max_chunks]
+    admitted_refs = {state.state_ref for state in admitted}
+    skip_rejections: list[StateRejection] = []
+    for state in ranked:
+        if state.state_ref in admitted_refs:
+            continue
+        if state not in shortlist:
+            skip_rejections.append(
+                StateRejection(
+                    state.state_ref,
+                    "prefiltered",
+                    "prefilter skipped before visit",
+                    boundary=f"prefilter=bm25,top={top}",
+                )
+            )
+        else:
+            skip_rejections.append(
+                StateRejection(
+                    state.state_ref,
+                    "scan_cap",
+                    "scan cap reached before visit",
+                    boundary=f"max_chunks={max_chunks}",
+                )
+            )
+    return StateAdmission(
+        tuple(states),
+        tuple(admitted),
+        tuple(state for state in states if state.state_ref not in admitted_refs),
+        max_chunks,
+        tuple(rejections),
+        tuple(skip_rejections),
     )
 
 
@@ -294,12 +362,16 @@ class Runner:
         rejections: Sequence[StateRejection] = (),
         policy: str | Policy | None = None,
         require_states: int = 1,
+        prefilter: Mapping[str, Any] | None = None,
+        prefilter_warning: bool = False,
     ) -> RunResult:
         if policy is not None and require_states < 0:
             raise PolicyError("require_states must be non-negative")
         if concurrency <= 0:
             raise ValueError("concurrency must be a positive integer")
         loaded_preset = self._load_preset(self.preset if preset is None else preset)
+        if policy is not None and prefilter is not None:
+            raise PresetUsageError("gate does not support prefiltering")
         if loaded_preset is None:
             if questions is _UNSET or questions is None:
                 raise TypeError("questions or preset is required")
@@ -308,6 +380,7 @@ class Runner:
             runtime_limits = self.limits
             runtime_name = str(preset) if preset is not None else "jm"
             runtime_version = "1" if preset_version is _UNSET else preset_version
+            runtime_schema = None
             runtime_chunker = "unknown" if chunker is _UNSET else chunker
             runtime_max_chunks = None if max_chunks is _UNSET else max_chunks
             resolved_chunking = (
@@ -356,6 +429,9 @@ class Runner:
             runtime_limits = preset_limits
             runtime_name = loaded_preset.name
             runtime_version = loaded_preset.version
+            runtime_schema = (
+                loaded_preset.schema if loaded_preset.schema == SCHEMA_V2 else None
+            )
             resolved_chunking = dict(loaded_preset.chunking)
             resolved_chunking["by"] = runtime_chunker
             if chunking is not _UNSET:
@@ -385,11 +461,43 @@ class Runner:
                     "stdin:byte=0,line=1",
                 ),
             )
+        if (
+            runtime_max_chunks is not None
+            and (
+                isinstance(runtime_max_chunks, bool)
+                or not isinstance(runtime_max_chunks, int)
+                or runtime_max_chunks < 0
+            )
+        ):
+            raise ValueError("max_chunks must be non-negative")
         for state in states:
             validate_state(state, runtime_limits)
-        admission = admit_states(states, runtime_max_chunks, rejections)
+        seen_refs: set[str] = set()
+        for state in states:
+            if state.state_ref in seen_refs:
+                raise StateInputError(
+                    f"duplicate state reference {state.state_ref!r}"
+                )
+            seen_refs.add(state.state_ref)
+        if prefilter is None:
+            admission = admit_states(states, runtime_max_chunks, rejections)
+        else:
+            _validate_runtime_prefilter(prefilter)
+            admission = _admit_prefiltered_states(
+                states,
+                top=prefilter["top"],
+                max_chunks=runtime_max_chunks,
+                rejections=rejections,
+                query=prefilter["query"],
+                fields=prefilter["fields"],
+            )
         meta = RecordMeta(
-            runtime_name, runtime_version, runtime_model, runtime_chunker, cache
+            runtime_name,
+            runtime_version,
+            runtime_model,
+            runtime_chunker,
+            cache,
+            preset_schema=runtime_schema,
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
@@ -409,6 +517,7 @@ class Runner:
                     state=state,
                     limits=runtime_limits if loaded_preset is None else None,
                     cache_schema=CACHE_SCHEMA,
+                    preset_schema=runtime_schema,
                 )
                 cached = cache_store.get(cache_key(preimage), runtime_questions)
                 if cached is not None:
@@ -420,6 +529,7 @@ class Runner:
                             cached.response.served_model or runtime_model,
                             runtime_chunker,
                             "hit",
+                            preset_schema=runtime_schema,
                         ),
                     )
                 state_meta = RecordMeta(
@@ -428,6 +538,7 @@ class Runner:
                     runtime_model,
                     runtime_chunker,
                     "miss",
+                    preset_schema=runtime_schema,
                 )
 
             try:
@@ -479,7 +590,7 @@ class Runner:
 
         for record in _rejection_records(admission, meta):
             write(record)
-            if stderr is not None:
+            if stderr is not None and record.error.kind != "prefiltered":
                 stderr.write(f"jm: warning: {record.error.message}\n")
                 stderr.flush()
 
@@ -499,6 +610,7 @@ class Runner:
             runtime_model,
             runtime_chunker,
             "not_applicable",
+            preset_schema=runtime_schema,
         )
         coverage_record = CoverageRecord(
             coverage=coverage,
@@ -515,10 +627,22 @@ class Runner:
         write(coverage_record)
         if stderr is not None:
             if coverage == "partial":
-                stderr.write(
-                    "jm: warning: results are partial; "
-                    f"coverage reasons: {', '.join(reasons)}\n"
+                prefiltered_count = sum(
+                    rejection.reason == "prefiltered"
+                    for rejection in admission.skip_rejections
                 )
+                if prefilter_warning and prefiltered_count:
+                    stderr.write(
+                        "jm: warning: BM25 prefilter skipped "
+                        f"{prefiltered_count} of {stats.discovered} states; "
+                        "recall is bounded by the shortlist; rerun without "
+                        "--prefilter for full recall\n"
+                    )
+                else:
+                    stderr.write(
+                        "jm: warning: results are partial; "
+                        f"coverage reasons: {', '.join(reasons)}\n"
+                    )
             stderr.flush()
         gate_result = None
         exit_code = 2 if coverage == "partial" else 0
@@ -669,6 +793,122 @@ DeterministicFakeJudge = FakeJudge
 FormedState = State
 
 
+_WORD_TOKEN = re.compile(r"\w+", re.UNICODE)
+_BM25_K1 = 1.2
+_BM25_B = 0.75
+
+
+@dataclass(frozen=True, slots=True)
+class BM25CorpusStats:
+    document_count: int
+    average_length: float
+    document_frequency: Mapping[str, int]
+
+
+def tokenize(value: str) -> tuple[str, ...]:
+    """Return lowercase Unicode word tokens in stable order."""
+    return tuple(_WORD_TOKEN.findall(value.lower()))
+
+
+def _searchable_value(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)
+
+
+def _state_tokens(state: State, fields: Sequence[str]) -> tuple[str, ...]:
+    values: list[str] = []
+    for field_name in fields:
+        if field_name == "focus":
+            value: Any = state.focus
+        elif field_name.startswith("context."):
+            value = state.context.get(field_name.removeprefix("context."), "")
+        else:
+            value = ""
+        values.append(_searchable_value(value))
+    return tokenize(" ".join(values))
+
+
+def bm25_score(
+    query_tokens: Sequence[str],
+    document_tokens: Sequence[str],
+    corpus_stats: BM25CorpusStats,
+) -> float:
+    """Score one document with the pinned BM25 parameters."""
+    length = len(document_tokens)
+    counts: dict[str, int] = {}
+    for token in document_tokens:
+        counts[token] = counts.get(token, 0) + 1
+    score = 0.0
+    for token in query_tokens:
+        frequency = counts.get(token, 0)
+        if not frequency:
+            continue
+        df = corpus_stats.document_frequency[token]
+        idf = math.log(
+            1
+            + (corpus_stats.document_count - df + 0.5)
+            / (df + 0.5)
+        )
+        denominator = frequency + _BM25_K1 * (
+            1
+            - _BM25_B
+            + _BM25_B * length / corpus_stats.average_length
+            if corpus_stats.average_length
+            else 1
+        )
+        score += idf * ((frequency * (_BM25_K1 + 1)) / denominator)
+    return score
+
+
+def bm25_rank(
+    states: Sequence[State], query: str, fields: Sequence[str]
+) -> tuple[State, ...]:
+    """Rank all states with deterministic BM25 and stable state references."""
+    formed = tuple(states)
+    if not formed:
+        return ()
+    query_tokens = tuple(dict.fromkeys(tokenize(query)))
+    documents = tuple(_state_tokens(state, fields) for state in formed)
+    document_frequency = {
+        token: sum(token in document for document in documents)
+        for token in set(query_tokens)
+    }
+    average_length = sum(len(document) for document in documents) / len(documents)
+    corpus_stats = BM25CorpusStats(
+        len(formed),
+        average_length,
+        document_frequency,
+    )
+    scored: list[tuple[float, str, int, State]] = []
+    for index, (state, document) in enumerate(zip(formed, documents)):
+        score = bm25_score(query_tokens, document, corpus_stats)
+        scored.append((score, state.state_ref, index, state))
+    scored.sort(key=lambda item: (-item[0], item[1], item[2]))
+    return tuple(item[3] for item in scored)
+
+
+def _validate_runtime_prefilter(prefilter: Mapping[str, Any]) -> None:
+    required = {"ranker", "top", "fields", "query"}
+    if not required <= set(prefilter):
+        raise ValueError("prefilter is missing required fields")
+    if prefilter["ranker"] != "bm25":
+        raise ValueError("prefilter.ranker must be bm25")
+    top = prefilter["top"]
+    if isinstance(top, bool) or not isinstance(top, int) or top <= 0:
+        raise ValueError("prefilter.top must be a positive integer")
+    fields = prefilter["fields"]
+    if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
+        raise ValueError("prefilter.fields must be a list")
+    if not fields or any(not isinstance(field, str) or not field for field in fields):
+        raise ValueError("prefilter.fields must not be empty")
+    if len(set(fields)) != len(fields):
+        raise ValueError("prefilter.fields must not contain duplicates")
+    query = prefilter["query"]
+    if not isinstance(query, str) or not query.strip():
+        raise ValueError("prefilter.query must not be empty")
+
+
 def _response_record(
     state_ref: str, response: TypedResponse, meta: RecordMeta
 ) -> ResultRecord | PartialResultRecord | ErrorRecord:
@@ -704,7 +944,10 @@ def _rejection_records(
             events.append(key)
         grouped[key].append(rejection)
 
-    if admission.skipped and admission.max_chunks is not None:
+    if admission.skip_rejections:
+        for rejection in admission.skip_rejections:
+            add_skip(rejection)
+    elif admission.skipped and admission.max_chunks is not None:
         for state in admission.skipped:
             add_skip(
                 StateRejection(
@@ -715,7 +958,7 @@ def _rejection_records(
                 )
             )
     for rejection in admission.rejections:
-        if rejection.reason in {"scan_cap", "context_limit"} and (
+        if rejection.reason in {"scan_cap", "context_limit", "prefiltered"} and (
             rejection.state_ref is not None
         ):
             add_skip(rejection)
@@ -723,7 +966,12 @@ def _rejection_records(
             events.append(rejection)
 
     skip_meta = RecordMeta(
-        meta.preset, meta.preset_version, meta.model, meta.chunker, "not_applicable"
+        meta.preset,
+        meta.preset_version,
+        meta.model,
+        meta.chunker,
+        "not_applicable",
+        preset_schema=meta.preset_schema,
     )
     records: list[ErrorRecord] = []
     for event in events:
@@ -761,7 +1009,9 @@ def _coverage_reasons(
     admission: StateAdmission, responses: Sequence[TypedResponse]
 ) -> tuple[CoverageReason, ...]:
     found: set[str] = set()
-    if admission.skipped:
+    for rejection in admission.skip_rejections:
+        found.add(rejection.reason)
+    if admission.skipped and not admission.skip_rejections:
         found.add("scan_cap")
     for rejection in admission.rejections:
         if rejection.reason in {"scan_cap", "input_error", "context_limit"}:
@@ -776,6 +1026,7 @@ def _coverage_reasons(
         elif not response.complete:
             found.add("partial_answer")
     order = (
+        "prefiltered",
         "scan_cap",
         "input_error",
         "context_limit",

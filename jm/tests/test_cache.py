@@ -117,6 +117,26 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
         assert cache_key(changed) != cache_key(baseline), path
 
 
+def test_distinct_preset_schema_versions_have_distinct_keys() -> None:
+    v1 = _preimage()
+    v2 = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="jgrep",
+        preset_version="1",
+        preset_schema="jm.preset/v2",
+        chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
+        questions=QUESTIONS,
+        state=State(
+            "notes/intro.md#p3",
+            "the launch decision was approved",
+            {"file": "notes/intro.md", "query": "launch decision"},
+        ),
+        limits=StateLimits(),
+    )
+    assert cache_key(v2) != cache_key(v1)
+    assert v2["preset_schema"] == "jm.preset/v2"
+
+
 def test_chunking_requires_exact_resolved_fields() -> None:
     with pytest.raises(ValueError, match="chunking"):
         build_cache_preimage(

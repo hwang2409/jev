@@ -31,6 +31,9 @@ _CACHE_PREIMAGE_FIELDS = frozenset(
         "state",
     }
 )
+_CACHE_PREIMAGE_FIELDS_WITH_PRESET_SCHEMA = _CACHE_PREIMAGE_FIELDS | {
+    "preset_schema"
+}
 _CACHE_ENTRY_REQUIRED_FIELDS = frozenset(
     {
         "cache_key",
@@ -73,6 +76,7 @@ def build_cache_preimage(
     state: Mapping[str, Any] | Any,
     limits: Mapping[str, int] | Any | None = None,
     cache_schema: str = CACHE_SCHEMA,
+    preset_schema: str | None = None,
 ) -> dict[str, Any]:
     """Build the exact section 6.1 cache-key object."""
     resolved_chunking = _json_value(chunking)
@@ -87,7 +91,7 @@ def build_cache_preimage(
     resolved_chunking["limits"] = _limits_dict(resolved_chunking["limits"])
 
     resolved_state = state.payload if hasattr(state, "payload") else state
-    return {
+    preimage = {
         "cache_schema": cache_schema,
         "model": model,
         "preset": preset,
@@ -96,6 +100,11 @@ def build_cache_preimage(
         "question_battery": _json_value(questions),
         "state": _json_value(resolved_state),
     }
+    if preset_schema is not None:
+        if not isinstance(preset_schema, str) or not preset_schema:
+            raise ValueError("preset_schema must be a non-empty string")
+        preimage["preset_schema"] = preset_schema
+    return preimage
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +126,11 @@ class CacheEntry:
     @property
     def preset_version(self) -> str:
         return str(self.preimage["preset_version"])
+
+    @property
+    def preset_schema(self) -> str | None:
+        value = self.preimage.get("preset_schema")
+        return str(value) if value is not None else None
 
     def to_dict(self) -> dict[str, Any]:
         schema = str(self.preimage.get("cache_schema", LEGACY_CACHE_SCHEMA))
@@ -364,7 +378,10 @@ def _parse_entry(
     preimage = payload.get("preimage")
     if not isinstance(preimage, Mapping):
         raise ValueError("cache preimage must be an object")
-    if set(preimage) != _CACHE_PREIMAGE_FIELDS:
+    if set(preimage) not in {
+        _CACHE_PREIMAGE_FIELDS,
+        _CACHE_PREIMAGE_FIELDS_WITH_PRESET_SCHEMA,
+    }:
         raise ValueError("cache preimage has an invalid field set")
     schema = payload.get("cache_schema")
     if schema not in {LEGACY_CACHE_SCHEMA, CACHE_SCHEMA}:
@@ -420,6 +437,11 @@ def _validate_preimage(preimage: Mapping[str, Any], schema: str) -> None:
         value = preimage[field_name]
         if not isinstance(value, str) or not value:
             raise ValueError(f"cache preimage has an invalid {field_name}")
+    if "preset_schema" in preimage and (
+        not isinstance(preimage["preset_schema"], str)
+        or not preimage["preset_schema"]
+    ):
+        raise ValueError("cache preimage has an invalid preset_schema")
 
     chunking = preimage["chunking"]
     if not isinstance(chunking, Mapping) or frozenset(chunking) not in _CHUNKING_SHAPES:

@@ -10,6 +10,7 @@ from typing import Any
 from .runner import (
     State,
     StateAdmission,
+    StateInputError,
     StateLimitError,
     StateLimits,
     StateRejection,
@@ -550,13 +551,7 @@ def chunk_record(
             continue
         state_ref = str(identity)
         if state_ref in seen_refs:
-            message = f"duplicate record identity {state_ref!r}"
-            if _rejections is None:
-                raise ValueError(message)
-            _rejections.append(
-                StateRejection(state_ref, "input_error", message, source_ref)
-            )
-            continue
+            raise StateInputError(f"duplicate record identity {state_ref!r}")
         seen_refs.add(state_ref)
         focus = _canonical_json(record)
         metadata = {key: record[key] for key in selected_fields if key in record}

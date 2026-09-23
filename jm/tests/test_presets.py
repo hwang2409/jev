@@ -103,13 +103,32 @@ def test_validation_rejects_unknown_fields_and_alias_models() -> None:
     data["unexpected"] = True
     with pytest.raises(PresetValidationError, match="unknown"):
         validate_preset(data)
-
     data = copy.deepcopy(data)
     data.pop("unexpected")
     data["model"] = "jev-latest"
     with pytest.raises(PresetValidationError, match="model"):
         validate_preset(data)
 
+
+def test_v1_rejects_prefilter_and_v2_validates_prefilter_fields() -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 10,
+        "query_source": "context.query",
+        "fields": ["focus", "context.query"],
+    }
+    with pytest.raises(PresetValidationError, match="unknown"):
+        validate_preset(data)
+
+    data["schema"] = "jm.preset/v2"
+    assert validate_preset(data)["schema"] == "jm.preset/v2"
+    data["prefilter"]["fields"] = ["focus", "focus"]
+    with pytest.raises(PresetValidationError, match="duplicates"):
+        validate_preset(data)
+    data["prefilter"]["fields"] = ["focus", "context.missing"]
+    with pytest.raises(PresetValidationError, match="state_fields"):
+        validate_preset(data)
 
 @pytest.mark.parametrize(
     "change, message",
