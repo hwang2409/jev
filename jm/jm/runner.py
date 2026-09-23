@@ -9,7 +9,9 @@ from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
 from os import PathLike
+from threading import Lock
 from typing import Any, Protocol, TextIO
+from uuid import uuid4
 
 from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
 from .answers import (
@@ -287,6 +289,10 @@ class RunStats:
     emitted: int
     skipped: int
     failed: int
+    consistency_attempted_calls: int = 0
+    consistency_cache_hits: int = 0
+    consistency_live_calls: int = 0
+    consistency_usage: Mapping[str, int | float] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -364,6 +370,8 @@ class Runner:
         require_states: int = 1,
         prefilter: Mapping[str, Any] | None = None,
         prefilter_warning: bool = False,
+        consistency: int | None = None,
+        consistency_sigma: float = 2.0,
     ) -> RunResult:
         if policy is not None and require_states < 0:
             raise PolicyError("require_states must be non-negative")
@@ -444,6 +452,12 @@ class Runner:
                 )
             runtime_max_chunks = preset_max_chunks
 
+        _validate_consistency(
+            consistency,
+            consistency_sigma,
+            runtime_questions,
+        )
+
         compiled_policy = None
         if policy is not None:
             if loaded_preset is None:
@@ -501,60 +515,133 @@ class Runner:
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
+        consistency_cache_hits = 0
+        consistency_live_calls = 0
+        consistency_usage: dict[str, int | float] = {}
+        consistency_lock = Lock()
+        consistency_call_lock = Lock()
 
         def judge_state(
             state: State,
         ) -> tuple[TypedResponse, RecordMeta]:
+            nonlocal consistency_cache_hits, consistency_live_calls
             state_meta = meta
-            preimage = None
-            if cache_store is not None:
-                preimage = build_cache_preimage(
-                    model=runtime_model,
-                    preset=runtime_name,
-                    preset_version=runtime_version,
-                    chunking=resolved_chunking,
-                    questions=runtime_questions,
-                    state=state,
-                    limits=runtime_limits if loaded_preset is None else None,
-                    cache_schema=CACHE_SCHEMA,
-                    preset_schema=runtime_schema,
-                )
-                cached = cache_store.get(cache_key(preimage), runtime_questions)
-                if cached is not None:
-                    return (
-                        cached.response,
-                        RecordMeta(
-                            runtime_name,
-                            runtime_version,
-                            cached.response.served_model or runtime_model,
-                            runtime_chunker,
-                            "hit",
-                            preset_schema=runtime_schema,
-                        ),
-                    )
-                state_meta = RecordMeta(
-                    runtime_name,
-                    runtime_version,
-                    runtime_model,
-                    runtime_chunker,
-                    "miss",
-                    preset_schema=runtime_schema,
-                )
 
+            def one_call(call_state: State) -> tuple[TypedResponse, bool]:
+                nonlocal consistency_cache_hits, consistency_live_calls
+                preimage = None
+                if cache_store is not None:
+                    preimage = build_cache_preimage(
+                        model=runtime_model,
+                        preset=runtime_name,
+                        preset_version=runtime_version,
+                        chunking=resolved_chunking,
+                        questions=runtime_questions,
+                        state=call_state,
+                        limits=runtime_limits if loaded_preset is None else None,
+                        cache_schema=CACHE_SCHEMA,
+                        preset_schema=runtime_schema,
+                    )
+                    cached = cache_store.get(cache_key(preimage), runtime_questions)
+                    if cached is not None:
+                        if consistency is not None:
+                            with consistency_lock:
+                                consistency_cache_hits += 1
+                        return cached.response, True
+
+                try:
+                    if consistency is None:
+                        response = self.judge_fn(
+                            call_state, runtime_questions, runtime_model
+                        )
+                    else:
+                        with consistency_call_lock:
+                            response = self.judge_fn(
+                                call_state, runtime_questions, runtime_model
+                            )
+                except Exception:
+                    response = ErrorResponse("request failed")
+                if consistency is not None:
+                    with consistency_lock:
+                        consistency_live_calls += 1
+                if (
+                    cache_store is not None
+                    and preimage is not None
+                    and isinstance(response, JudgeResponse)
+                    and response.complete
+                    and (
+                        consistency is None
+                        or _complete_for_questions(response, runtime_questions)
+                    )
+                ):
+                    cache_store.publish(preimage, response, usage=response.usage)
+                return response, False
+
+            if consistency is None:
+                response, cache_hit = one_call(state)
+                if cache_store is not None:
+                    state_meta = replace(
+                        state_meta,
+                        cache="hit" if cache_hit else "miss",
+                    )
+                if isinstance(response, JudgeResponse) and response.served_model:
+                    state_meta = replace(state_meta, model=response.served_model)
+                return response, state_meta
+
+            responses_for_state: list[JudgeResponse] = []
+            failure: ErrorResponse | None = None
+            state_cache_hits = 0
+            for _ in range(consistency):
+                repeat_state = _repeat_state(state)
+                response, cache_hit = one_call(repeat_state)
+                state_cache_hits += int(cache_hit)
+                if isinstance(response, JudgeResponse):
+                    with consistency_lock:
+                        _add_usage(consistency_usage, response.usage)
+                if failure is not None:
+                    continue
+                if not isinstance(response, JudgeResponse):
+                    failure = ErrorResponse(
+                        "consistency repeat failed: "
+                        + (
+                            response.error
+                            if isinstance(response, ErrorResponse)
+                            else "invalid response"
+                        )
+                    )
+                elif not _complete_for_questions(response, runtime_questions):
+                    failure = ErrorResponse(
+                        "consistency repeat returned incomplete answers"
+                    )
+                else:
+                    responses_for_state.append(response)
+
+            state_meta = replace(
+                state_meta,
+                cache=(
+                    "hit"
+                    if state_cache_hits == consistency
+                    else "miss"
+                )
+                if cache_store is not None
+                else "not_applicable",
+            )
+            if failure is not None:
+                return failure, state_meta
             try:
-                response = self.judge_fn(state, runtime_questions, runtime_model)
-            except Exception:
-                response = ErrorResponse("request failed")
-            if isinstance(response, JudgeResponse) and response.served_model:
-                state_meta = replace(state_meta, model=response.served_model)
-            if (
-                cache_store is not None
-                and preimage is not None
-                and isinstance(response, JudgeResponse)
-                and response.complete
-            ):
-                cache_store.publish(preimage, response, usage=response.usage)
-            return response, state_meta
+                aggregate = _aggregate_responses(
+                    responses_for_state,
+                    runtime_questions,
+                    consistency,
+                )
+            except (TypeError, ValueError):
+                return (
+                    ErrorResponse("consistency repeat returned malformed answers"),
+                    state_meta,
+                )
+            if aggregate.served_model:
+                state_meta = replace(state_meta, model=aggregate.served_model)
+            return aggregate, state_meta
 
         def write(record: CanonicalRecord, visible: bool = True) -> None:
             records.append(record)
@@ -601,6 +688,12 @@ class Runner:
             emitted=len(responses),
             skipped=admission.skipped_count,
             failed=failed,
+            consistency_attempted_calls=(len(admitted) * consistency)
+            if consistency is not None
+            else 0,
+            consistency_cache_hits=consistency_cache_hits,
+            consistency_live_calls=consistency_live_calls,
+            consistency_usage=dict(consistency_usage),
         )
         reasons = _coverage_reasons(admission, responses)
         coverage = "partial" if reasons else "complete"
@@ -643,6 +736,16 @@ class Runner:
                         "jm: warning: results are partial; "
                         f"coverage reasons: {', '.join(reasons)}\n"
                     )
+            if consistency is not None:
+                stderr.write(
+                    "jm: consistency: "
+                    f"{len(admitted)} states * {consistency} = "
+                    f"{stats.consistency_attempted_calls} attempted calls; "
+                    f"cache hits: {stats.consistency_cache_hits}; "
+                    f"live calls: {stats.consistency_live_calls}; "
+                    "total normalized token usage: "
+                    f"{json.dumps(stats.consistency_usage, sort_keys=True)}\n"
+                )
             stderr.flush()
         gate_result = None
         exit_code = 2 if coverage == "partial" else 0
@@ -656,6 +759,7 @@ class Runner:
                 judged_states=stats.judged,
                 coverage_reasons=reasons,
                 required_states=require_states,
+                consistency_sigma=consistency_sigma,
             )
             exit_code = gate_result.exit_code
         return RunResult(
@@ -731,6 +835,128 @@ class Runner:
             raise TypeError("stdout is required")
         kwargs["stdout"] = stdout
         return self.run(states, questions, **kwargs)
+
+
+def _validate_consistency(
+    consistency: int | None,
+    sigma: float,
+    questions: Mapping[str, Any],
+) -> None:
+    if any(
+        "context.uid" in _question_state_fields(question)
+        for question in questions.values()
+    ):
+        raise PresetUsageError("question state_fields must not refer to context.uid")
+    if consistency is not None and (
+        isinstance(consistency, bool)
+        or not isinstance(consistency, int)
+        or consistency < 2
+    ):
+        raise PresetUsageError("--consistency must be an integer of at least 2")
+    if (
+        isinstance(sigma, bool)
+        or not isinstance(sigma, (int, float))
+        or not math.isfinite(float(sigma))
+        or sigma < 0
+    ):
+        raise PresetUsageError("--consistency-sigma must be finite and non-negative")
+    if consistency is None and sigma != 2.0:
+        raise PresetUsageError("--consistency-sigma requires --consistency")
+    if consistency is not None and not any(
+        _question_type(question) == "noul" for question in questions.values()
+    ):
+        raise PresetUsageError("--consistency requires at least one Noul question")
+
+
+def _question_type(question: Any) -> str | None:
+    if isinstance(question, Mapping):
+        value = question.get("type")
+    else:
+        value = getattr(question, "type", None)
+    return value if isinstance(value, str) else None
+
+
+def _question_state_fields(question: Any) -> tuple[str, ...]:
+    if isinstance(question, Mapping):
+        instructions = question.get("instructions")
+    else:
+        instructions = getattr(question, "instructions", None)
+    if not isinstance(instructions, Mapping):
+        return ()
+    fields = instructions.get("state_fields")
+    if not isinstance(fields, Sequence) or isinstance(fields, (str, bytes)):
+        return ()
+    return tuple(field for field in fields if isinstance(field, str))
+
+
+def _repeat_state(state: State) -> State:
+    context = dict(state.context)
+    context["uid"] = uuid4().hex
+    return State(state.state_ref, state.focus, context)
+
+
+def _complete_for_questions(
+    response: JudgeResponse,
+    questions: Mapping[str, Any],
+) -> bool:
+    if not response.complete or set(response.answers) != set(questions):
+        return False
+    return all(
+        getattr(response.answers[question_id], "type", None)
+        == _question_type(question)
+        for question_id, question in questions.items()
+    )
+
+
+def _aggregate_responses(
+    responses: Sequence[JudgeResponse],
+    questions: Mapping[str, Any],
+    samples: int,
+) -> JudgeResponse:
+    first = responses[0]
+    answers: dict[str, Any] = {}
+    for question_id, question in questions.items():
+        answer = first.answers[question_id]
+        if _question_type(question) != "noul":
+            answers[question_id] = answer
+            continue
+        values = [
+            response.answers[question_id].noul
+            for response in responses
+            if isinstance(response.answers[question_id], NoulAnswer)
+        ]
+        if len(values) != samples:
+            raise ValueError("consistency responses have an invalid Noul answer")
+        mean = math.fsum(values) / samples
+        variance = math.fsum((value - mean) ** 2 for value in values) / samples
+        answers[question_id] = NoulAnswer(
+            mean,
+            consistency={
+                "samples": samples,
+                "mean": mean,
+                "stddev": math.sqrt(variance),
+            },
+        )
+    usage: dict[str, int | float] = {}
+    for response in responses:
+        _add_usage(usage, response.usage)
+    return JudgeResponse(
+        answers=answers,
+        served_model=first.served_model,
+        usage=usage or None,
+    )
+
+
+def _add_usage(
+    total: dict[str, int | float],
+    usage: Mapping[str, Any] | None,
+) -> None:
+    if not isinstance(usage, Mapping):
+        return
+    for key, value in usage.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        total[key] = total.get(key, 0) + value
 
 
 class FakeJudge:

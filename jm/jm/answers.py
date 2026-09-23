@@ -31,6 +31,7 @@ CoverageReason = Literal[
 class NoulAnswer:
     noul: float
     type: Literal["noul"] = "noul"
+    consistency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +327,10 @@ type CanonicalRecord = (
 
 def answer_to_dict(answer: Answer) -> dict[str, Any]:
     if isinstance(answer, NoulAnswer):
-        return {"type": "noul", "noul": answer.noul}
+        result: dict[str, Any] = {"type": "noul", "noul": answer.noul}
+        if answer.consistency is not None:
+            result["consistency"] = dict(answer.consistency)
+        return result
     if isinstance(answer, ChoiceAnswer):
         return {
             "type": "choice",

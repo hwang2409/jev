@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,10 @@ class PolicySyntaxError(PolicyError):
 
 class PolicyValidationError(PolicyError):
     """A policy does not match the preset's typed fields or thresholds."""
+
+
+class IndeterminateGate(PolicyError):
+    """A consistency interval overlaps a gate threshold."""
 
 
 LiteralValue = float | int | str | bool
@@ -127,13 +132,15 @@ def compile_policy(source: str | Policy, preset: Preset | Mapping[str, Any]) -> 
 def evaluate_policy(
     policy: Policy | str,
     records: Sequence[ResultRecord],
+    *,
+    consistency_sigma: float = 2.0,
 ) -> bool:
     if isinstance(policy, str):
         policy = parse_policy(policy)
     if not isinstance(policy, Policy):
         raise TypeError("policy must be a policy expression or Policy")
     _validate_policy_shape(policy.expression)
-    return _evaluate(policy.expression, records)
+    return _evaluate(policy.expression, records, consistency_sigma)
 
 
 def evaluate_gate(
@@ -143,7 +150,15 @@ def evaluate_gate(
     judged_states: int | None = None,
     coverage_reasons: Sequence[str] = (),
     required_states: int = 1,
+    consistency_sigma: float = 2.0,
 ) -> GateResult:
+    if (
+        isinstance(consistency_sigma, bool)
+        or not isinstance(consistency_sigma, (int, float))
+        or not math.isfinite(float(consistency_sigma))
+        or consistency_sigma < 0
+    ):
+        raise PolicyError("consistency sigma must be finite and non-negative")
     if required_states < 0:
         raise PolicyError("require_states must be non-negative")
     judged = len(records) if judged_states is None else judged_states
@@ -157,7 +172,16 @@ def evaluate_gate(
         return GateResult(
             2, False, True, judged, required_states, "too few judged states"
         )
-    failed = evaluate_policy(policy, records)
+    try:
+        failed = evaluate_policy(
+            policy,
+            records,
+            consistency_sigma=float(consistency_sigma),
+        )
+    except IndeterminateGate:
+        return GateResult(
+            2, False, True, judged, required_states, "indeterminate consistency"
+        )
     return GateResult(1 if failed else 0, failed, False, judged, required_states)
 
 
@@ -403,35 +427,81 @@ def _contains_aggregate(expression: Expression) -> bool:
     return False
 
 
-def _evaluate(expression: Expression, records: Sequence[ResultRecord]) -> bool:
+def _evaluate(
+    expression: Expression,
+    records: Sequence[ResultRecord],
+    consistency_sigma: float,
+) -> bool:
     if not isinstance(expression, Aggregate):
         raise PolicyError("aggregate must be the outer policy expression")
-    values = (_evaluate_one(expression.expression, record) for record in records)
+    values = [
+        _evaluate_one(expression.expression, record, consistency_sigma)
+        for record in records
+    ]
     return any(values) if expression.operator == "any" else all(values)
 
 
-def _evaluate_one(expression: Expression, record: ResultRecord) -> bool:
+def _evaluate_one(
+    expression: Expression,
+    record: ResultRecord,
+    consistency_sigma: float,
+) -> bool:
     if isinstance(expression, Comparison):
         answer = record.answers.get(expression.question_id)
         if answer is None:
             raise PolicyError(f"missing answer {expression.question_id!r}")
-        actual = _answer_value(answer)
+        actual = _answer_value(answer, expression.value, consistency_sigma)
         return _compare(actual, expression.operator, expression.value)
     if isinstance(expression, Not):
-        return not _evaluate_one(expression.expression, record)
+        return not _evaluate_one(expression.expression, record, consistency_sigma)
     if isinstance(expression, Boolean):
+        left = _evaluate_one(expression.left, record, consistency_sigma)
+        right = _evaluate_one(expression.right, record, consistency_sigma)
         if expression.operator == "and":
-            return _evaluate_one(expression.left, record) and _evaluate_one(
-                expression.right, record
-            )
-        return _evaluate_one(expression.left, record) or _evaluate_one(
-            expression.right, record
-        )
+            return left and right
+        return left or right
     raise PolicyError("aggregate must be the outer policy expression")
 
 
-def _answer_value(answer: NoulAnswer | ChoiceAnswer | ScoreAnswer) -> float | str:
+def _answer_value(
+    answer: NoulAnswer | ChoiceAnswer | ScoreAnswer,
+    threshold: LiteralValue,
+    consistency_sigma: float,
+) -> float | str:
     if isinstance(answer, NoulAnswer):
+        consistency = answer.consistency
+        if consistency is not None:
+            if not isinstance(consistency, Mapping) or set(consistency) != {
+                "samples",
+                "mean",
+                "stddev",
+            }:
+                raise PolicyError("invalid consistency metadata")
+            mean = consistency["mean"]
+            stddev = consistency["stddev"]
+            samples = consistency["samples"]
+            if (
+                isinstance(samples, bool)
+                or not isinstance(samples, int)
+                or samples < 2
+                or isinstance(mean, bool)
+                or not isinstance(mean, (int, float))
+                or not math.isfinite(float(mean))
+                or isinstance(stddev, bool)
+                or not isinstance(stddev, (int, float))
+                or not math.isfinite(float(stddev))
+                or stddev < 0
+            ):
+                raise PolicyError("invalid consistency metadata")
+            if isinstance(threshold, (int, float)) and not isinstance(threshold, bool):
+                lower = float(mean) - consistency_sigma * float(stddev)
+                upper = float(mean) + consistency_sigma * float(stddev)
+                threshold_value = float(threshold)
+                if lower <= threshold_value <= upper:
+                    raise IndeterminateGate(
+                        "consistency interval overlaps the threshold"
+                    )
+            return float(mean)
         return answer.noul
     if isinstance(answer, ChoiceAnswer):
         return answer.choice

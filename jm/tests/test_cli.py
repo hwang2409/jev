@@ -9,10 +9,12 @@ import threading
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 
 from jm.answers import JudgeResponse, NoulAnswer
+from jm.api import GatewayClient
 from jm.cache import CacheStore
 from jm.cli import main
 from jm.runner import BM25CorpusStats, State, bm25_rank, bm25_score, tokenize
@@ -195,6 +197,277 @@ def test_jgrep_accepts_query_option_without_positional_query(tmp_path: Path) -> 
 
     assert code == 0
     assert records[-1]["record_type"] == "coverage"
+
+
+def test_jgrep_consistency_repeats_and_reports_cost(tmp_path: Path) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.context["uid"])
+        return _judge(state)
+
+    code, records, stderr = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2"],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+    assert records[0]["answers"]["matches_query"]["consistency"]["samples"] == 2
+    assert "1 states * 2 = 2 attempted calls" in stderr
+    assert "cache hits: 0" in stderr
+    assert "live calls: 2" in stderr
+
+
+def test_main_serializes_consistency_retries(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    attempts_by_state: dict[str, int] = {}
+    active_lock = threading.Lock()
+    active = 0
+    max_active = 0
+    retry_active: list[int] = []
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        with active_lock:
+            attempt = attempts_by_state.get(state_ref, 0) + 1
+            attempts_by_state[state_ref] = attempt
+        if attempt == 1:
+            return httpx.Response(
+                429,
+                headers={"Retry-After": "0"},
+                request=request,
+            )
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "matches_query": {"type": "boolean", "probability": 0.9}
+                }
+            },
+            request=request,
+        )
+
+    def sleep(delay: float) -> None:
+        del delay
+        with active_lock:
+            retry_active.append(active)
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=sleep,
+    )
+
+    def judge(state, questions, model):
+        nonlocal active, max_active
+        with active_lock:
+            active += 1
+            max_active = max(max_active, active)
+            calls.append(state.state_ref)
+        try:
+            return gateway(state, questions, model)
+        finally:
+            with active_lock:
+                active -= 1
+
+    try:
+        code, records, _ = _invoke(
+            ["jgrep", "--query", "launch", "--consistency", "2"],
+            input_text="first\n\nsecond\n",
+            judge_fn=judge,
+            cache_store=CacheStore(tmp_path / "cache"),
+        )
+    finally:
+        gateway.close()
+
+    assert code == 0
+    assert len(calls) == 4
+    assert max_active == 1
+    assert retry_active == [1, 1]
+    assert len(records) == 3
+
+
+def test_main_reports_mixed_consistency_cache_counts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import jm.runner as runner_module
+
+    uids = iter(("first", "second"))
+
+    def repeat_state(state):
+        context = dict(state.context)
+        context["uid"] = next(uids)
+        return State(state.state_ref, state.focus, context)
+
+    monkeypatch.setattr(runner_module, "_repeat_state", repeat_state)
+    store = CacheStore(tmp_path / "cache")
+    first = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2"],
+        judge_fn=_judge,
+        cache_store=store,
+    )
+    assert first[0] == 0
+
+    uids = iter(("first", "third"))
+    second = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2"],
+        judge_fn=_judge,
+        cache_store=store,
+    )
+
+    assert second[0] == 0
+    assert "cache hits: 1" in second[2]
+    assert "live calls: 1" in second[2]
+
+
+def test_gate_consistency_is_indeterminate_on_an_interval_edge(
+    tmp_path: Path,
+) -> None:
+    values = iter((0.70, 0.80))
+
+    def judge(*_args):
+        return JudgeResponse({"matches_query": NoulAnswer(next(values))})
+
+    code, records, _ = _invoke(
+        [
+            "gate",
+            "--preset",
+            "jgrep",
+            "--policy",
+            "any(matches_query.noul >= 0.75)",
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 2
+    assert records[0]["answers"]["matches_query"]["consistency"]["stddev"] == (
+        pytest.approx(0.05)
+    )
+
+
+@pytest.mark.parametrize(
+    ("threshold", "expected_code"),
+    [
+        ("0.7", 1),
+        ("0.7000000000000001", 2),
+        ("0.7000000001", 2),
+        ("0.8999999999", 2),
+        ("0.9", 2),
+        ("0.9000000001", 0),
+    ],
+)
+def test_main_gate_consistency_uses_exact_inclusive_interval(
+    tmp_path: Path, threshold: str, expected_code: int
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["thresholds"]["matches_query"]["keep_at_least"] = float(threshold)
+    preset_path = tmp_path / "preset.yml"
+    preset_path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    values = iter((0.75, 0.85))
+
+    def judge(*_args):
+        return JudgeResponse({"matches_query": NoulAnswer(next(values))})
+
+    code, _, _ = _invoke(
+        [
+            "gate",
+            "--preset",
+            str(preset_path),
+            "--policy",
+            f"any(matches_query.noul >= {threshold})",
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / threshold),
+    )
+
+    assert code == expected_code
+
+
+def test_consistency_without_noul_is_a_usage_error_before_judging(
+    tmp_path: Path,
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    question = data["questions"].pop("matches_query")
+    question["type"] = "choice"
+    criteria = list(question["criteria"].values())
+    question["criteria"] = {
+        "yes": criteria[0],
+        "no": criteria[1],
+    }
+    data["questions"]["matches_query"] = question
+    data["thresholds"] = {}
+    data["output"]["pretty_template"] = "{state_ref}"
+    path = tmp_path / "choice.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+    stderr = io.StringIO()
+
+    code = main(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=lambda *args: calls.append(args),
+        stdin=io.StringIO("launch\n"),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 64
+    assert calls == []
+    assert "at least one Noul" in stderr.getvalue()
+
+
+def test_context_uid_state_field_is_a_usage_error_before_judging(
+    tmp_path: Path,
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["questions"]["matches_query"]["instructions"]["state_fields"].append(
+        "context.uid"
+    )
+    path = tmp_path / "uid.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+    stderr = io.StringIO()
+
+    code = main(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=lambda *args: calls.append(args),
+        stdin=io.StringIO("launch\n"),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 64
+    assert calls == []
+    assert "context.uid" in stderr.getvalue()
 
 
 def test_jgrep_prefilter_emits_recall_warning_and_partial_coverage(

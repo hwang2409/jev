@@ -251,3 +251,30 @@ def test_gate_coverage_errors_fail_closed_even_when_policy_is_false() -> None:
     )
     assert result.exit_code == 2
     assert result.fail_closed is True
+
+
+@pytest.mark.parametrize(
+    ("policy", "sigma", "exit_code"),
+    [
+        ("any(matches_query.noul >= 0.69)", 2.0, 1),
+        ("any(matches_query.noul >= 0.7000000000000001)", 2.0, 2),
+        ("any(matches_query.noul >= 0.95)", 2.0, 0),
+        ("any(matches_query.noul < 0.69)", 2.0, 0),
+        ("any(matches_query.noul < 0.90)", 2.0, 2),
+        ("any(matches_query.noul < 0.95)", 2.0, 1),
+        ("any(matches_query.noul >= 0.75)", 1.0, 2),
+    ],
+)
+def test_consistency_gate_uses_interval_edges(
+    policy: str, sigma: float, exit_code: int
+) -> None:
+    record = _record(
+        matches_query=NoulAnswer(
+            0.8,
+            consistency={"samples": 4, "mean": 0.8, "stddev": 0.05},
+        )
+    )
+    result = evaluate_gate(policy, [record], consistency_sigma=sigma)
+    assert result.exit_code == exit_code
+    if exit_code == 2:
+        assert result.fail_closed is True

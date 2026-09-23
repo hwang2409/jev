@@ -687,6 +687,11 @@ def _validate_question(value: Any, question_id: str) -> None:
             f"questions.{question_id}.instructions.state_fields must use "
             "literal context fields"
         )
+    if "context.uid" in state_fields:
+        raise PresetValidationError(
+            f"questions.{question_id}.instructions.state_fields must not refer "
+            "to context.uid"
+        )
     _string(instructions["focus"], f"questions.{question_id}.instructions.focus")
     _validate_criteria(question["criteria"], question_type, question_id)
 

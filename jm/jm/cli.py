@@ -132,6 +132,8 @@ def _add_judgment_options(
     )
     parser.add_argument("--format", choices=("jsonl", "pretty"))
     parser.add_argument("--filter", choices=("keep",))
+    parser.add_argument("--consistency", type=_consistency_count)
+    parser.add_argument("--consistency-sigma", type=_nonnegative_float, default=2.0)
     parser.add_argument("--prefilter", choices=("bm25",))
     parser.add_argument("--prefilter-top", type=_positive_int)
     parser.add_argument("--prefilter-fields")
@@ -146,6 +148,13 @@ def _positive_int(value: str) -> int:
     number = int(value)
     if number <= 0:
         raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
+def _consistency_count(value: str) -> int:
+    number = int(value)
+    if number < 2:
+        raise argparse.ArgumentTypeError("must be at least 2")
     return number
 
 
@@ -264,6 +273,7 @@ def _judgment_command(
 ) -> int:
     preset_name = getattr(args, "short_preset", None) or args.preset
     preset = resolve_preset_or_path(preset_name)
+    _validate_consistency_options(args, preset)
     by = resolve_chunker(preset, args.by)
     paths = tuple(getattr(args, "paths", ()))
     if paths and by != "file":
@@ -346,6 +356,8 @@ def _judgment_command(
             "concurrency": args.concurrency,
             "prefilter": prefilter,
             "prefilter_warning": args.command == "jgrep",
+            "consistency": args.consistency,
+            "consistency_sigma": args.consistency_sigma,
         }
         if args.command == "gate":
             run_kwargs["policy"] = args.policy
@@ -355,6 +367,19 @@ def _judgment_command(
     finally:
         if client is not None:
             client.close()
+
+
+def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> None:
+    if args.consistency is None:
+        if args.consistency_sigma != 2.0:
+            raise _UsageError("--consistency-sigma requires --consistency")
+        return
+    if not any(
+        question.get("type") == "noul"
+        for question in preset.questions.values()
+        if isinstance(question, Mapping)
+    ):
+        raise _UsageError("--consistency requires at least one Noul question")
 
 
 def resolve_preset_or_path(identifier: str) -> Preset:
