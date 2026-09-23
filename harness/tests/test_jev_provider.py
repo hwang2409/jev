@@ -508,7 +508,13 @@ async def test_browser_page_state_pre_action_request_omits_action_success_gate(
     result = await jev.judge_browser_page_state("continue", "click", {}, [])
 
     questions = Client.requests[0]["json"]["questions"]
-    assert "action_succeeded" not in questions
+    assert set(questions) == {
+        "page_loaded_and_stable",
+        "goal_element_present",
+        "action_is_the_next_step",
+        "dead_end",
+        "needs_different_approach",
+    }
     assert result.action_succeeded is None
 
 

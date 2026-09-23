@@ -15,6 +15,17 @@ from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 API_URL = "https://api.typesafe.ai/v1/systemone"
 MODEL = "jev-latest"
 _MAX_ATTEMPTS = 3
+_BROWSER_PAGE_STATE_GATES = frozenset(
+    {
+        "page_loaded_and_stable",
+        "goal_element_present",
+        "action_is_the_next_step",
+        "action_succeeded",
+        "dead_end",
+        "needs_different_approach",
+    }
+)
+_DEFAULT_BROWSER_PAGE_STATE_GATE = "page_loaded_and_stable"
 
 
 def _noul_confidence(value: float) -> float:
@@ -621,15 +632,18 @@ def build_browser_page_state_request(
 
 def parse_browser_page_state_response(
     data: dict[str, Any],
+    *,
+    gate: str | None = None,
 ) -> BrowserPageStateResult:
     """Parse one successful Jev browser page-state response."""
 
+    fallback_gate = gate
     try:
         answers = data["answers"]
         if not isinstance(answers, dict):
             raise TypeError("answers must be an object")
         values: dict[str, float | None] = {}
-        for gate in (
+        for gate_name in (
             "page_loaded_and_stable",
             "goal_element_present",
             "action_is_the_next_step",
@@ -637,18 +651,19 @@ def parse_browser_page_state_response(
             "needs_different_approach",
         ):
             try:
-                value = float(answers[gate]["noul"])
+                value = float(answers[gate_name]["noul"])
             except (KeyError, TypeError, ValueError) as exc:
                 raise JevRouterError(
-                    f"invalid Jev browser page-state response: {exc}", gate=gate
+                    f"invalid Jev browser page-state response: {exc}",
+                    gate=gate_name,
                 ) from exc
             if not 0 <= value <= 1:
                 raise JevRouterError(
                     "invalid Jev browser page-state response: page-state "
                     "probabilities must be between 0 and 1",
-                    gate=gate,
+                    gate=gate_name,
                 )
-            values[gate] = value
+            values[gate_name] = value
 
         if "action_succeeded" in answers:
             try:
@@ -684,7 +699,8 @@ def parse_browser_page_state_response(
         raise
     except (KeyError, TypeError, ValueError) as exc:
         raise JevRouterError(
-            f"invalid Jev browser page-state response: {exc}"
+            f"invalid Jev browser page-state response: {exc}",
+            gate=fallback_gate,
         ) from exc
 
 
@@ -695,9 +711,13 @@ async def judge_browser_page_state(
     candidates: list[dict[str, object]],
     recent_actions: list[str] | None = None,
     action_result: dict[str, object] | None = None,
+    gate: str | None = None,
 ) -> BrowserPageStateResult:
     """Ask Jev to judge the six bounded browser page-state gates."""
 
+    active_gate = gate or _DEFAULT_BROWSER_PAGE_STATE_GATE
+    if active_gate not in _BROWSER_PAGE_STATE_GATES:
+        raise ValueError(f"unknown browser page-state gate: {active_gate}")
     return parse_browser_page_state_response(
         await _post_json(
             build_browser_page_state_request(
@@ -707,8 +727,10 @@ async def judge_browser_page_state(
                 candidates,
                 recent_actions,
                 action_result,
-            )
-        )
+            ),
+            gate=active_gate,
+        ),
+        gate=active_gate,
     )
 
 
@@ -984,10 +1006,12 @@ async def auto_route(
         raise JevRouterError(f"invalid Jev auto-route response: {exc}") from exc
 
 
-async def _post_json(body: dict[str, Any]) -> dict[str, Any]:
+async def _post_json(
+    body: dict[str, Any], *, gate: str | None = None
+) -> dict[str, Any]:
     key = os.environ.get("JEV_API_KEY")
     if not key:
-        raise JevRouterError("JEV_API_KEY is not set")
+        raise JevRouterError("JEV_API_KEY is not set", gate=gate)
     headers = {"Authorization": f"Bearer {key}"}
     delay = 1.0
     async with httpx.AsyncClient(timeout=60.0) as client:
@@ -997,7 +1021,9 @@ async def _post_json(body: dict[str, Any]) -> dict[str, Any]:
                     API_URL, json=body, headers=headers, timeout=60.0
                 )
             except httpx.HTTPError as exc:
-                raise JevRouterError(f"Jev request failed: {exc}") from exc
+                raise JevRouterError(
+                    f"Jev request failed: {exc}", gate=gate
+                ) from exc
             if response.status_code in {429, 529} and attempt < _MAX_ATTEMPTS - 1:
                 await asyncio.sleep(delay)
                 delay *= 2
@@ -1008,15 +1034,18 @@ async def _post_json(body: dict[str, Any]) -> dict[str, Any]:
                 raise JevRouterError(
                     f"Jev request failed with HTTP {response.status_code}{suffix}",
                     status_code=response.status_code,
+                    gate=gate,
                 )
             try:
                 data = response.json()
             except ValueError as exc:
-                raise JevRouterError("Jev response was not valid JSON") from exc
+                raise JevRouterError(
+                    "Jev response was not valid JSON", gate=gate
+                ) from exc
             if not isinstance(data, dict):
-                raise JevRouterError("Jev response must be an object")
+                raise JevRouterError("Jev response must be an object", gate=gate)
             return data
-    raise JevRouterError("Jev request failed after retries")
+    raise JevRouterError("Jev request failed after retries", gate=gate)
 
 
 def build_memory_relevance_request(
