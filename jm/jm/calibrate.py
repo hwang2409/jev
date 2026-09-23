@@ -17,6 +17,7 @@ from .answers import (
     NoulAnswer,
     ScoreAnswer,
     answer_to_dict,
+    probability_keys_for_question,
 )
 from .cache import CacheEntry, CacheStore
 from .presets import Preset
@@ -137,6 +138,8 @@ def run_calibration(
         candidate_usages.extend(
             response.usage for response in candidates if response.usage is not None
         )
+        model_baseline.update([baseline_model])
+        model_candidate.update(candidate_models)
 
         for question_id, question in preset.questions.items():
             try:
@@ -158,8 +161,6 @@ def run_calibration(
                 operational_error = f"malformed calibration answer: {exc}"
                 break
             records.append(record)
-            model_baseline.update([baseline_model])
-            model_candidate.update(candidate_models)
             _write_json(record, output)
             choice_flips += int(metrics["choice_flip"])
             threshold_crossings += int(metrics["threshold_crossing"])
@@ -490,8 +491,10 @@ def _repeat_classification(
     values = [float(getattr(candidate, field)) for candidate in candidates]
     base = float(getattr(baseline, field))
     deltas = [value - base for value in values]
+    if not any(abs(delta) > tolerance for delta in deltas):
+        return False, False
     if not all(abs(delta) > tolerance for delta in deltas):
-        return False, any(delta != 0 for delta in deltas)
+        return False, True
     directions = {delta > 0 for delta in deltas}
     same_sides = all(
         len({value >= float(item["target"]) for value in values}) == 1
@@ -522,13 +525,7 @@ def _derived_confidence(answer: Answer, question: Mapping[str, Any]) -> float | 
         return None
     if answer.confidence is not None:
         return answer.confidence
-    criteria = question.get("criteria")
-    if isinstance(criteria, Mapping):
-        count = len(criteria)
-    elif isinstance(criteria, Sequence) and not isinstance(criteria, (str, bytes)):
-        count = len(criteria)
-    else:
-        count = 0
+    count = len(probability_keys_for_question(question))
     if count == 1:
         return 1.0
     probabilities = answer.probabilities
@@ -646,7 +643,9 @@ def _provenance(summary: Mapping[str, Any]) -> str:
         ("boundary_noise", summary["boundary_noise"]),
         ("within_tolerance", str(summary["within_tolerance"]).lower()),
     )
-    return "# jm calibrate " + " ".join(f"{key}={value}" for key, value in fields)
+    date_value = fields[0][1]
+    remaining = " ".join(f"{key}={value}" for key, value in fields[1:])
+    return f"# jm calibrate {date_value}: {remaining}"
 
 
 def _model_name(counts: Mapping[str, int]) -> str:

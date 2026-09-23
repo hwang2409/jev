@@ -225,10 +225,6 @@ def _calibration_command(
     resolved_tolerances = CalibrationTolerances(**values)
     store = CacheStore(args.cache_dir) if args.cache_dir is not None else cache_store
     active_store = store or CacheStore()
-    if judge_fn is None and not resolve_gateway_key():
-        raise _OperationalError(
-            "Vercel AI Gateway API key is not set; set it before running calibration"
-        )
     client = None
     active_judge = judge_fn
     if active_judge is None:
