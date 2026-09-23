@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, replace
+from html import escape
 from typing import Protocol
 
 
@@ -59,6 +61,7 @@ class ExtractedData:
     value: str | dict[str, str | None]
     truncated: bool
     full_size: int
+    escaped_full_size: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -308,8 +311,9 @@ def _bounded_extracted(
     value: str | dict[str, str | None],
     limit: int,
 ) -> ExtractedData:
+    escaped_full_size = _escaped_size(value)
     if isinstance(value, dict):
-        full_size = sum(
+        raw_full_size = sum(
             len(key.encode("utf-8")) + len((item or "").encode("utf-8"))
             for key, item in value.items()
         )
@@ -330,10 +334,29 @@ def _bounded_extracted(
             len(key.encode("utf-8")) + len((item or "").encode("utf-8"))
             for key, item in bounded.items()
         )
-        return ExtractedData(bounded, bounded_size < full_size, full_size)
+        return ExtractedData(
+            bounded,
+            bounded_size < raw_full_size,
+            raw_full_size,
+            escaped_full_size,
+        )
     encoded = value.encode("utf-8")
     bounded = _bounded_string(value, limit)
-    return ExtractedData(bounded, len(bounded.encode("utf-8")) < len(encoded), len(encoded))
+    return ExtractedData(
+        bounded,
+        len(bounded.encode("utf-8")) < len(encoded),
+        len(encoded),
+        escaped_full_size,
+    )
+
+
+def _escaped_size(value: str | dict[str, str | None]) -> int:
+    serialized = (
+        value
+        if isinstance(value, str)
+        else json.dumps(value, ensure_ascii=False, sort_keys=True)
+    )
+    return len(escape(serialized, quote=False).encode("utf-8"))
 
 
 def _bounded_string(value: str, limit: int) -> str:

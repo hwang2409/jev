@@ -426,9 +426,14 @@ async def _browser_extract(
         value = extracted.value
         truncated = extracted.truncated
         full_size = extracted.full_size
+    escaped_full_size = (
+        extracted.escaped_full_size
+        if extracted is not None
+        else None
+    )
     content, escaped_truncated, escaped_size = _extracted_text(value, limit)
     truncated = truncated or escaped_truncated
-    content_full_size = escaped_size
+    content_full_size = max(escaped_size, escaped_full_size or 0)
     structured: dict[str, object] = {
         "value": value,
         "truncated": truncated,

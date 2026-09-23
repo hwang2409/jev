@@ -92,7 +92,7 @@ async def test_fake_returns_next_observation_and_records_values() -> None:
     assert adapter.selected == [(select, "pro")]
     assert adapter.extractions == [(element, ["href"], 100)]
     assert selected.changed is True
-    assert extracted == ExtractedData({"href": None}, False, 4)
+    assert extracted == ExtractedData({"href": None}, False, 4, 14)
 
 
 @pytest.mark.asyncio

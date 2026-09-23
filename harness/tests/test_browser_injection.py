@@ -678,15 +678,16 @@ async def test_injection_adversarial_extraction_keeps_limits_and_static_tool_sur
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "payload",
+    ("payload", "expected_full_size"),
     [
-        "&" * 1001 + "é" * 4000,
-        "é" * 6000,
+        ("&" * 1001 + "é" * 4000, 13_005),
+        ("é" * 6000, 12_000),
     ],
 )
 async def test_injection_extracted_text_cap_applies_after_escape(
     tmp_path: Path,
     payload: str,
+    expected_full_size: int,
 ) -> None:
     """Prove escaped extraction output stays byte-bounded and valid UTF-8."""
 
@@ -718,3 +719,4 @@ async def test_injection_extracted_text_cap_applies_after_escape(
     assert len(output.encode("utf-8")) <= 8_000
     assert output.encode("utf-8").decode("utf-8") == output
     assert _structured(result)["truncated"] is True
+    assert result["content"][0]["full_size"] == expected_full_size
