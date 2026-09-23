@@ -186,6 +186,20 @@ def test_calibrate_emits_jsonl_and_keeps_candidate_out_of_cache(tmp_path: Path) 
     assert records[0]["candidate_repeats"][0]["usage"] == {"input_tokens": 12}
     assert records[1]["candidate_model_counts"] == {"candidate-1": 1}
     assert "within tolerance" in stderr
+    assert stderr.strip() == (
+        f"jm calibrate: within tolerance\n"
+        f"# jm calibrate {date.today().isoformat()}: "
+        "preset=jgrep preset_version=1 cases=1 repeats=1 "
+        "baseline=baseline-1 candidate=candidate-1 "
+        "baseline_models=baseline-1:1 candidate_models=candidate-1:1 "
+        "tol_threshold_margin=0.0500 tol_max_choice_flips=0 "
+        "tol_max_probability_delta=0.0500 tol_max_score_delta=0.5000 "
+        "tol_max_noul_delta=0.0500 tol_max_threshold_crossings=0 "
+        "choice_flips=0 max_probability_delta_observed=0.0000 "
+        "max_score_delta_observed=0.0000 max_noul_delta_observed=0.0200 "
+        "threshold_crossings=0 stable_drift=0 boundary_noise=0 "
+        "within_tolerance=true"
+    )
     assert sorted(store.root.rglob("*.json")) == before
 
 
@@ -235,6 +249,38 @@ def test_repeats_within_tolerance_are_not_boundary_noise(tmp_path: Path) -> None
     assert records[-1]["stable_drift"] == 0
     assert records[-1]["boundary_noise"] == 0
     assert records[-1]["within_tolerance"] is True
+
+
+@pytest.mark.parametrize(
+    ("baseline", "values"),
+    (
+        (0.50, (0.49, 0.51)),
+        (0.74, (0.73, 0.76)),
+        (0.50, (0.46, 0.54)),
+    ),
+    ids=("direction-change", "threshold-straddle", "spread-bound"),
+)
+def test_within_tolerance_boundary_shapes_are_indeterminate(
+    tmp_path: Path, baseline: float, values: tuple[float, float]
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(baseline)}, served_model="baseline"),
+    )
+    candidates = iter(values)
+
+    def judge(*_args):
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(next(candidates))}, served_model="candidate"
+        )
+
+    code, records, _ = _run(store, judge, "--repeats", "2")
+
+    assert code == 2
+    assert records[0]["stable_drift"] is False
+    assert records[0]["boundary_noise"] is True
+    assert records[-1]["boundary_noise"] == 1
+    assert records[-1]["within_tolerance"] is None
 
 
 def test_boundary_noise_is_indeterminate_not_drift(tmp_path: Path) -> None:
@@ -360,8 +406,52 @@ def test_model_counts_are_per_case_and_repeat_not_per_question(tmp_path: Path) -
     )
 
     assert code == 0
+    assert records[-1]["cases"] == 1
+    assert records[-1]["comparison_count"] == len(preset.questions)
     assert records[-1]["baseline_model_counts"] == {"baseline": 1}
     assert records[-1]["candidate_model_counts"] == {"candidate": 2}
+
+
+def test_single_choice_flip_uses_choice_tolerance_not_repeat_classification(
+    tmp_path: Path,
+) -> None:
+    preset = load_preset(_write_mixed_preset(tmp_path))
+    baseline_answers = {
+        "decision": ChoiceAnswer(
+            "alpha", {"alpha": 0.8, "beta": 0.1, "gamma": 0.1}, confidence=0.7
+        ),
+        "severity": ScoreAnswer(
+            1, probabilities={"0": 0.2, "1": 0.8}, confidence=0.2
+        ),
+        "confidence": NoulAnswer(0.72),
+    }
+    candidate_answers = {
+        **baseline_answers,
+        "decision": ChoiceAnswer(
+            "beta", {"alpha": 0.8, "beta": 0.1, "gamma": 0.1}
+        ),
+    }
+    store = _seed_preset(
+        tmp_path, preset, JudgeResponse(baseline_answers, served_model="baseline")
+    )
+
+    code, records, _ = _run(
+        store,
+        lambda *_: JudgeResponse(candidate_answers, served_model="candidate"),
+        "--max-choice-flips",
+        "1",
+        preset=str(preset.path),
+    )
+
+    assert code == 0
+    choice_record = next(
+        record for record in records if record.get("question_id") == "decision"
+    )
+    assert choice_record["choice_flip"] is True
+    assert choice_record["stable_drift"] is False
+    assert choice_record["boundary_noise"] is False
+    assert records[-1]["stable_drift"] == 0
+    assert records[-1]["boundary_noise"] == 0
 
 
 def test_calibrate_compares_all_primitives_and_reports_provenance(
@@ -477,6 +567,138 @@ def test_invalid_usage_and_operational_error_exit_codes(tmp_path: Path) -> None:
     )
     assert code == 2
     assert records[-1]["within_tolerance"] is None
+
+
+def test_missing_preset_name_and_path_are_usage_errors(tmp_path: Path) -> None:
+    for identifier in ("missing-preset", str(tmp_path / "missing.yml")):
+        stderr = io.StringIO()
+        code = main(
+            ["calibrate", "--preset", identifier],
+            stdout=io.StringIO(),
+            stderr=stderr,
+            judge_fn=lambda *_: pytest.fail("must not call live API"),
+        )
+        assert code == 64
+        assert stderr.getvalue().startswith("jm: error:")
+
+
+@pytest.mark.parametrize("kind", ("malformed", "partial"))
+def test_malformed_and_partial_cache_entries_fail_before_live_calls(
+    tmp_path: Path, kind: str
+) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    path = next(store.root.rglob("*.json"))
+    if kind == "malformed":
+        path.write_text("not json", encoding="utf-8")
+    else:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        del payload["answers"]["matches_query"]
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def test_mixed_preset_cache_entries_fail_before_live_calls(tmp_path: Path) -> None:
+    preset = resolve_preset("jgrep")
+    store = CacheStore(tmp_path)
+    preimage = build_cache_preimage(
+        model=preset.model,
+        preset=preset.name,
+        preset_version="2",
+        chunking=preset.chunking,
+        questions=preset.questions,
+        state=State("case#1", "focus", {"query": "launch"}),
+    )
+    store.publish(
+        preimage,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}),
+    )
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def test_cache_path_digest_mismatch_fails_before_live_calls(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}, served_model="baseline"),
+    )
+    path = next(store.root.rglob("*.json"))
+    wrong_key = "sha256:" + "0" * 64
+    wrong_path = store.path_for(wrong_key)
+    wrong_path.parent.mkdir(parents=True, exist_ok=True)
+    path.rename(wrong_path)
+
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        return JudgeResponse({"matches_query": NoulAnswer(0.5)})
+
+    code, records, _ = _run(store, judge)
+
+    assert code == 2
+    assert calls == 0
+    assert records[-1]["within_tolerance"] is None
+
+
+def test_command_tolerance_overrides_preset_tolerance(tmp_path: Path) -> None:
+    source = resolve_preset("jgrep").path.read_text(encoding="utf-8")
+    path = tmp_path / "strict.yml"
+    path.write_text(
+        source.replace(
+            "thresholds:\n",
+            "calibration:\n"
+            "  schema: jm.calibration/v1\n"
+            "  max_noul_delta: 0.001\n"
+            "thresholds:\n",
+        ),
+        encoding="utf-8",
+    )
+    preset = load_preset(path)
+    store = _seed_preset(
+        tmp_path,
+        preset,
+        JudgeResponse({"matches_query": NoulAnswer(0.50)}, served_model="baseline"),
+    )
+
+    code, records, _ = _run(
+        store,
+        lambda *_: JudgeResponse(
+            {"matches_query": NoulAnswer(0.52)}, served_model="candidate"
+        ),
+        "--max-noul-delta",
+        "0.05",
+        preset=str(path),
+    )
+
+    assert code == 0
+    assert records[-1]["tolerances"]["max_noul_delta"] == 0.05
 
 
 def test_mixed_candidate_models_do_not_make_a_decision(tmp_path: Path) -> None:

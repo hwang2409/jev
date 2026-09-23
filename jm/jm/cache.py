@@ -219,6 +219,8 @@ class CacheStore:
                 expected_key = payload.get("cache_key")
                 if not isinstance(expected_key, str):
                     raise ValueError("cache entry has no cache key")
+                if path != self.path_for(expected_key):
+                    raise ValueError("cache key does not match path")
                 entry = _parse_entry(payload, expected_key)
                 if entry.preset != preset:
                     raise ValueError("cache entry has a mixed preset")

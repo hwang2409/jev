@@ -23,6 +23,7 @@ from .client import JevClient
 from .presets import (
     Preset,
     PresetError,
+    PresetNotFoundError,
     load_preset,
     resolve_chunker,
     resolve_preset,
@@ -196,6 +197,10 @@ def main(
         errors.write(f"jm: error: {exc}\n")
         errors.flush()
         return getattr(exc, "exit_code", 64)
+    except PresetNotFoundError as exc:
+        errors.write(f"jm: error: {exc}\n")
+        errors.flush()
+        return 64
     except OSError as exc:
         errors.write(f"jm: error: {exc}\n")
         errors.flush()

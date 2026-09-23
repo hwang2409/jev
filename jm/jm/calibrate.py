@@ -74,6 +74,7 @@ def run_calibration(
         summary = _summary(
             preset,
             resolved,
+            0,
             (),
             Counter(),
             Counter(),
@@ -108,6 +109,7 @@ def run_calibration(
     max_score_delta = 0.0
     max_noul_delta = 0.0
     operational_error: str | None = None
+    completed_cases = 0
 
     for entry, state in zip(entries, states):
         candidates: list[JudgeResponse] = []
@@ -131,16 +133,8 @@ def run_calibration(
         if operational_error is not None:
             break
 
-        baseline_model = _served_model(entry.response)
-        candidate_models = [_served_model(response) for response in candidates]
-        if isinstance(entry.usage, Mapping):
-            baseline_usages.append(entry.usage)
-        candidate_usages.extend(
-            response.usage for response in candidates if response.usage is not None
-        )
-        model_baseline.update([baseline_model])
-        model_candidate.update(candidate_models)
-
+        case_records: list[dict[str, Any]] = []
+        case_metrics: list[dict[str, float | bool]] = []
         for question_id, question in preset.questions.items():
             try:
                 baseline_answer = entry.response.answers[question_id]
@@ -160,6 +154,23 @@ def run_calibration(
             except (KeyError, TypeError, ValueError) as exc:
                 operational_error = f"malformed calibration answer: {exc}"
                 break
+            case_records.append(record)
+            case_metrics.append(metrics)
+
+        if operational_error is not None:
+            break
+
+        completed_cases += 1
+        baseline_model = _served_model(entry.response)
+        candidate_models = [_served_model(response) for response in candidates]
+        if isinstance(entry.usage, Mapping):
+            baseline_usages.append(entry.usage)
+        candidate_usages.extend(
+            response.usage for response in candidates if response.usage is not None
+        )
+        model_baseline.update([baseline_model])
+        model_candidate.update(candidate_models)
+        for record, metrics in zip(case_records, case_metrics):
             records.append(record)
             _write_json(record, output)
             choice_flips += int(metrics["choice_flip"])
@@ -177,6 +188,7 @@ def run_calibration(
     summary = _summary(
         preset,
         resolved,
+        completed_cases,
         records,
         model_baseline,
         model_candidate,
@@ -462,19 +474,8 @@ def _repeat_classification(
     tolerance: float,
     thresholds: Sequence[Mapping[str, Any]],
 ) -> tuple[bool, bool]:
-    if len(candidates) == 1:
-        if isinstance(baseline, ChoiceAnswer):
-            return (_choice_flip(baseline, candidates), False)
-        value_type = ScoreAnswer if isinstance(baseline, ScoreAnswer) else NoulAnswer
-        value = "score" if value_type is ScoreAnswer else "noul"
-        changed = (
-            abs(
-                float(getattr(candidates[0], value))
-                - float(getattr(baseline, value))
-            )
-            > tolerance
-        )
-        return (changed, False)
+    if len(candidates) <= 1:
+        return False, False
     if isinstance(baseline, ChoiceAnswer):
         choices = [
             candidate.choice
@@ -491,22 +492,23 @@ def _repeat_classification(
     values = [float(getattr(candidate, field)) for candidate in candidates]
     base = float(getattr(baseline, field))
     deltas = [value - base for value in values]
-    if not any(abs(delta) > tolerance for delta in deltas):
-        return False, False
-    if not all(abs(delta) > tolerance for delta in deltas):
-        return False, True
     directions = {delta > 0 for delta in deltas}
     same_sides = all(
         len({value >= float(item["target"]) for value in values}) == 1
         for item in thresholds
     )
-    if (
+    coherent = (
         directions
         and len(directions) == 1
         and max(values) - min(values) <= tolerance
         and same_sides
-    ):
+    )
+    if not coherent:
+        return False, True
+    if all(abs(delta) > tolerance for delta in deltas):
         return True, False
+    if all(abs(delta) <= tolerance for delta in deltas):
+        return False, False
     return False, True
 
 
@@ -553,6 +555,7 @@ def _sum_usage(usages: Any) -> dict[str, Any] | None:
 def _summary(
     preset: Preset,
     tolerances: CalibrationTolerances,
+    cases: int,
     records: Sequence[Mapping[str, Any]],
     baseline_models: Counter[str],
     candidate_models: Counter[str],
@@ -568,7 +571,7 @@ def _summary(
     operational_error: str | None,
 ) -> dict[str, Any]:
     mixed_models = len(baseline_models) > 1 or len(candidate_models) > 1
-    has_evidence = bool(records)
+    has_evidence = cases > 0
     within: bool | None
     if not has_evidence or operational_error or mixed_models or boundary_noise:
         within = None
@@ -586,7 +589,7 @@ def _summary(
         "calibration_schema": CALIBRATION_SCHEMA,
         "preset": preset.name,
         "preset_version": preset.version,
-        "cases": len(records),
+        "cases": cases,
         "comparison_count": len(records),
         "repeats": tolerances.repeats,
         "baseline": _model_name(baseline_models),
