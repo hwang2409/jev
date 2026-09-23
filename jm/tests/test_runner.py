@@ -216,6 +216,88 @@ def test_runner_gate_sets_failure_exit_for_complete_typed_results(noul: float) -
     assert result.records[-1].to_dict()["coverage"] == "complete"
 
 
+def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
+    questions = {
+        "match": {"type": "noul"},
+        "kind": {"type": "choice"},
+        "risk": {"type": "score"},
+    }
+    values = iter((0.2, 0.4, 0.6))
+    uids: list[str] = []
+
+    def judge(state, *_args):
+        uids.append(state.context["uid"])
+        return JudgeResponse(
+            {
+                "match": NoulAnswer(next(values)),
+                "kind": ChoiceAnswer("first"),
+                "risk": ScoreAnswer(1.0),
+            },
+            usage={"input_tokens": 10, "output_tokens": 2},
+        )
+
+    stderr = io.StringIO()
+    result = Runner(judge).run(
+        [State("stdin#L1", "launch")],
+        questions,
+        consistency=3,
+        stderr=stderr,
+    )
+
+    answers = result.records[0].to_dict()["answers"]
+    assert len(uids) == len(set(uids)) == 3
+    assert answers["match"]["noul"] == pytest.approx(0.4)
+    assert answers["match"]["consistency"]["samples"] == 3
+    assert answers["match"]["consistency"]["mean"] == pytest.approx(0.4)
+    assert answers["match"]["consistency"]["stddev"] == pytest.approx(
+        (0.08 / 3) ** 0.5
+    )
+    assert "consistency" not in answers["kind"]
+    assert "consistency" not in answers["risk"]
+    assert result.stats.consistency_usage == {"input_tokens": 30, "output_tokens": 6}
+    assert "1 states * 3 = 3 attempted calls" in stderr.getvalue()
+    assert "live calls: 3" in stderr.getvalue()
+
+
+def test_consistency_failure_does_not_emit_a_partial_aggregate() -> None:
+    calls = 0
+
+    def judge(*_args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return ErrorResponse("retry budget exhausted")
+        return JudgeResponse({"match": NoulAnswer(0.5)})
+
+    result = Runner(judge).run(
+        [State("stdin#L1", "launch")],
+        {"match": {"type": "noul"}},
+        consistency=3,
+    )
+
+    assert calls == 3
+    assert result.exit_code == 2
+    assert result.stats.failed == 1
+    assert result.records[0].to_dict()["record_type"] == "error"
+    assert "answers" not in result.records[0].to_dict()
+
+
+def test_consistency_requires_a_noul_question_before_judging() -> None:
+    calls = []
+
+    def judge(*args):
+        calls.append(args)
+        return JudgeResponse({"kind": ChoiceAnswer("yes")})
+
+    with pytest.raises(PresetUsageError, match="at least one Noul"):
+        Runner(judge).run(
+            [State("stdin#L1", "launch")],
+            {"kind": {"type": "choice"}},
+            consistency=2,
+        )
+    assert calls == []
+
+
 def test_runner_gate_fails_closed_for_partial_results() -> None:
     result = Runner(FakeJudge(mode="incomplete")).run_gate(
         [State("stdin#L1", "launch")],

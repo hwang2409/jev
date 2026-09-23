@@ -197,6 +197,99 @@ def test_jgrep_accepts_query_option_without_positional_query(tmp_path: Path) -> 
     assert records[-1]["record_type"] == "coverage"
 
 
+def test_jgrep_consistency_repeats_and_reports_cost(tmp_path: Path) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.context["uid"])
+        return _judge(state)
+
+    code, records, stderr = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2"],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert len(calls) == 2
+    assert len(set(calls)) == 2
+    assert records[0]["answers"]["matches_query"]["consistency"]["samples"] == 2
+    assert "1 states * 2 = 2 attempted calls" in stderr
+    assert "cache hits: 0" in stderr
+    assert "live calls: 2" in stderr
+
+
+def test_gate_consistency_is_indeterminate_on_an_interval_edge(
+    tmp_path: Path,
+) -> None:
+    values = iter((0.70, 0.80))
+
+    def judge(*_args):
+        return JudgeResponse({"matches_query": NoulAnswer(next(values))})
+
+    code, records, _ = _invoke(
+        [
+            "gate",
+            "--preset",
+            "jgrep",
+            "--policy",
+            "any(matches_query.noul >= 0.75)",
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 2
+    assert records[0]["answers"]["matches_query"]["consistency"]["stddev"] == (
+        pytest.approx(0.05)
+    )
+
+
+def test_consistency_without_noul_is_a_usage_error_before_judging(
+    tmp_path: Path,
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    question = data["questions"].pop("matches_query")
+    question["type"] = "choice"
+    criteria = list(question["criteria"].values())
+    question["criteria"] = {
+        "yes": criteria[0],
+        "no": criteria[1],
+    }
+    data["questions"]["matches_query"] = question
+    data["thresholds"] = {}
+    data["output"]["pretty_template"] = "{state_ref}"
+    path = tmp_path / "choice.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+    stderr = io.StringIO()
+
+    code = main(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "launch",
+            "--consistency",
+            "2",
+        ],
+        judge_fn=lambda *args: calls.append(args),
+        stdin=io.StringIO("launch\n"),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 64
+    assert calls == []
+    assert "at least one Noul" in stderr.getvalue()
+
+
 def test_jgrep_prefilter_emits_recall_warning_and_partial_coverage(
     tmp_path: Path,
 ) -> None:

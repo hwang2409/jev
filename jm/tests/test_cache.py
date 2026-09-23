@@ -117,6 +117,30 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
         assert cache_key(changed) != cache_key(baseline), path
 
 
+def test_consistency_uids_produce_distinct_cache_keys() -> None:
+    keys = set()
+    for uid in ("one", "two", "three"):
+        state = State("notes/intro.md#p3", "focus", {"uid": uid})
+        keys.add(
+            cache_key(
+                build_cache_preimage(
+                    model="typesafe-ai/jev",
+                    preset="jgrep",
+                    preset_version="1",
+                    chunking={
+                        "by": "para",
+                        "context_paragraphs": 0,
+                        "max_chunks": 512,
+                    },
+                    questions=QUESTIONS,
+                    state=state,
+                    limits=StateLimits(),
+                )
+            )
+        )
+    assert len(keys) == 3
+
+
 def test_distinct_preset_schema_versions_have_distinct_keys() -> None:
     v1 = _preimage()
     v2 = build_cache_preimage(

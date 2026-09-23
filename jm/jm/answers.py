@@ -31,6 +31,7 @@ CoverageReason = Literal[
 class NoulAnswer:
     noul: float
     type: Literal["noul"] = "noul"
+    consistency: Mapping[str, Any] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -326,7 +327,10 @@ type CanonicalRecord = (
 
 def answer_to_dict(answer: Answer) -> dict[str, Any]:
     if isinstance(answer, NoulAnswer):
-        return {"type": "noul", "noul": answer.noul}
+        result: dict[str, Any] = {"type": "noul", "noul": answer.noul}
+        if answer.consistency is not None:
+            result["consistency"] = dict(answer.consistency)
+        return result
     if isinstance(answer, ChoiceAnswer):
         return {
             "type": "choice",
@@ -405,9 +409,17 @@ def _parse_answer(
         )
 
     if question_type == "noul":
-        _require_keys(raw_answer, {"type", "noul"}, question_id)
+        _require_keys(
+            raw_answer,
+            {"type", "noul"},
+            question_id,
+            {"consistency"},
+        )
         _require_number(raw_answer.get("noul"), f"noul answer for {question_id}")
-        return NoulAnswer(float(raw_answer["noul"]))
+        consistency = raw_answer.get("consistency")
+        if consistency is not None:
+            consistency = _consistency(consistency, question_id)
+        return NoulAnswer(float(raw_answer["noul"]), consistency=consistency)
     if question_type == "choice":
         _require_keys(
             raw_answer,
@@ -483,6 +495,25 @@ def _number(value: Any, question_id: str, field_name: str) -> float:
     if not math.isfinite(converted):
         raise ValueError(f"{field_name} for {question_id} must be finite")
     return converted
+
+
+def _consistency(value: Any, question_id: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != {
+        "samples",
+        "mean",
+        "stddev",
+    }:
+        raise ValueError(
+            f"consistency for {question_id} requires samples, mean, and stddev"
+        )
+    samples = value["samples"]
+    if isinstance(samples, bool) or not isinstance(samples, int) or samples < 2:
+        raise ValueError(f"consistency samples for {question_id} must be at least 2")
+    mean = _number(value["mean"], question_id, "consistency mean")
+    stddev = _number(value["stddev"], question_id, "consistency stddev")
+    if stddev < 0:
+        raise ValueError(f"consistency stddev for {question_id} must be non-negative")
+    return {"samples": samples, "mean": mean, "stddev": stddev}
 
 
 def _confidence(
