@@ -106,6 +106,12 @@ class StateLimitError(ValueError):
     """A formed state exceeds a configured byte limit."""
 
 
+class StateInputError(ValueError):
+    """A formed input cannot be judged safely."""
+
+    exit_code = 2
+
+
 @dataclass(frozen=True, slots=True)
 class StateRejection:
     state_ref: str | None
@@ -209,7 +215,11 @@ def admit_states(
     max_chunks: int | None = None,
     rejections: Sequence[StateRejection] = (),
 ) -> StateAdmission:
-    if max_chunks is not None and max_chunks < 0:
+    if (
+        max_chunks is not None
+        and (isinstance(max_chunks, bool) or not isinstance(max_chunks, int)
+             or max_chunks < 0)
+    ):
         raise ValueError("max_chunks must be non-negative")
     formed = tuple(states)
     if max_chunks is None:
@@ -451,8 +461,24 @@ class Runner:
                     "stdin:byte=0,line=1",
                 ),
             )
+        if (
+            runtime_max_chunks is not None
+            and (
+                isinstance(runtime_max_chunks, bool)
+                or not isinstance(runtime_max_chunks, int)
+                or runtime_max_chunks < 0
+            )
+        ):
+            raise ValueError("max_chunks must be non-negative")
         for state in states:
             validate_state(state, runtime_limits)
+        seen_refs: set[str] = set()
+        for state in states:
+            if state.state_ref in seen_refs:
+                raise StateInputError(
+                    f"duplicate state reference {state.state_ref!r}"
+                )
+            seen_refs.add(state.state_ref)
         if prefilter is None:
             admission = admit_states(states, runtime_max_chunks, rejections)
         else:
@@ -912,7 +938,12 @@ def _rejection_records(
             events.append(rejection)
 
     skip_meta = RecordMeta(
-        meta.preset, meta.preset_version, meta.model, meta.chunker, "not_applicable"
+        meta.preset,
+        meta.preset_version,
+        meta.model,
+        meta.chunker,
+        "not_applicable",
+        preset_schema=meta.preset_schema,
     )
     records: list[ErrorRecord] = []
     for event in events:

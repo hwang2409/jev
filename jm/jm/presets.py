@@ -464,20 +464,22 @@ def resolve_prefilter(
     invocation_query: str | None = None,
     invocation_predicate: str | None = None,
 ) -> dict[str, Any] | None:
-    """Resolve explicit prefilter CLI values against a validated preset."""
+    """Resolve preset and explicit prefilter values."""
     supplied = any(value is not None for value in (ranker, top, fields, query))
+    declared = preset.prefilter
+    if declared is None and not supplied:
+        return None
     if ranker is None:
-        if supplied:
+        if declared is None:
             raise PresetUsageError(
                 "prefilter options require --prefilter bm25"
             )
-        return None
-    if ranker != "bm25":
+        effective_ranker = declared["ranker"]
+    else:
+        effective_ranker = ranker
+    if effective_ranker != "bm25":
         raise PresetUsageError("--prefilter must be bm25")
-    if command == "gate":
-        raise PresetUsageError("gate does not support prefiltering")
 
-    declared = preset.prefilter
     if declared is None and preset.name == "diff-risk-heat":
         raise PresetUsageError(
             "diff-risk-heat requires a preset-declared review query"
@@ -570,8 +572,11 @@ def resolve_prefilter(
             "diff-risk-heat requires a preset-declared review query"
         )
 
+    if command == "gate":
+        raise PresetUsageError("gate does not support prefiltering")
+
     return {
-        "ranker": "bm25",
+        "ranker": effective_ranker,
         "top": resolved_top,
         "query_source": query_source,
         "fields": tuple(resolved_fields),

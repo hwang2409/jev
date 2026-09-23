@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import subprocess
 import sys
@@ -42,6 +43,10 @@ def _invoke(
 
 def _judge(*_args) -> JudgeResponse:
     return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+
+def _filter_judge(*_args) -> JudgeResponse:
+    return JudgeResponse({"satisfies_predicate": NoulAnswer(0.9)})
 
 
 def test_short_and_explicit_jgrep_commands_are_equivalent(tmp_path: Path) -> None:
@@ -227,6 +232,49 @@ def test_jgrep_prefilter_emits_recall_warning_and_partial_coverage(
     ) in stderr
 
 
+def test_jgrep_prefilter_pins_bm25_document_frequency_and_parameters(
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "needle rare",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+        ],
+        input_text="needle needle\n\nrare\n\nneedle rare\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    document_count = 3
+    average_length = 5 / 3
+    k1 = 1.2
+    b = 0.75
+    needle_idf = (1 + (document_count - 2 + 0.5) / (2 + 0.5))
+    rare_idf = (1 + (document_count - 2 + 0.5) / (2 + 0.5))
+    c_score = sum(
+        math.log(idf)
+        * ((1 * (k1 + 1)) / (1 + k1 * (1 - b + b * 2 / average_length)))
+        for idf in (needle_idf, rare_idf)
+    )
+
+    assert code == 2
+    assert c_score == pytest.approx(0.8689142725551417)
+    assert calls == ["stdin#P3"]
+
+
 def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
     tmp_path: Path,
 ) -> None:
@@ -253,18 +301,48 @@ def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
             str(path),
             "--query",
             "needle",
-            "--prefilter",
-            "bm25",
-            "--prefilter-top",
-            "2",
         ],
         input_text="needle here\n\nother text\n\nthird text\n",
         judge_fn=judge,
         cache_store=CacheStore(tmp_path / "cache"),
     )
     assert code == 2
-    assert len(calls) == 2
-    assert records[-1]["meta"]["preset_schema"] == "jm.preset/v2"
+    assert len(calls) == 1
+    assert records[-2]["error"] == {
+        "kind": "prefiltered",
+        "message": "prefilter skipped before visit",
+        "http_status": None,
+        "attempts": 0,
+        "skip_summary": {
+            "boundary": "prefilter=bm25,top=1",
+            "count": 2,
+            "sample_refs": ["stdin#P2", "stdin#P3"],
+        },
+    }
+    assert all(record["meta"]["preset_schema"] == "jm.preset/v2" for record in records)
+
+    override_calls = []
+
+    def override_judge(state, *_args):
+        override_calls.append(state.state_ref)
+        return _judge(state)
+
+    override_code, _, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "needle",
+            "--prefilter-top",
+            "2",
+        ],
+        input_text="needle here\n\nother text\n\nthird text\n",
+        judge_fn=override_judge,
+        cache_store=CacheStore(tmp_path / "override-cache"),
+    )
+    assert override_code == 2
+    assert len(override_calls) == 2
 
     gate_stderr = io.StringIO()
     gate_code = main(
@@ -274,8 +352,6 @@ def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
             str(path),
             "--query",
             "needle",
-            "--prefilter",
-            "bm25",
             "--policy",
             "any(matches_query.noul >= 0.75)",
         ],
@@ -286,6 +362,170 @@ def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
     )
     assert gate_code == 64
     assert "gate does not support prefiltering" in gate_stderr.getvalue()
+
+
+def test_prefilter_is_off_without_a_preset_map_or_cli_option(tmp_path: Path) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, records, _ = _invoke(
+        ["run", "--preset", "jgrep", "--query", "needle"],
+        input_text="needle here\n\nother text\n\nthird text\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert len(calls) == 3
+    assert records[-1]["coverage"] == "complete"
+
+
+def test_jfilter_prefilter_uses_predicate_query_source(tmp_path: Path) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _filter_judge(state)
+
+    code, records, _ = _invoke(
+        [
+            "jfilter",
+            "--predicate",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+        ],
+        input_text='{"id":"one","value":"needle"}\n{"id":"two","value":"other"}\n',
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 2
+    assert calls == ["one"]
+    assert records[-1]["coverage_counts"] == {
+        "discovered": 2,
+        "judged": 1,
+        "emitted": 1,
+        "skipped": 1,
+        "failed": 0,
+    }
+
+
+def test_generic_run_prefilter_accepts_cli_query_source(tmp_path: Path) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, _, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            "jgrep",
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+            "--prefilter-query",
+            "needle",
+        ],
+        input_text="needle here\n\nother text\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 2
+    assert calls == ["stdin#P1"]
+
+
+def test_prefilter_rejects_duplicate_state_references_before_judging(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "input.txt"
+    path.write_text("needle\n", encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jgrep",
+            "--by",
+            "file",
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+            str(path),
+            str(path),
+        ],
+        judge_fn=judge,
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == []
+    assert "duplicate state reference" in stderr.getvalue()
+
+
+def test_prefilter_ignores_unlisted_context_data(tmp_path: Path) -> None:
+    matching_name = tmp_path / "needle.txt"
+    nonmatching_name = tmp_path / "other.txt"
+    matching_name.write_text("unrelated focus\n", encoding="utf-8")
+    nonmatching_name.write_text("needle focus\n", encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code = main(
+        [
+            "jgrep",
+            "--by",
+            "file",
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+            str(matching_name),
+            str(nonmatching_name),
+        ],
+        judge_fn=judge,
+        stdin=io.StringIO(),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert calls == [str(nonmatching_name)]
 
 
 def test_jgrep_positional_argument_is_not_a_query() -> None:
