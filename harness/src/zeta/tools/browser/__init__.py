@@ -22,12 +22,18 @@ from .adapter import (
     BrowserError,
     BrowserTimeoutError,
     NavigationRaceError,
+    SearchResultCandidate,
     SnapshotLimits,
 )
 from .adapter import (
     ElementUnavailableError as AdapterElementUnavailableError,
 )
-from .catalog import prefilter_catalog
+from .catalog import (
+    SearchResult,
+    prefilter_catalog,
+    rank_search_result_ids,
+    triage_search_results,
+)
 from .gates import (
     PAGE_STATE_RECOVERY_ATTEMPT_CAP,
     PageStateDecision,
@@ -397,16 +403,139 @@ async def _browser_extract(
         if not isinstance(limit, int) or limit < 1:
             raise ValueError("browser_extract limit must be positive")
         limit = min(limit, session.limits.extracted_bytes)
-        extracted = await session.extract(target, attributes, limit)
+        search_extracted = None
+        if not attributes:
+            search_extracted = await session.extract_search_results(target, limit)
+        extracted = None
+        if search_extracted is None or search_extracted.results is None:
+            extracted = await session.extract(target, attributes, limit)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
-    content = _extracted_text(extracted.value)
+    triage = None
+    if search_extracted is not None and search_extracted.results is not None:
+        triage = await _triage_search_results(
+            _browser_goal(registry, "extract", element_id or "page", None),
+            search_extracted.results,
+        )
+        value = triage["value"]
+        truncated = search_extracted.truncated
+        full_size = search_extracted.full_size
+    else:
+        assert extracted is not None
+        value = extracted.value
+        truncated = extracted.truncated
+        full_size = extracted.full_size
+    content = _extracted_text(value)
     structured: dict[str, object] = {
-        "value": extracted.value,
-        "truncated": extracted.truncated,
-        "full_size": extracted.full_size,
+        "value": value,
+        "truncated": truncated,
+        "full_size": full_size,
     }
-    return _success_result(text_block(content, full_size=extracted.full_size), structured_content=structured)
+    if triage is not None:
+        structured.update(triage)
+        content = f"{_triage_receipt(triage['triage'])}\n{content}"
+    return _success_result(text_block(content, full_size=full_size), structured_content=structured)
+
+
+async def _triage_search_results(
+    goal: str, results: tuple[SearchResultCandidate, ...]
+) -> dict[str, object]:
+    records = [
+        SearchResult(
+            result_id=result.result_id,
+            title=result.title,
+            snippet=result.snippet,
+            displayed_url=result.displayed_url,
+            source_section=result.source_section,
+            position=result.position,
+        )
+        for result in results
+    ]
+    provider_items = [
+        {
+            "result_id": result.result_id,
+            "title": result.title,
+            "snippet": result.snippet,
+            "displayed_url": result.displayed_url,
+            "source_section": result.source_section,
+            "position": str(result.position),
+        }
+        for result in records
+    ]
+    if not provider_items:
+        return {
+            "results": [],
+            "ranked_results": [],
+            "triage": {
+                "status": "ranked",
+                "decision": "relevance_floor",
+                "warnings": ["floor"],
+            },
+            "value": {"results": []},
+        }
+    try:
+        scores = await jev.score_search_results(goal, provider_items)
+    except Exception as exc:  # noqa: BLE001 - triage is advisory to extraction
+        warning = f"search results returned unranked because Jev triage failed: {exc}"
+        return {
+            "results": provider_items,
+            "ranked_results": provider_items,
+            "warning": warning,
+            "triage": {
+                "status": "unranked",
+                "decision": "degraded",
+                "warnings": ["degraded"],
+                "warning": warning,
+            },
+            "value": {"results": provider_items},
+        }
+    decision = triage_search_results(scores, records)
+    items_by_id = {item["result_id"]: item for item in provider_items}
+    ranked_results = [
+        {
+            **items_by_id[result_id],
+            "rank": rank,
+            "relevance_score": scores.scores[result_id],
+        }
+        for rank, result_id in enumerate(
+            rank_search_result_ids(scores, records), start=1
+        )
+    ]
+    triage_payload = {
+        "status": "ranked",
+        "decision": decision.reason,
+        "accepted": decision.accepted,
+        "exposed": list(decision.exposed),
+        "warnings": _triage_warnings(decision.reason),
+        "call_confidence": scores.call_confidence,
+        "usage": dict(scores.usage),
+    }
+    return {
+        "results": ranked_results,
+        "ranked_results": ranked_results,
+        "triage": triage_payload,
+        "value": {"results": ranked_results},
+    }
+
+
+def _triage_warnings(decision: str) -> list[str]:
+    if decision == "expose_candidates":
+        return ["tie"]
+    if decision == "relevance_floor":
+        return ["floor"]
+    return []
+
+
+def _triage_receipt(triage: Mapping[str, object]) -> str:
+    status = triage.get("status", "unknown")
+    decision = triage.get("decision", "unknown")
+    warnings = triage.get("warnings", [])
+    warning_text = (
+        ",".join(str(warning) for warning in warnings)
+        if isinstance(warnings, list) and warnings
+        else "none"
+    )
+    return f"search triage: status={status} decision={decision} warnings={warning_text}"
 
 
 def register(registry: ToolRegistry) -> None:
@@ -762,7 +891,7 @@ def _state_result(state: Any, *, action: str | None = None) -> StructuredToolRes
     return _success_result(text_block(text), structured_content=payload)
 
 
-def _extracted_text(value: str | dict[str, str | None]) -> str:
+def _extracted_text(value: object) -> str:
     if isinstance(value, str):
         return value
     return json.dumps(value, ensure_ascii=False, sort_keys=True)

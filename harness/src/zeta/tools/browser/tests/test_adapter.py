@@ -11,6 +11,7 @@ from zeta.tools.browser.adapter import (
     FakeBrowserAdapter,
     NavigationRaceError,
     PageObservation,
+    SearchResultCandidate,
     SnapshotLimits,
 )
 
@@ -113,6 +114,21 @@ async def test_fake_bounds_attribute_names_and_values_by_total_bytes() -> None:
     assert extracted.full_size == 4 + 1000 + sum(
         len(name.encode("utf-8")) for name in attributes
     )
+
+
+@pytest.mark.asyncio
+async def test_fake_extracts_typed_search_results() -> None:
+    observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    results = (
+        SearchResultCandidate("a", "first", "snippet", "https://one.example", "one", 1),
+    )
+    adapter = FakeBrowserAdapter([observation], search_results=results)
+
+    extracted = await adapter.extract_search_results(None, 1_000)
+
+    assert extracted.results == results
+    assert extracted.truncated is False
+    assert adapter.search_extractions == [(None, 1_000)]
 
 
 @pytest.mark.asyncio

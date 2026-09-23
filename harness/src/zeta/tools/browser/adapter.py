@@ -61,6 +61,25 @@ class ExtractedData:
     full_size: int
 
 
+@dataclass(frozen=True, slots=True)
+class SearchResultCandidate:
+    result_id: str
+    title: str
+    snippet: str
+    displayed_url: str
+    source_section: str
+    position: int
+
+
+@dataclass(frozen=True, slots=True)
+class SearchResultExtraction:
+    """Typed search candidates, or ``None`` when the page is not a search page."""
+
+    results: tuple[SearchResultCandidate, ...] | None
+    truncated: bool
+    full_size: int
+
+
 class BrowserAdapter(Protocol):
     async def launch(self) -> None:
         raise NotImplementedError
@@ -99,6 +118,13 @@ class BrowserAdapter(Protocol):
     ) -> ExtractedData:
         raise NotImplementedError
 
+    async def extract_search_results(
+        self,
+        target: ElementRef | None,
+        limit: int,
+    ) -> SearchResultExtraction:
+        raise NotImplementedError
+
     async def close(self) -> None:
         raise NotImplementedError
 
@@ -122,8 +148,14 @@ class NavigationRaceError(BrowserError):
 class FakeBrowserAdapter:
     """Deterministic browser adapter for offline tests."""
 
-    def __init__(self, observations: list[PageObservation]) -> None:
+    def __init__(
+        self,
+        observations: list[PageObservation],
+        *,
+        search_results: tuple[SearchResultCandidate, ...] | None = None,
+    ) -> None:
         self._observations = list(observations)
+        self._search_results = search_results
         self._observation_index = 0
         self._detached: set[str] = set()
         self._timeouts: set[str] = set()
@@ -133,6 +165,7 @@ class FakeBrowserAdapter:
         self.typed: list[tuple[ElementRef, str, bool]] = []
         self.selected: list[tuple[ElementRef, str]] = []
         self.extractions: list[tuple[ElementRef | None, list[str], int]] = []
+        self.search_extractions: list[tuple[ElementRef | None, int]] = []
 
     def detach(self, element_id: str) -> None:
         self._detached.add(element_id)
@@ -204,6 +237,19 @@ class FakeBrowserAdapter:
         else:
             value = "" if target is None else target.text
         return _bounded_extracted(value, limit)
+
+    async def extract_search_results(
+        self,
+        target: ElementRef | None,
+        limit: int,
+    ) -> SearchResultExtraction:
+        self._maybe_fail("extract_search_results")
+        if target is not None:
+            self._check_element(target)
+        self.search_extractions.append((target, limit))
+        if self._search_results is None:
+            return SearchResultExtraction(None, False, 0)
+        return _bounded_search_results(self._search_results, limit)
 
     async def close(self) -> None:
         return None
@@ -292,3 +338,34 @@ def _bounded_extracted(
 
 def _bounded_string(value: str, limit: int) -> str:
     return value.encode("utf-8")[: max(limit, 0)].decode("utf-8", errors="ignore")
+
+
+def _bounded_search_results(
+    results: tuple[SearchResultCandidate, ...],
+    limit: int,
+) -> SearchResultExtraction:
+    full_size = sum(_search_result_size(result) for result in results)
+    remaining = max(limit, 0)
+    bounded: list[SearchResultCandidate] = []
+    for result in results:
+        result_size = _search_result_size(result)
+        if result_size > remaining:
+            break
+        bounded.append(result)
+        remaining -= result_size
+    bounded_size = sum(_search_result_size(result) for result in bounded)
+    return SearchResultExtraction(tuple(bounded), bounded_size < full_size, full_size)
+
+
+def _search_result_size(result: SearchResultCandidate) -> int:
+    return sum(
+        len(value.encode("utf-8"))
+        for value in (
+            result.result_id,
+            result.title,
+            result.snippet,
+            result.displayed_url,
+            result.source_section,
+            str(result.position),
+        )
+    )
