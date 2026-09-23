@@ -22,6 +22,7 @@ from .adapter import (
     BrowserError,
     BrowserTimeoutError,
     NavigationRaceError,
+    SearchResultCandidate,
     SnapshotLimits,
 )
 from .adapter import (
@@ -402,32 +403,54 @@ async def _browser_extract(
         if not isinstance(limit, int) or limit < 1:
             raise ValueError("browser_extract limit must be positive")
         limit = min(limit, session.limits.extracted_bytes)
-        extracted = await session.extract(target, attributes, limit)
+        search_extracted = None
+        if not attributes:
+            search_extracted = await session.extract_search_results(target, limit)
+        extracted = None
+        if search_extracted is None or search_extracted.results is None:
+            extracted = await session.extract(target, attributes, limit)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
-    triage = await _triage_extracted_search_results(
-        _browser_goal(registry, "extract", element_id or "page", None),
-        extracted.value,
-    )
-    value = extracted.value if triage is None else triage["value"]
+    triage = None
+    if search_extracted is not None and search_extracted.results is not None:
+        triage = await _triage_search_results(
+            _browser_goal(registry, "extract", element_id or "page", None),
+            search_extracted.results,
+        )
+        value = triage["value"]
+        truncated = search_extracted.truncated
+        full_size = search_extracted.full_size
+    else:
+        assert extracted is not None
+        value = extracted.value
+        truncated = extracted.truncated
+        full_size = extracted.full_size
     content = _extracted_text(value)
     structured: dict[str, object] = {
         "value": value,
-        "truncated": extracted.truncated,
-        "full_size": extracted.full_size,
+        "truncated": truncated,
+        "full_size": full_size,
     }
     if triage is not None:
         structured.update(triage)
-    return _success_result(text_block(content, full_size=extracted.full_size), structured_content=structured)
+        content = f"{_triage_receipt(triage['triage'])}\n{content}"
+    return _success_result(text_block(content, full_size=full_size), structured_content=structured)
 
 
-async def _triage_extracted_search_results(
-    goal: str, value: object
-) -> dict[str, object] | None:
-    container, raw_results = _search_result_container(value)
-    if raw_results is None:
-        return None
-    records = [_search_result_record(item, index) for index, item in enumerate(raw_results)]
+async def _triage_search_results(
+    goal: str, results: tuple[SearchResultCandidate, ...]
+) -> dict[str, object]:
+    records = [
+        SearchResult(
+            result_id=result.result_id,
+            title=result.title,
+            snippet=result.snippet,
+            displayed_url=result.displayed_url,
+            source_section=result.source_section,
+            position=result.position,
+        )
+        for result in results
+    ]
     provider_items = [
         {
             "result_id": result.result_id,
@@ -443,8 +466,12 @@ async def _triage_extracted_search_results(
         return {
             "results": [],
             "ranked_results": [],
-            "triage": {"status": "ranked", "decision": "relevance_floor"},
-            "value": _replace_search_results(container, []),
+            "triage": {
+                "status": "ranked",
+                "decision": "relevance_floor",
+                "warnings": ["floor"],
+            },
+            "value": {"results": []},
         }
     try:
         scores = await jev.score_search_results(goal, provider_items)
@@ -454,8 +481,13 @@ async def _triage_extracted_search_results(
             "results": provider_items,
             "ranked_results": provider_items,
             "warning": warning,
-            "triage": {"status": "unranked", "warning": warning},
-            "value": _replace_search_results(container, provider_items),
+            "triage": {
+                "status": "unranked",
+                "decision": "degraded",
+                "warnings": ["degraded"],
+                "warning": warning,
+            },
+            "value": {"results": provider_items},
         }
     decision = triage_search_results(scores, records)
     items_by_id = {item["result_id"]: item for item in provider_items}
@@ -474,6 +506,7 @@ async def _triage_extracted_search_results(
         "decision": decision.reason,
         "accepted": decision.accepted,
         "exposed": list(decision.exposed),
+        "warnings": _triage_warnings(decision.reason),
         "call_confidence": scores.call_confidence,
         "usage": dict(scores.usage),
     }
@@ -481,47 +514,26 @@ async def _triage_extracted_search_results(
         "results": ranked_results,
         "ranked_results": ranked_results,
         "triage": triage_payload,
-        "value": _replace_search_results(container, ranked_results),
+        "value": {"results": ranked_results},
     }
 
 
-def _search_result_container(value: object) -> tuple[object, list[object] | None]:
-    if isinstance(value, list):
-        return value, value
-    if isinstance(value, dict) and isinstance(value.get("results"), list):
-        return value, value["results"]
-    return value, None
+def _triage_warnings(decision: str) -> list[str]:
+    if decision == "expose_candidates":
+        return ["tie"]
+    if decision == "relevance_floor":
+        return ["floor"]
+    return []
 
 
-def _search_result_record(item: object, index: int) -> SearchResult:
-    fields = item if isinstance(item, dict) else {}
-    result_id = _search_result_field(fields, "result_id", _search_result_field(fields, "id", f"result-{index + 1}"))
-    position_text = _search_result_field(fields, "position", str(index + 1))
-    try:
-        position = int(position_text)
-    except ValueError:
-        position = index + 1
-    return SearchResult(
-        result_id=result_id,
-        title=_search_result_field(fields, "title"),
-        snippet=_search_result_field(fields, "snippet"),
-        displayed_url=_search_result_field(fields, "displayed_url", _search_result_field(fields, "url")),
-        source_section=_search_result_field(fields, "source_section", _search_result_field(fields, "source", "results")),
-        position=position,
-    )
-
-
-def _search_result_field(fields: dict[object, object], key: str, default: str = "") -> str:
-    value = fields.get(key, default)
-    return value if isinstance(value, str) else str(value)
-
-
-def _replace_search_results(container: object, results: list[dict[str, object]]) -> object:
-    if isinstance(container, list):
-        return results
-    if isinstance(container, dict):
-        return {**container, "results": results}
-    return results
+def _triage_receipt(triage: Mapping[str, object]) -> str:
+    status = triage.get("status", "unknown")
+    decision = triage.get("decision", "unknown")
+    warnings = triage.get("warnings", [])
+    warning_text = ""
+    if isinstance(warnings, list) and warnings:
+        warning_text = f" warnings={','.join(str(warning) for warning in warnings)}"
+    return f"search triage: status={status} decision={decision}{warning_text}"
 
 
 def register(registry: ToolRegistry) -> None:

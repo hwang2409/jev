@@ -16,6 +16,7 @@ from .adapter import (
     ElementUnavailableError,
     ExtractedData,
     PageObservation,
+    SearchResultExtraction,
     SnapshotLimits,
 )
 from .catalog import BrowserCatalog, CatalogEntry, SnapshotCatalogBuilder
@@ -157,6 +158,13 @@ class BrowserSession:
         limit: int,
     ) -> ExtractedData:
         return await (await self.adapter()).extract(target, attributes, limit)
+
+    async def extract_search_results(
+        self,
+        target: ElementRef | None,
+        limit: int,
+    ) -> SearchResultExtraction:
+        return await (await self.adapter()).extract_search_results(target, limit)
 
     def resolve_element(
         self,

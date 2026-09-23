@@ -16,9 +16,9 @@ from zeta.tools import ToolRegistry
 from zeta.tools.browser import PageStateDecision, register
 from zeta.tools.browser.adapter import (
     ElementRef,
-    ExtractedData,
     FakeBrowserAdapter,
     PageObservation,
+    SearchResultCandidate,
 )
 
 
@@ -832,27 +832,15 @@ async def test_browser_extract_clamps_limit_and_keeps_truncation_successful(
     assert adapter.extractions[-1][2] == 8_000
 
 
-def _search_extract_value() -> dict[str, object]:
-    return {
-        "results": [
-            {
-                "id": "a",
-                "title": "first",
-                "snippet": "first snippet",
-                "url": "https://one.example",
-                "source": "one",
-                "position": "1",
-            },
-            {
-                "id": "b",
-                "title": "second",
-                "snippet": "second snippet",
-                "url": "https://two.example",
-                "source": "two",
-                "position": "2",
-            },
-        ]
-    }
+def _search_results() -> tuple[SearchResultCandidate, ...]:
+    return (
+        SearchResultCandidate(
+            "a", "first", "first snippet", "https://one.example", "one", 1
+        ),
+        SearchResultCandidate(
+            "b", "second", "second snippet", "https://two.example", "two", 2
+        ),
+    )
 
 
 async def _execute_search_extract(
@@ -860,68 +848,77 @@ async def _execute_search_extract(
     monkeypatch: pytest.MonkeyPatch,
     score_result: jev.SearchResultScoreResult | Exception,
 ) -> dict[str, object]:
-    adapter = FakeBrowserAdapter([_observation()])
+    adapter = FakeBrowserAdapter([_observation()], search_results=_search_results())
     registry = _registry(tmp_path, adapter)
     registry.browser_goal = "find the best result"
-    session = registry.browser_session
-    assert session is not None
-
-    async def extract(*_args: object, **_kwargs: object) -> ExtractedData:
-        return ExtractedData(_search_extract_value(), False, 100)
 
     async def score(*_args: object, **_kwargs: object) -> jev.SearchResultScoreResult:
         if isinstance(score_result, Exception):
             raise score_result
         return score_result
 
-    monkeypatch.setattr(session, "extract", extract)
     monkeypatch.setattr(jev, "score_search_results", score)
-    result = await registry.execute(
+    return await registry.execute(
         ToolCall("extract", "browser_extract", {"attributes": []})
     )
-    return _structured(result)
+
+
+def _text(result: dict[str, object]) -> str:
+    content = result["content"]
+    assert isinstance(content, list)
+    block = content[0]
+    assert isinstance(block, dict)
+    text = block["text"]
+    assert isinstance(text, str)
+    return text
 
 
 @pytest.mark.asyncio
 async def test_browser_extract_returns_ranked_search_results(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    structured = await _execute_search_extract(
+    result = await _execute_search_extract(
         tmp_path,
         monkeypatch,
         jev.SearchResultScoreResult({"a": 0.6, "b": 0.9}, 0.95, {"output_tokens": 2}, 0.95),
     )
+    structured = _structured(result)
 
     assert structured["triage"]["status"] == "ranked"
     assert structured["triage"]["decision"] == "accepted"
     assert [item["result_id"] for item in structured["ranked_results"]] == ["b", "a"]
     assert structured["ranked_results"][0]["relevance_score"] == pytest.approx(0.9)
+    assert "search triage: status=ranked decision=accepted" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_browser_extract_degrades_to_unranked_results_on_provider_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    structured = await _execute_search_extract(
+    result = await _execute_search_extract(
         tmp_path,
         monkeypatch,
         jev.JevRouterError("provider unavailable"),
     )
+    structured = _structured(result)
 
     assert structured["triage"]["status"] == "unranked"
     assert "provider unavailable" in structured["warning"]
     assert "relevance_score" not in structured["results"][0]
+    assert "search triage: status=unranked decision=degraded warnings=degraded" in _text(result)
 
 
 @pytest.mark.asyncio
 async def test_browser_extract_exposes_close_search_tie_below_floor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    structured = await _execute_search_extract(
+    result = await _execute_search_extract(
         tmp_path,
         monkeypatch,
         jev.SearchResultScoreResult({"a": 0.45, "b": 0.39}, 0.95, {}, 0.95),
     )
+    structured = _structured(result)
 
     assert structured["triage"]["decision"] == "expose_candidates"
     assert structured["triage"]["exposed"] == ["a", "b"]
+    assert "search triage: status=ranked decision=expose_candidates warnings=tie" in _text(result)
