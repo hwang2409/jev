@@ -23,8 +23,8 @@ from ..core.session import (
     format_relative_age,
 )
 from ..runtime import compose_runtime
-from ..settings import ResolvedConfig
-from ..settings import resolve as resolve_settings
+from ..config.settings import ResolvedConfig
+from ..config.settings import resolve as resolve_settings
 from ..skills import (
     SkillCatalog,
     discover_session_skills,

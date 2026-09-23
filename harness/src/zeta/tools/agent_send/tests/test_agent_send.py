@@ -22,20 +22,20 @@ from pathlib import Path
 import pytest
 
 
-import zeta.execution as execution_module
+import zeta.runtime.execution as execution_module
 
 
 import zeta.tools.agent_send as agent_send_module
 
 
-from zeta.agent_background import (
+from zeta.agent.background import (
     BackgroundAgentOwner,
     adopt_agent_children,
     finish_background_child,
 )
 
 
-from zeta.agent_budget import MAX_AGENT_TURN_CAP, AgentTree
+from zeta.agent.budget import MAX_AGENT_TURN_CAP, AgentTree
 
 
 from zeta.core.abort import AbortGenerationRegistry
@@ -53,7 +53,7 @@ from zeta.core.store import ConversationStore, PendingPromptsClosedError
 from zeta.core.session import SessionManager
 
 
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 
 
 from zeta.mcp import MCPMount
@@ -83,7 +83,7 @@ from zeta.tui.render import render_event
 from zeta.tui.todo import TodoWidget
 
 
-from zeta.types import (
+from zeta.protocol.types import (
     CompletionBackend,
     Message,
     MessageRole,
@@ -488,9 +488,9 @@ def _stub_backend_factory(
         requested.append((provider, model))
         return child_backend, model or ""
 
-    monkeypatch.setattr("zeta.agent_runner.build_backend", build)
+    monkeypatch.setattr("zeta.agent.runner.build_backend", build)
     monkeypatch.setattr(
-        "zeta.agent_runner.credential_store",
+        "zeta.agent.runner.credential_store",
         lambda provider, **kwargs: _FakeCredentialStore(
             _ValidTokens() if tokens is None else tokens
         ),
@@ -825,10 +825,10 @@ def test_send_to_run_rejects_non_run_children(tmp_path: Path) -> None:
 def test_send_to_run_releases_borrowed_child_stores(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from zeta.agent_background import recover_agent_children
+    from zeta.agent.background import recover_agent_children
     from zeta.core.fake import FakeBackend
     from zeta.tools.agent_send import send_to_run
-    from zeta.types import ToolCall
+    from zeta.protocol.types import ToolCall
 
     manager = SessionManager(tmp_path / "home")
     opened = manager.create(provider="fake", model="offline", cwd=tmp_path)

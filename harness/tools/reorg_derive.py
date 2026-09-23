@@ -353,6 +353,7 @@ def old_path_scan_command(stage: int) -> list[str]:
         return ["true"]
     old_names = sorted(old for old, _ in moves)
     new_names = sorted({new for _, new in moves})
+    compat_packages = ["zeta.cli"] if stage == 4 else []
     exclusions = sorted(str(HARNESS / f"src/zeta/{name}.py") for name in ("loop", "settings", "types")) if stage == 4 else []
     output = f"/tmp/reorg-stage{stage}-old-paths.txt"
     return [
@@ -366,6 +367,7 @@ def old_path_scan_command(stage: int) -> list[str]:
         "SRC = ROOT / 'harness/src/zeta'",
         f"OLD_NAMES = {old_names!r}",
         f"NEW_NAMES = {new_names!r}",
+        f"COMPAT_PACKAGES = {compat_packages!r}",
         f"EXCLUDED = {exclusions!r}",
         "",
         "def dotted_prefix(name, root):",
@@ -373,6 +375,8 @@ def old_path_scan_command(stage: int) -> list[str]:
         "",
         "def old_path_matches(name):",
         "    if any(dotted_prefix(name, new) for new in NEW_NAMES):",
+        "        return False",
+        "    if name in COMPAT_PACKAGES and (SRC / 'cli/__init__.py').exists():",
         "        return False",
         "    return any(dotted_prefix(name, old) for old in OLD_NAMES)",
         "",
@@ -422,7 +426,8 @@ def old_path_scan_command(stage: int) -> list[str]:
         "            if old_path_matches(name):",
         "                hits.add(f'{path}:{line_no}:{name}')",
         "",
-        "print('\\n'.join(sorted(hits)))",
+        "if hits:",
+        "    print('\\n'.join(sorted(hits)))",
         "PY",
         "status=$?",
         "if [ \"$status\" -ne 0 ]; then exit \"$status\"; fi",

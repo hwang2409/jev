@@ -17,7 +17,7 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.console import Console, RenderableType
 from rich.text import Text
 
-from ..types import (
+from ..protocol.types import (
     RedactedThinkingContent,
     StreamEvent,
     TextContent,

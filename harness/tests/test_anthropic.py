@@ -30,8 +30,8 @@ from zeta.providers.anthropic import (
     build_authorization_url,
     build_messages_payload,
 )
-from zeta.images import image_dimensions
-from zeta.types import (
+from zeta.media.images import image_dimensions
+from zeta.protocol.types import (
     Message,
     MessageRole,
     ImageContent,
@@ -3098,7 +3098,7 @@ async def test_tool_identifiers_must_be_strings(tmp_path: Path) -> None:
     ({"status_code": "403"}, "stream_error", None),
 ])
 async def test_stream_error_preserves_structured_metadata(detail, code, status):
-    from zeta.loop import _error_info
+    from zeta.runtime.loop import _error_info
 
     payload = {"type": "error", "error": {**detail, "message": "Denied"}}
     response = httpx.Response(200, text=f"data: {json.dumps(payload)}\n\n")

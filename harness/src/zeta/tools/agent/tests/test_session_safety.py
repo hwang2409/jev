@@ -25,7 +25,7 @@ from threading import Event
 import pytest
 
 
-from zeta.cli import main
+from zeta.cli.main import main
 
 
 from zeta.core import session as session_module
@@ -37,7 +37,7 @@ from zeta.core.session import SessionError, SessionInUseError, SessionManager
 from zeta.core.store import ConversationStore
 
 
-from zeta.types import Message, MessageRole, TextContent
+from zeta.protocol.types import Message, MessageRole, TextContent
 
 
 def closed_session(tmp_path):

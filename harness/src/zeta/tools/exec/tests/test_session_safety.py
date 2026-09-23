@@ -25,7 +25,7 @@ from threading import Event
 import pytest
 
 
-from zeta.cli import main
+from zeta.cli.main import main
 
 
 from zeta.core import session as session_module
@@ -37,7 +37,7 @@ from zeta.core.session import SessionError, SessionInUseError, SessionManager
 from zeta.core.store import ConversationStore
 
 
-from zeta.types import Message, MessageRole, TextContent
+from zeta.protocol.types import Message, MessageRole, TextContent
 
 
 def closed_session(tmp_path):
@@ -51,11 +51,11 @@ async def test_session_lifecycle_has_no_absolute_session_file_operations(tmp_pat
     """Audit the real runtime, including tool and TUI persistence boundaries."""
     from pathlib import Path
 
-    from zeta.persistence import DraftPersistence
+    from zeta.tui.persistence import DraftPersistence
     from zeta.server.runtime import ServerRuntime
     from zeta.tools.exec import run_exec_macro
     from zeta.tui.composer import build_user_message
-    from zeta.types import StreamEventType, ToolCall
+    from zeta.protocol.types import StreamEventType, ToolCall
 
     home = tmp_path / "home"
     monkeypatch.setenv("ZETA_HOME", str(home))

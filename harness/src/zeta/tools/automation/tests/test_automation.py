@@ -19,7 +19,7 @@ from zeta.tools import ToolRegistry
 from zeta.tools.agent import ChildApprovalPolicy
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 import asyncio
@@ -91,7 +91,7 @@ from zeta.runtime.unattended import build_unattended_loop
 from zeta.skills import discover_session_skills
 
 
-from zeta.types import TextContent
+from zeta.protocol.types import TextContent
 
 
 START = datetime(2026, 9, 9, 11, 0, tzinfo=UTC)
@@ -914,7 +914,7 @@ def test_project_mcp_cannot_declare_the_subject_of_a_trusted_grant(
 def test_cli_import_list_show_and_disable_preserve_draft_status(
     tmp_path: Path, monkeypatch, capsys
 ) -> None:
-    from zeta.cli import main
+    from zeta.cli.main import main
 
     monkeypatch.setenv("ZETA_HOME", str(tmp_path))
     path = tmp_path / "jobs.json"
@@ -936,7 +936,7 @@ def test_cli_does_not_accept_piped_approval(
     import io
 
     from zeta.automations import cli
-    from zeta.cli import main
+    from zeta.cli.main import main
 
     monkeypatch.setenv("ZETA_HOME", str(tmp_path))
     with SQLiteStore(tmp_path) as store:
@@ -963,7 +963,7 @@ def test_cli_daemon_exits_cleanly_on_sigterm(tmp_path: Path, monkeypatch) -> Non
         [
             sys.executable,
             "-c",
-            'from zeta.cli import main; raise SystemExit(main(["automation", "daemon"]))',
+            'from zeta.cli.main import main; raise SystemExit(main(["automation", "daemon"]))',
         ],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,

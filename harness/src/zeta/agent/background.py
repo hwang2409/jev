@@ -9,14 +9,14 @@ from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any, Protocol
 
-from .agent_receipt import (
+from .receipt import (
     TerminalState,
     agent_stats,
     build_agent_receipt,
     receipt_tool_result,
 )
-from .core.store import ConversationEntry, ConversationStore
-from .types import (
+from ..core.store import ConversationEntry, ConversationStore
+from ..protocol.types import (
     Message,
     MessageRole,
     StreamEvent,

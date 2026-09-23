@@ -64,7 +64,7 @@ from zeta.skills import SkillCatalog
 from zeta.tools import ToolAbortSignal, ToolRegistry
 
 
-from zeta.types import MessageRole, StreamEventType, TextContent, ToolCall, ToolResult
+from zeta.protocol.types import MessageRole, StreamEventType, TextContent, ToolCall, ToolResult
 
 
 pytestmark = pytest.mark.usefixtures("stock_router_mode")

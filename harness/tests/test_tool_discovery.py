@@ -5,7 +5,7 @@ import pytest
 import zeta.tools as tools_package
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 def _use_tool_path(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:

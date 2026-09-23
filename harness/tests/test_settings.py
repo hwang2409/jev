@@ -9,7 +9,7 @@ import pytest
 
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.store import ConversationStore
-from zeta.settings import (
+from zeta.config.settings import (
     SETTINGS_FILENAME,
     LoadedSettings,
     ResolvedConfig,
@@ -695,7 +695,7 @@ def test_scoped_rules_reach_the_live_policy_through_create_app(
 ) -> None:
     """End-to-end: settings -> policy -> registry subject declaration."""
 
-    from zeta.cli import build_parser
+    from zeta.cli.main import build_parser
     from zeta.tui.app import create_app
 
     home = tmp_path / "home"

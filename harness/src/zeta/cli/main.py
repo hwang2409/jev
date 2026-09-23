@@ -8,11 +8,11 @@ import sys
 
 from prompt_toolkit.patch_stdout import patch_stdout
 
-from .core.commands.completion import completion_script
-from .core.login_flow import run_login
-from .core.session import SessionError, env_home
-from .providers.login import build_login_provider, pkce_values
-from .tui.app import create_app
+from ..core.commands.completion import completion_script
+from ..core.login_flow import run_login
+from ..core.session import SessionError, env_home
+from ..providers.login import build_login_provider, pkce_values
+from ..tui.app import create_app
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -157,11 +157,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="anthropic",
         help="OAuth provider (default: anthropic)",
     )
-    from .session_cli import add_subcommand as _add_session_subcommand
+    from .session import add_subcommand as _add_session_subcommand
 
     _add_session_subcommand(commands)
 
-    from .automations.cli import add_subcommand as _add_automation_subcommand
+    from ..automations.cli import add_subcommand as _add_automation_subcommand
 
     _add_automation_subcommand(commands)
     serve_parser = commands.add_parser(
@@ -206,11 +206,11 @@ def _print_exit_hint(app: object) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = build_parser()
+    parser = main.build_parser()
     args = parser.parse_args(argv)
     if args.command == "login":
         try:
-            handle = _run_login(args.provider)
+            handle = main._run_login(args.provider)
         except KeyboardInterrupt:
             print("login cancelled", file=sys.stderr)
             return 1
@@ -220,15 +220,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"logged in as {handle}" if handle else "ok")
         return 0
     if args.command == "automation":
-        from .automations.cli import run as run_automation
+        from ..automations.cli import run as run_automation
 
         return run_automation(args)
     if args.command == "session":
-        from .session_cli import run as _run_session
+        from .session import run as _run_session
 
         return _run_session(args)
     if args.command == "serve":
-        from .server import ZetaServer, run_server
+        from ..server import ZetaServer, run_server
 
         server = ZetaServer(
             cwd=args.cwd,
@@ -250,14 +250,14 @@ def main(argv: list[str] | None = None) -> int:
         print(completion_script(args.shell), end="")
         return 0
     if args.prompt is not None:
-        from .headless import run_headless
+        from ..runtime.headless import run_headless
 
         return run_headless(args, args.prompt)
     if args.format != "text":
         parser.error("--format requires --print")
     while True:
         try:
-            app = create_app(args)
+            app = main.create_app(args)
         except SessionError as exc:
             parser.error(str(exc))
         try:
@@ -267,10 +267,19 @@ def main(argv: list[str] | None = None) -> int:
                 args.continue_session = False
                 args.resume = None
                 continue
-            _print_exit_hint(app)
+            main._print_exit_hint(app)
             return 0
         finally:
-            _cleanup_ephemeral(app)
+            main._cleanup_ephemeral(app)
+
+
+# Keep ``import zeta.cli.main as cli`` usable after the package export wins.
+main.main = main
+main.build_parser = build_parser
+main.create_app = create_app
+main._cleanup_ephemeral = _cleanup_ephemeral
+main._print_exit_hint = _print_exit_hint
+main._run_login = _run_login
 
 
 __all__ = ["build_parser", "main"]

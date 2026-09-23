@@ -40,7 +40,7 @@ from zeta.tools._shared.process import BackgroundTaskRegistry, _group_exists
 from zeta.tui.render import format_status
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 def _python(*parts: str) -> str:

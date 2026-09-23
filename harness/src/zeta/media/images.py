@@ -9,7 +9,7 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
-    from .types import ToolImageBlock
+    from ..protocol.types import ToolImageBlock
 
 
 SUPPORTED_IMAGE_MEDIA_TYPES = frozenset(

@@ -7,30 +7,30 @@ import json
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
-from .agent_background import finish_background_child
-from .agent_budget import (
+from .background import finish_background_child
+from .budget import (
     MAX_AGENT_DEPTH,
     MAX_AGENT_TURN_CAP,
     AgentTree,
 )
-from .agent_budget import child_depth as next_agent_depth
-from .agent_receipt import TerminalState, _without_agent_receipt_suffix
-from .core.abort import AbortSignal as ToolAbortSignal
-from .core.checkpoints import _now
-from .core.store import ConversationStore
-from .model_catalog import provider_for_model
-from .providers.factory import build_backend, credential_store
-from .skills.agent_catalog import load_agent
-from .tools import ToolStreamPublisher
-from .tools.agent import ChildApprovalPolicy, agent_stats
-from .agent.presets import (
+from .budget import child_depth as next_agent_depth
+from .receipt import TerminalState, _without_agent_receipt_suffix
+from ..core.abort import AbortSignal as ToolAbortSignal
+from ..core.checkpoints import _now
+from ..core.store import ConversationStore
+from ..models.catalog import provider_for_model
+from ..providers.factory import build_backend, credential_store
+from ..skills.agent_catalog import load_agent
+from ..tools import ToolStreamPublisher
+from ..tools.agent import ChildApprovalPolicy, agent_stats
+from .presets import (
     GENERAL_PRESET,
     RUN_PRESET,
     AgentPreset,
     compose_system_prompt,
 )
-from .tools.registry import ToolExecutionContext
-from .types import (
+from ..tools.registry import ToolExecutionContext
+from ..protocol.types import (
     CompletionBackend,
     Message,
     MessageRole,
@@ -43,7 +43,7 @@ from .types import (
 )
 
 if TYPE_CHECKING:
-    from .loop import AgentLoop
+    from ..runtime.loop import AgentLoop
 
 
 async def consume_child(
@@ -513,7 +513,7 @@ async def run_agent_tool(
                 child_instance_id,
             )
             child_registry.set_approval_policy(child_policy)
-        from .loop import AgentLoop
+        from ..runtime.loop import AgentLoop
 
         child_loop = AgentLoop(
             child_backend,

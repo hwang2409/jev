@@ -16,8 +16,8 @@ from contextlib import ExitStack, contextmanager, nullcontext
 from pathlib import Path
 from typing import Any, Self
 
-from ..agent_receipt import encode_json
-from ..types import Message, MessageRole, ToolCall, ToolUseContent
+from ..agent.receipt import encode_json
+from ..protocol.types import Message, MessageRole, ToolCall, ToolUseContent
 from .agent_state import AgentStateMixin, _apply_agent_state, _parse_agent_state
 from .checkpoints import (
     CheckpointForkMixin,

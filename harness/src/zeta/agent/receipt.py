@@ -7,8 +7,8 @@ import re
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Literal, Protocol
 
-from .core.checkpoints import ConversationEntry
-from .types import (
+from ..core.checkpoints import ConversationEntry
+from ..protocol.types import (
     Message,
     MessageRole,
     StructuredToolResult,
@@ -233,7 +233,7 @@ def _with_answer_limit(
 def _governance_envelope(
     tool_name: str,
 ) -> Callable[[StructuredToolResult], StructuredToolResult]:
-    from .tools.registry import _apply_error_governance
+    from ..tools.registry import _apply_error_governance
 
     return lambda result: _apply_error_governance(result, tool_name)
 
@@ -478,7 +478,7 @@ def finalize_agent_results(
                 if result.is_canceled:
                     child_store.mark_agent_canceled(call.id)
                 else:
-                    from .agent_background import adopt_agent_children
+                    from .background import adopt_agent_children
 
                     adopt_agent_children(
                         child_store,

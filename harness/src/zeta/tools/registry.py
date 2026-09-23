@@ -34,7 +34,7 @@ from ..core.approval import (
 from ..core.approval import canceled_result as _canceled_result
 from ..core.safety import SafetyTier
 from ..core.store import ConversationStore
-from ..execution import (
+from ..runtime.execution import (
     ToolExecutionContext,
     ToolHandler,
     ToolHandlerResult,
@@ -51,7 +51,7 @@ from ..execution import (
     run_handler_with_abort,
 )
 from ..skills import SkillCatalog
-from ..types import (
+from ..protocol.types import (
     StructuredContentValue,
     StructuredToolResult,
     ToolCall,

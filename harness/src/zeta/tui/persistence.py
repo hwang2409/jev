@@ -16,8 +16,8 @@ from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import FileHistory
 
-from .core.checkpoints import ConversationIntegrityError, load_session_json
-from .core.session_files import read_session_file, session_root, write_session_json
+from ..core.checkpoints import ConversationIntegrityError, load_session_json
+from ..core.session_files import read_session_file, session_root, write_session_json
 
 HISTORY_LIMIT = 1000
 DRAFT_WRITE_DELAY = 0.2

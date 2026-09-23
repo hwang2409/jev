@@ -12,7 +12,7 @@ from typing import Any
 
 from .store import ConversationEntry, ConversationStore
 from ..providers import jev
-from ..types import (
+from ..protocol.types import (
     CompletionBackend,
     ContentBlock,
     ErrorInfo,

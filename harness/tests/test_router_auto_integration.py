@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 
-import zeta.loop as loop_module
+import zeta.runtime.loop as loop_module
 
 
 import zeta.tools.memory as memory_tools
@@ -31,7 +31,7 @@ from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
 
 
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 
 
 from zeta.providers.anthropic_payload import build_messages_payload
@@ -49,7 +49,7 @@ from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
 
 
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     TextContent,

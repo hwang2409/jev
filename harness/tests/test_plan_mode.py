@@ -8,18 +8,18 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from zeta.cli import build_parser
+from zeta.cli.main import build_parser
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.slash import create_slash_registry
 from zeta.core.store import ConversationStore
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 from zeta.mcp.prompt_commands import SlashModelInput
 from zeta.skills import SkillCatalog
 from zeta.agent.plan_mode import PLAN_MODE_PREAMBLE, PLAN_MODE_TOOLS
 from zeta.tui.app import create_app
 from zeta.tui.render import format_status
-from zeta.types import StreamEvent, TextContent, ToolCall
+from zeta.protocol.types import StreamEvent, TextContent, ToolCall
 
 
 async def collect(events: AsyncIterator[StreamEvent]) -> list[StreamEvent]:

@@ -22,8 +22,8 @@ import zeta.providers.codex as codex_module
 import zeta.providers.transport as transport_module
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
-from zeta.headless import drive_turn
-from zeta.loop import AgentLoop
+from zeta.runtime.headless import drive_turn
+from zeta.runtime.loop import AgentLoop
 from zeta.providers.anthropic import (
     AnthropicBackend,
     AnthropicCredentialStore,
@@ -40,9 +40,9 @@ from zeta.providers.transport import (
     stall_retry_notice,
     stall_watchdog,
 )
-from zeta.settings import Settings, load_settings, resolve
+from zeta.config.settings import Settings, load_settings, resolve
 from zeta.skills import SkillCatalog
-from zeta.types import (
+from zeta.protocol.types import (
     FAILED_TURN_MARKER,
     Message,
     MessageRole,

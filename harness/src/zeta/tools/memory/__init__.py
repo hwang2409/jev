@@ -16,8 +16,8 @@ from typing import TypedDict
 from pausanias.config import ConfigError, load_config
 
 from ...core.abort import AbortSignal
-from ...execution import ToolExecutionContext
-from ...types import StructuredContentValue, StructuredToolResult
+from ...runtime.execution import ToolExecutionContext
+from ...protocol.types import StructuredContentValue, StructuredToolResult
 from .._shared.process import tool_subprocess_env
 from ..registry import (
     ToolRegistry,

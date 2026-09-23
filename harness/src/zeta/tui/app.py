@@ -36,17 +36,17 @@ from ..core.slash import (
     context_window,
     create_slash_registry,
 )
-from ..loop import AgentLoop
-from ..persistence import DraftPersistence, history_for
+from ..runtime.loop import AgentLoop
+from .persistence import DraftPersistence, history_for
 from ..providers.factory import build_backend as build_network_backend
 from ..runtime.cleanup import close_session
-from ..settings import (
+from ..config.settings import (
     load_settings,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_settings
 )
-from ..submission_pipeline import SubmissionPipeline
+from ..submission.pipeline import SubmissionPipeline
 from ..tools._shared.user_discovery import ExternalToolDiscovery
 from ..tools.exec import trusted_macro_display
-from ..types import (
+from ..protocol.types import (
     CompletionBackend,
     Message,
     StreamEvent,
@@ -1041,7 +1041,7 @@ __all__ = [
 
 def __getattr__(name: str) -> object:
     if name == "main":
-        from ..cli import main
+        from ..cli.main import main
 
         return main
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

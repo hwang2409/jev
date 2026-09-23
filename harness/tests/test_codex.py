@@ -24,7 +24,7 @@ from zeta.providers.codex import (
     build_responses_payload,
     extract_account_id,
 )
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     StreamEventType,
@@ -2435,7 +2435,7 @@ async def test_cancellation_wins_over_failing_cleanup(tmp_path: Path) -> None:
     ({"code": None, "status_code": "403"}, "stream_error", None),
 ])
 async def test_stream_error_preserves_structured_metadata(shape, detail, code, status):
-    from zeta.loop import _error_info
+    from zeta.runtime.loop import _error_info
 
     detail = {**detail, "message": "Denied"}
     if shape == "flat":

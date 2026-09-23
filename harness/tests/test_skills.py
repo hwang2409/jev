@@ -16,7 +16,7 @@ from zeta.skills.loader import (
 from zeta.tools import ToolRegistry
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 def _write_skill(path: Path, name: str, body: str, *, keywords: str = "") -> None:

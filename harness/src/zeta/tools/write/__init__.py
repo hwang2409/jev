@@ -6,7 +6,7 @@ import hashlib
 import os
 from typing import NotRequired, TypedDict
 
-from ...types import StructuredToolResult
+from ...protocol.types import StructuredToolResult
 from .._shared.sandbox import _path_from_fd as _sandbox_path_from_fd
 from .._shared.sandbox import open_target
 from ..registry import AbortSignal, ToolRegistry, _success_result, text_block

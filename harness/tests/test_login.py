@@ -20,7 +20,7 @@ from urllib.request import urlopen
 import httpx
 import pytest
 
-from zeta.cli import build_parser
+from zeta.cli.main import build_parser
 from zeta.core import login_flow
 from zeta.core.login_flow import LoginError, LoginProvider, run_login
 from zeta.providers import login as provider_login
@@ -188,7 +188,7 @@ def test_login_sigint_closes_callback_server(tmp_path: Path) -> None:
             sys.executable,
             "-u",
             "-c",
-            "from zeta.cli import main; raise SystemExit(main(['login']))",
+            "from zeta.cli.main import main; raise SystemExit(main(['login']))",
         ],
         env=environment,
         stdout=subprocess.PIPE,

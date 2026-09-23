@@ -38,9 +38,9 @@ import json
 import sys
 from typing import IO, Any
 
-from .core.approval import ApprovalDecision
-from .core.session import SessionError
-from .runtime.driver import (
+from ..core.approval import ApprovalDecision
+from ..core.session import SessionError
+from .driver import (
     DENIAL_MARKER,
     TOOL_RESULT_MAX_BYTES,
     drive_turn,
@@ -79,7 +79,7 @@ def run_headless(args: argparse.Namespace, prompt: str) -> int:
         print("zeta: prompt must be a nonempty string", file=sys.stderr)
         return 2
 
-    from .tui.app import create_app
+    from ..tui.app import create_app
 
     try:
         app = create_app(args)

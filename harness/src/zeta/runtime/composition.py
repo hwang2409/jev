@@ -14,13 +14,13 @@ from ..core.project_context import ProjectContext, discover_repo_root
 from ..core.safety import SafetyTier
 from ..core.session import OpenedSession, SessionManager
 from ..core.slash import resolve_session_budget
-from ..loop import AgentLoop
-from ..settings import ResolvedConfig
+from .loop import AgentLoop
+from ..config.settings import ResolvedConfig
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
 from ..tools._shared.user_discovery import ExternalToolDiscovery, apply_external_tools
 from ..tools.registry import ToolRegistry
-from ..types import CompletionBackend, StreamEvent
+from ..protocol.types import CompletionBackend, StreamEvent
 
 BackendBuilder = Callable[..., tuple[CompletionBackend, str]]
 BackgroundEventSink = Callable[[StreamEvent], None]

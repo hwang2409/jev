@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from zeta.core.store import ConversationIntegrityError, ConversationStore
-from zeta.types import Message, MessageRole, TextContent, ToolCall, ToolUseContent
+from zeta.protocol.types import Message, MessageRole, TextContent, ToolCall, ToolUseContent
 
 
 def message(role: MessageRole, text: str) -> Message:

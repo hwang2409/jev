@@ -43,7 +43,7 @@ from zeta.core.store import ConversationStore
 from zeta.core.todo import TODO_STATUSES
 
 
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 
 
 from zeta.skills import SkillCatalog
@@ -61,7 +61,7 @@ from zeta.tui.app import TUIApp
 from zeta.tui.todo import TodoWidget
 
 
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 def _registry(tmp_path: Path) -> tuple[ConversationStore, ToolRegistry]:

@@ -28,10 +28,10 @@ from zeta.core.context import ContextAssembler
 from zeta.core.store import ConversationStore
 
 
-from zeta.images import IMAGE_DEGRADATION_WARNING, detect_image_media_type
+from zeta.media.images import IMAGE_DEGRADATION_WARNING, detect_image_media_type
 
 
-from zeta.loop import _validated_tool_result
+from zeta.runtime.loop import _validated_tool_result
 
 
 from zeta.providers.anthropic import build_messages_payload
@@ -55,7 +55,7 @@ from zeta.tui.checkpoints import CheckpointTranscriptMixin
 from zeta.tui.render import render_event
 
 
-from zeta.types import (
+from zeta.protocol.types import (
     ImageContent,
     Message,
     MessageRole,

@@ -5,13 +5,13 @@ from pathlib import Path
 from ..core.approval import ApprovalDecision, ApprovalPolicy
 from ..core.project_context import discover_repo_root
 from ..core.session import OpenedSession, SessionManager
-from ..loop import AgentLoop
+from .loop import AgentLoop
 from ..providers.factory import build_backend
-from ..settings import load_settings
+from ..config.settings import load_settings
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import discover_packaged_agents
 from ..tools import ToolRegistry
-from ..types import CompletionBackend
+from ..protocol.types import CompletionBackend
 
 
 def build_unattended_loop(

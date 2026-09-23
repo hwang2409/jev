@@ -12,16 +12,16 @@ from typing import Any
 
 import pytest
 
-from zeta.cli import build_parser, main
+from zeta.cli.main import build_parser, main
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRule
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.session import SessionManager, env_home
 from zeta.core.store import ConversationStore
-from zeta.headless import DENIAL_MARKER, drive_turn, run_headless
-from zeta.loop import AgentLoop
+from zeta.runtime.headless import DENIAL_MARKER, drive_turn, run_headless
+from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.types import TextContent, ToolCall
+from zeta.protocol.types import TextContent, ToolCall
 
 pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
@@ -59,7 +59,7 @@ def test_print_mode_runs_session_hook_inside_async_activation(
         [
             sys.executable,
             "-c",
-            "from zeta.cli import main; raise SystemExit(main())",
+            "from zeta.cli.main import main; raise SystemExit(main())",
             "--provider",
             "fake",
             "-p",
@@ -174,7 +174,7 @@ async def test_json_mode_bounds_large_tool_result(tmp_path: Path) -> None:
 
 
 async def test_json_mode_tool_result_bound_is_byte_based(tmp_path: Path) -> None:
-    from zeta.headless import TOOL_RESULT_MAX_BYTES
+    from zeta.runtime.headless import TOOL_RESULT_MAX_BYTES
 
     call = ToolCall("call-1", "wide", {})
     backend = FakeBackend(
@@ -201,7 +201,7 @@ async def test_json_mode_tool_result_bound_is_byte_based(tmp_path: Path) -> None
 
 
 async def test_json_mode_bounds_large_tool_call_arguments(tmp_path: Path) -> None:
-    from zeta.headless import TOOL_RESULT_MAX_BYTES
+    from zeta.runtime.headless import TOOL_RESULT_MAX_BYTES
 
     big_arg = "z" * (TOOL_RESULT_MAX_BYTES * 2)
     call = ToolCall("call-1", "sink", {"payload": big_arg})
@@ -264,7 +264,7 @@ def test_headless_run_headless_hard_denies_always_ask_tools(
     come.
     """
 
-    from zeta.headless import run_headless
+    from zeta.runtime.headless import run_headless
 
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
@@ -304,7 +304,7 @@ def test_headless_respects_settings_yolo_without_cli_flag(
     resolved default is ALLOW so headless does not clobber it to DENY.
     """
 
-    from zeta.headless import run_headless
+    from zeta.runtime.headless import run_headless
 
     home = tmp_path / "zeta-home"
     home.mkdir()
@@ -346,7 +346,7 @@ def test_headless_no_yolo_flag_beats_settings_yolo(
     the headless policy back to DENY.
     """
 
-    from zeta.headless import run_headless
+    from zeta.runtime.headless import run_headless
 
     home = tmp_path / "zeta-home"
     home.mkdir()
@@ -391,7 +391,7 @@ def test_headless_hard_denies_argument_scoped_ask_rules(
     would survive and headless would poll for a UI answer that never comes.
     """
 
-    from zeta.headless import run_headless
+    from zeta.runtime.headless import run_headless
 
     home = tmp_path / "home"
     home.mkdir()
@@ -432,7 +432,7 @@ def test_headless_reports_dropped_scoped_rules_on_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from zeta.headless import run_headless
+    from zeta.runtime.headless import run_headless
 
     home = tmp_path / "home"
     home.mkdir()

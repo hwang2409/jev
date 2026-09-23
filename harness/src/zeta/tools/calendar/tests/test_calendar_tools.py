@@ -13,7 +13,7 @@ from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.store import ConversationStore
 from zeta.skills import SkillCatalog
 from zeta.tools.registry import ToolRegistry
-from zeta.types import ToolCall
+from zeta.protocol.types import ToolCall
 
 
 class FakeCalendarAdapter:

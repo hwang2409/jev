@@ -17,7 +17,7 @@ from ..runtime.unattended import build_unattended_loop
 from ..skills import discover_session_skills
 from ..skills.agent_catalog import discover_packaged_agents
 from ..tools import ToolRegistry
-from ..types import CompletionBackend, Message, MessageRole, TextContent
+from ..protocol.types import CompletionBackend, Message, MessageRole, TextContent
 from .delivery import Delivery, SlackDelivery
 from .models import DueOccurrence, Job, PollEvent, instant, timestamp
 from .services import mount_services

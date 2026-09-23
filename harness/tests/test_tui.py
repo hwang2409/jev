@@ -46,7 +46,7 @@ from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.loop import AgentLoop
 from zeta.core.store import ConversationStore
 from zeta.mcp import MCPPrompt, MCPPromptArgument
-from zeta.persistence import DraftPersistence, history_for
+from zeta.tui.persistence import DraftPersistence, history_for
 from zeta.providers.anthropic import (
     AnthropicBackend,
     AnthropicCredentialStore,
@@ -88,7 +88,7 @@ from zeta.tui.render import (
 )
 from zeta.tui.theme import ACCENT, BODY, DIM, ERROR, RICH_THEME
 from zeta.tui.transcript import TranscriptPresenter, TranscriptWidget
-from zeta.types import (
+from zeta.protocol.types import (
     CompletionBackend,
     ErrorInfo,
     ImageContent,
@@ -4396,6 +4396,27 @@ def test_main_import_compatibility() -> None:
     assert app_main is cli_main
 
 
+def test_cli_main_export_survives_submodule_import() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import types; import zeta.cli.main; import zeta.tui; "
+                "from zeta.cli import main as cli_main; "
+                "from zeta.tui import main as tui_main; "
+                "assert isinstance(cli_main, types.FunctionType); "
+                "assert cli_main is tui_main"
+            ),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
 def test_tui_import_does_not_load_cli() -> None:
     result = subprocess.run(
         [
@@ -5409,7 +5430,7 @@ def test_full_stream_hostile_inline_markers_finish_within_timeout() -> None:
         from zeta.core.store import ConversationStore
         from zeta.skills import SkillCatalog
         from zeta.tui.app import TUIApp
-        from zeta.types import StreamEvent, StreamEventType, TextContent
+        from zeta.protocol.types import StreamEvent, StreamEventType, TextContent
 
         with TemporaryDirectory() as directory:
             app = TUIApp(

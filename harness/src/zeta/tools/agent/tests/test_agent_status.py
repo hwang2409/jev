@@ -8,10 +8,10 @@ import pytest
 from zeta.core.abort import AbortGenerationRegistry
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.store import ConversationStore
-from zeta.loop import AgentLoop
+from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools.agent import MAX_AGENT_STATUS_RESULT, MAX_AGENT_STATUS_STEP
-from zeta.types import (
+from zeta.protocol.types import (
     Message,
     MessageRole,
     TextContent,

@@ -13,7 +13,7 @@ import pytest
 from evals.run_evals import parse_events
 
 
-from zeta.cli import build_parser
+from zeta.cli.main import build_parser
 
 
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
@@ -52,7 +52,7 @@ from zeta.runtime.composition import compose_runtime
 from zeta.runtime.driver import drive_turn
 
 
-from zeta.settings import ResolvedConfig
+from zeta.config.settings import ResolvedConfig
 
 
 from zeta.skills import SkillCatalog
@@ -67,7 +67,7 @@ from zeta.tools import ToolRegistry
 from zeta.tools.exec import run_inline_shell_batch
 
 
-from zeta.types import TextContent, ToolCall
+from zeta.protocol.types import TextContent, ToolCall
 
 
 def _score(
