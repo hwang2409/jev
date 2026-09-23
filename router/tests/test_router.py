@@ -1,5 +1,6 @@
-from jm.answers import ChoiceAnswer, NoulAnswer
-from jm.client import JevError, JevResponse
+from pathlib import Path
+
+from jm.client import JevError
 
 from router import RouteResult, build_request, parse_response, route
 
@@ -88,18 +89,18 @@ def test_route_uses_jm_client_and_preserves_request_questions():
 
 
 def test_route_accepts_normalized_jm_response():
-    response = JevResponse(
-        answers={
-            "tool": ChoiceAnswer(
-                choice="Read",
-                probabilities={"Read": 0.8, "Bash": 0.2},
-                confidence=0.6,
-            ),
-            "needs_tool": NoulAnswer(noul=0.75),
-            "step_clarity": NoulAnswer(noul=0.9),
+    response = {
+        "answers": {
+            "tool": {
+                "choice": "Read",
+                "probabilities": {"Read": 0.8, "Bash": 0.2},
+                "confidence": 0.6,
+            },
+            "needs_tool": {"noul": 0.75},
+            "step_clarity": {"noul": 0.9},
         },
-        usage={"input_tokens": 2, "output_tokens": 1},
-    )
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+    }
 
     result = route("t", "s", catalog=CATALOG_STUB, client=FakeClient(response))
 
@@ -108,6 +109,27 @@ def test_route_accepts_normalized_jm_response():
     assert result.confidence == 0.6
     assert result.needs_tool == 0.75
     assert result.step_clarity == 0.9
+
+
+def test_router_has_no_transport_implementation():
+    source = (Path(__file__).parents[1] / "router.py").read_text()
+
+    forbidden = (
+        "import requests",
+        "import httpx",
+        "http://",
+        "https://",
+        "GATEWAY_KEY_NAMES",
+        "VERCEL_AI_GATEWAY",
+        "AI_GATEWAY_API_KEY",
+        "VERCEL_JEV_KEY",
+        "for attempt in",
+        "while attempts",
+        "_gateway_questions",
+        "_normalize_gateway_response",
+        "_retry_after",
+    )
+    assert not any(token in source for token in forbidden)
 
 
 def test_route_keeps_jm_transport_errors():
@@ -120,3 +142,5 @@ def test_route_keeps_jm_transport_errors():
         raise AssertionError("expected JevError")
     except JevError as error:
         assert str(error) == "gateway unavailable"
+        assert error.http_status == 503
+        assert error.attempts == 3
