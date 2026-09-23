@@ -63,7 +63,9 @@ def test_browser_value_types_construct_with_plain_values() -> None:
 async def test_fake_records_actions_and_can_simulate_failures() -> None:
     first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
     second = PageObservation(2, 2, first.url, "Two", "", (), True, True)
-    element = ElementRef(1, "e1", "button", "click", "Next", "next", None, "main", False, True)
+    element = ElementRef(
+        1, "e1", "button", "click", "Next", "next", None, "main", False, True
+    )
     adapter = FakeBrowserAdapter([first, second])
 
     observed = await adapter.observe(SnapshotLimits())
@@ -85,9 +87,15 @@ async def test_fake_records_actions_and_can_simulate_failures() -> None:
 @pytest.mark.asyncio
 async def test_fake_returns_next_observation_and_records_values() -> None:
     first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
-    second = PageObservation(2, 2, "https://example.test/next", "Two", "", (), True, True)
-    element = ElementRef(1, "e1", "textbox", "type", "Name", "name", None, "main", False, True)
-    select = ElementRef(1, "e2", "combobox", "select", "Plan", "plan", "basic", "main", False, True)
+    second = PageObservation(
+        2, 2, "https://example.test/next", "Two", "", (), True, True
+    )
+    element = ElementRef(
+        1, "e1", "textbox", "type", "Name", "name", None, "main", False, True
+    )
+    select = ElementRef(
+        1, "e2", "combobox", "select", "Plan", "plan", "basic", "main", False, True
+    )
     adapter = FakeBrowserAdapter([first, second])
 
     action = await adapter.type_text(element, "Ada", False, 100)
@@ -105,10 +113,14 @@ async def test_fake_returns_next_observation_and_records_values() -> None:
 
 @pytest.mark.asyncio
 async def test_fake_bounds_attribute_names_and_values_by_total_bytes() -> None:
-    observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
     adapter = FakeBrowserAdapter([observation])
     attributes = [f"attribute_{index}_{'x' * 200}" for index in range(100)]
-    element = ElementRef(1, "e1", "article", "extract", "v" * 1000, "", None, None, False, True)
+    element = ElementRef(
+        1, "e1", "article", "extract", "v" * 1000, "", None, None, False, True
+    )
 
     extracted = await adapter.extract(element, ["text", *attributes], 800)
 
@@ -126,7 +138,9 @@ async def test_fake_bounds_attribute_names_and_values_by_total_bytes() -> None:
 
 @pytest.mark.asyncio
 async def test_fake_extracts_typed_search_results() -> None:
-    observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
     results = (
         SearchResultCandidate("a", "first", "snippet", "https://one.example", "one", 1),
     )
@@ -142,8 +156,12 @@ async def test_fake_extracts_typed_search_results() -> None:
 @pytest.mark.asyncio
 async def test_fake_click_records_ref_and_advances_snapshot() -> None:
     first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
-    second = PageObservation(2, 2, "https://example.test/next", "Two", "", (), True, True)
-    element = ElementRef(1, "e1", "button", "click", "Next", "next", None, "main", False, True)
+    second = PageObservation(
+        2, 2, "https://example.test/next", "Two", "", (), True, True
+    )
+    element = ElementRef(
+        1, "e1", "button", "click", "Next", "next", None, "main", False, True
+    )
     adapter = FakeBrowserAdapter([first, second])
 
     action = await adapter.click(element, 100)
@@ -155,7 +173,9 @@ async def test_fake_click_records_ref_and_advances_snapshot() -> None:
 
 @pytest.mark.asyncio
 async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
-    observation = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
     adapter = FakeBrowserAdapter([observation])
 
     await adapter.launch()
@@ -169,8 +189,12 @@ async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
 @pytest.mark.asyncio
 async def test_fake_navigation_advances_scripted_snapshots() -> None:
     first = PageObservation(1, 1, "https://example.test", "One", "", (), True, True)
-    second = PageObservation(2, 2, "https://example.test/two", "Two", "", (), True, True)
-    third = PageObservation(3, 3, "https://example.test/three", "Three", "", (), True, True)
+    second = PageObservation(
+        2, 2, "https://example.test/two", "Two", "", (), True, True
+    )
+    third = PageObservation(
+        3, 3, "https://example.test/three", "Three", "", (), True, True
+    )
     adapter = FakeBrowserAdapter([first, second, third])
 
     first_result = await adapter.navigate(second.url, 100)
@@ -180,69 +204,204 @@ async def test_fake_navigation_advances_scripted_snapshots() -> None:
 
 
 @pytest.mark.asyncio
-async def test_playwright_adapter_uses_local_fixture_for_the_browser_contract() -> None:
-    pytest.importorskip("playwright")
-    fixture = Path(__file__).parent / "fixtures" / "adapter.html"
+async def test_element_from_raw_applies_the_final_utf8_byte_cap() -> None:
+    class RawPage:
+        async def evaluate(self, _script: str, _arguments: object) -> dict[str, object]:
+            return {
+                "url": "https://example.test",
+                "title": "",
+                "text": "",
+                "loaded": True,
+                "stable": True,
+                "elements": [
+                    {
+                        "element_id": "e1",
+                        "role": "button",
+                        "affordance": "click",
+                        "text": "abcdefgh",
+                        "name": "abcdefgh",
+                        "value_hint": "abcdefgh",
+                        "landmark": "abcdefgh",
+                    }
+                ],
+            }
+
+        def locator(self, _selector: str) -> object:
+            return object()
+
+    adapter = PlaywrightBrowserAdapter(
+        headless=True,
+        limits=SnapshotLimits(element_text_bytes=4),
+    )
+    adapter._page = RawPage()
+    observation = await adapter.observe(SnapshotLimits(element_text_bytes=4))
+    element = observation.elements[0]
+
+    assert element.text == "abcd"
+    assert element.name == "abcd"
+    assert element.value_hint == "abcd"
+    assert element.landmark == "abcd"
+    assert all(
+        len(value.encode("utf-8")) <= 4
+        for value in (element.text, element.name, element.value_hint, element.landmark)
+        if value is not None
+    )
+
+
+@pytest.fixture(params=("fake", "playwright"), ids=("fake", "playwright"))
+async def contract_adapter(
+    request: pytest.FixtureRequest,
+) -> FakeBrowserAdapter | PlaywrightBrowserAdapter:
+    if request.param == "fake":
+        element_sets = (
+            (
+                ElementRef(
+                    snapshot_id,
+                    "button",
+                    "button",
+                    "click",
+                    "continue",
+                    "continue",
+                    None,
+                    "main",
+                    False,
+                    True,
+                    generation=snapshot_id,
+                ),
+                ElementRef(
+                    snapshot_id,
+                    "query",
+                    "textbox",
+                    "type",
+                    "query",
+                    "query",
+                    "initial",
+                    "main",
+                    False,
+                    True,
+                    generation=snapshot_id,
+                ),
+                ElementRef(
+                    snapshot_id,
+                    "choice",
+                    "combobox",
+                    "select",
+                    "choice",
+                    "choice",
+                    "one",
+                    "main",
+                    False,
+                    True,
+                    generation=snapshot_id,
+                ),
+            )
+            for snapshot_id in range(1, 5)
+        )
+        results = (
+            SearchResultCandidate(
+                "result-1", "first", "snippet", "https://example.test/one", "page", 1
+            ),
+        )
+        adapter = FakeBrowserAdapter(
+            [
+                PageObservation(
+                    index,
+                    index,
+                    "https://example.test",
+                    "Example",
+                    "body",
+                    elements,
+                    True,
+                    True,
+                )
+                for index, elements in enumerate(element_sets, 1)
+            ],
+            search_results=results,
+        )
+        yield adapter
+        return
+
+    pytest.importorskip("playwright", reason="playwright package is absent")
     adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
-
-    await adapter.launch()
     try:
-        observation = await adapter.navigate(fixture.as_uri(), 2_000)
-        assert observation.url.startswith("file://")
-        assert observation.title == "adapter fixture"
-        assert all(isinstance(element, ElementRef) for element in observation.elements)
-        assert "locator" not in repr(observation)
-
-        button = next(element for element in observation.elements if element.role == "button")
-        action = await adapter.click(button, 1_000)
-        assert action.changed is True
-
-        refreshed = await adapter.observe(SnapshotLimits())
-        query = next(element for element in refreshed.elements if element.name == "query")
-        choice = next(element for element in refreshed.elements if element.name == "choice")
-        await adapter.type_text(query, "updated", True, 1_000)
-        refreshed = await adapter.observe(SnapshotLimits())
-        choice = next(element for element in refreshed.elements if element.name == "choice")
-        await adapter.select(choice, "two", 1_000)
-
-        extracted = await adapter.extract(None, [], 2_000)
-        assert isinstance(extracted.value, str)
-        assert "updated" in extracted.value or "local browser fixture" in extracted.value
-        search = await adapter.extract_search_results(None, 2_000)
-        assert search.results is not None
-        assert search.results[0].result_id == "result-1"
-    finally:
+        await adapter.launch()
+    except BrowserError as exc:
         await adapter.close()
+        pytest.skip(f"playwright browser executable is absent: {exc}")
+    try:
+        yield adapter
+    finally:
         await adapter.close()
 
 
 @pytest.mark.asyncio
-async def test_playwright_adapter_rejects_stale_and_detached_element_refs() -> None:
-    pytest.importorskip("playwright")
+async def test_browser_adapters_share_the_action_contract(
+    contract_adapter: FakeBrowserAdapter | PlaywrightBrowserAdapter,
+) -> None:
     fixture = Path(__file__).parent / "fixtures" / "adapter.html"
-    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    url = (
+        fixture.as_uri()
+        if isinstance(contract_adapter, PlaywrightBrowserAdapter)
+        else "https://example.test"
+    )
+    observation = await contract_adapter.navigate(url, 2_000)
+    assert observation.loaded and observation.stable
+    assert all(isinstance(element, ElementRef) for element in observation.elements)
+    button = next(
+        element for element in observation.elements if element.affordance == "click"
+    )
+    action = await contract_adapter.click(button, 1_000)
+    assert action.changed is True
+    current = await contract_adapter.observe(SnapshotLimits())
+    query = next(element for element in current.elements if element.name == "query")
+    await contract_adapter.type_text(query, "updated", True, 1_000)
+    current = await contract_adapter.observe(SnapshotLimits())
+    choice = next(element for element in current.elements if element.name == "choice")
+    await contract_adapter.select(choice, "two", 1_000)
+    extracted = await contract_adapter.extract(None, [], 2_000)
+    assert isinstance(extracted.value, str)
+    search = await contract_adapter.extract_search_results(None, 2_000)
+    assert search.results is not None
 
-    await adapter.launch()
-    try:
-        observation = await adapter.navigate(fixture.as_uri(), 2_000)
-        button = next(element for element in observation.elements if element.role == "button")
-        await adapter.observe(SnapshotLimits())
+
+@pytest.mark.asyncio
+async def test_real_adapter_rejects_a_replaced_dom_element(
+    contract_adapter: FakeBrowserAdapter | PlaywrightBrowserAdapter,
+) -> None:
+    if isinstance(contract_adapter, FakeBrowserAdapter):
+        observation = await contract_adapter.observe(SnapshotLimits())
+        button = next(
+            element
+            for element in observation.elements
+            if element.element_id == "button"
+        )
+        contract_adapter.detach(button.element_id)
         with pytest.raises(ElementUnavailableError):
-            await adapter.click(button, 1_000)
+            await contract_adapter.click(button, 1_000)
+        return
 
-        current = await adapter.observe(SnapshotLimits())
-        current_button = next(element for element in current.elements if element.role == "button")
-        await adapter._page.evaluate("document.querySelector('#continue').remove()")
-        with pytest.raises(ElementUnavailableError):
-            await adapter.click(current_button, 1_000)
-    finally:
-        await adapter.close()
+    fixture = Path(__file__).parent / "fixtures" / "adapter.html"
+    observation = await contract_adapter.navigate(fixture.as_uri(), 2_000)
+    button = next(
+        element for element in observation.elements if element.role == "button"
+    )
+    await contract_adapter._page.evaluate(
+        "const node = document.querySelector('#continue'); node.replaceWith(node.cloneNode(true));"
+    )
+    with pytest.raises(ElementUnavailableError):
+        await contract_adapter.click(button, 1_000)
+    assert await contract_adapter._page.locator("#status").inner_text() == "ready"
 
 
-def test_browser_adapter_selection_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_browser_adapter_selection_covers_all_modes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("ZETA_BROWSER_ADAPTER", raising=False)
-    disabled = make_browser_adapter_factory()
-    with pytest.raises(BrowserError, match="ZETA_BROWSER_ADAPTER=playwright"):
+    default = make_browser_adapter_factory()
+    assert isinstance(default(), FakeBrowserAdapter)
+
+    disabled = make_browser_adapter_factory(mode="disabled")
+    with pytest.raises(BrowserError, match="adapter is disabled"):
         disabled()
 
     selected = make_browser_adapter_factory(mode="playwright")
@@ -250,7 +409,9 @@ def test_browser_adapter_selection_is_opt_in(monkeypatch: pytest.MonkeyPatch) ->
     assert isinstance(adapter, PlaywrightBrowserAdapter)
 
 
-def test_browser_register_wires_the_configured_adapter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_browser_register_wires_the_configured_adapter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     monkeypatch.setenv("ZETA_BROWSER_ADAPTER", "playwright")
     registry = ToolRegistry(
         tmp_path,

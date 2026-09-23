@@ -119,7 +119,9 @@ async def test_browser_click_uses_jev_choice_and_pre_post_gates(
     await registry.execute(ToolCall("state", "browser_state", {}))
     gates: list[dict[str, object]] = []
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice("e1", 0.9, ("e1",))
 
     async def gate(**kwargs: object) -> PageStateDecision:
@@ -133,7 +135,12 @@ async def test_browser_click_uses_jev_choice_and_pre_post_gates(
         ToolCall(
             "click",
             "browser_click",
-            {"snapshot_id": 1, "element_id": "e1", "role": "button", "affordance": "click"},
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "click",
+            },
         )
     )
 
@@ -180,7 +187,9 @@ async def test_browser_click_returns_top_three_without_acting_on_low_confidence(
     registry.browser_goal = "choose a choice"
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice(None, 0.7, ("e1", "e2", "e3"))
 
     monkeypatch.setattr(jev, "choose_browser_element", choose)
@@ -188,7 +197,12 @@ async def test_browser_click_returns_top_three_without_acting_on_low_confidence(
         ToolCall(
             "click",
             "browser_click",
-            {"snapshot_id": 1, "element_id": "e1", "role": "button", "affordance": "click"},
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "click",
+            },
         )
     )
 
@@ -206,7 +220,9 @@ async def test_browser_click_does_not_act_when_page_state_gate_blocks(
     registry.browser_goal = "continue"
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice("e1", 0.9, ("e1",))
 
     async def gate(**_kwargs: object) -> PageStateDecision:
@@ -218,7 +234,12 @@ async def test_browser_click_does_not_act_when_page_state_gate_blocks(
         ToolCall(
             "click",
             "browser_click",
-            {"snapshot_id": 1, "element_id": "e1", "role": "button", "affordance": "click"},
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "click",
+            },
         )
     )
 
@@ -262,7 +283,9 @@ async def test_browser_submit_hands_risk_to_shared_safety_tier(
     registry = _registry(tmp_path, adapter, tier)
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice("e1", 0.9, ("e1",), "submit")
 
     async def page_gate(**_kwargs: object) -> PageStateDecision:
@@ -328,14 +351,18 @@ async def test_browser_ask_uses_durable_approval_gate(
     )
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice("e1", 0.9, ("e1",), "submit")
 
     async def page_gate(**_kwargs: object) -> PageStateDecision:
         return PageStateDecision(True, None, None)
 
     async def ask(_evidence: object) -> SafetyOutcome:
-        return SafetyOutcome("ask", "jev", score=2, confidence=0.9, reason="score_exceeds")
+        return SafetyOutcome(
+            "ask", "jev", score=2, confidence=0.9, reason="score_exceeds"
+        )
 
     monkeypatch.setattr(jev, "choose_browser_element", choose)
     monkeypatch.setattr(
@@ -362,7 +389,9 @@ async def test_browser_ask_uses_durable_approval_gate(
         pytest.fail("browser approval request was not persisted")
 
     request = next(
-        request for request in policy.pending_requests() if request.request_id == call.id
+        request
+        for request in policy.pending_requests()
+        if request.request_id == call.id
     )
     assert request.label is not None
     assert "action=submit" in request.label
@@ -383,37 +412,96 @@ async def test_browser_ask_uses_durable_approval_gate(
     [
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Delete record", "", None, "main", False, True),
+            ElementRef(
+                1,
+                "e1",
+                "button",
+                "click",
+                "Delete record",
+                "",
+                None,
+                "main",
+                False,
+                True,
+            ),
             BrowserRiskEvidence(
-                "click", "button", "Delete record", "https://example.test", None,
-                None, False, False, False, False,
+                "click",
+                "button",
+                "Delete record",
+                "https://example.test",
+                None,
+                None,
+                False,
+                False,
+                False,
+                False,
             ),
             "destructive_action",
         ),
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Pay now", "", None, "main", False, True),
+            ElementRef(
+                1, "e1", "button", "click", "Pay now", "", None, "main", False, True
+            ),
             BrowserRiskEvidence(
-                "click", "button", "Pay now", "https://example.test", None,
-                None, True, False, False, False,
+                "click",
+                "button",
+                "Pay now",
+                "https://example.test",
+                None,
+                None,
+                True,
+                False,
+                False,
+                False,
             ),
             "payment_or_financial_commitment",
         ),
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Update profile", "", None, "main", False, True, durable_state_change=True),
+            ElementRef(
+                1,
+                "e1",
+                "button",
+                "click",
+                "Update profile",
+                "",
+                None,
+                "main",
+                False,
+                True,
+                durable_state_change=True,
+            ),
             BrowserRiskEvidence(
-                "click", "button", "Update profile", "https://example.test", None,
-                None, False, False, False, True,
+                "click",
+                "button",
+                "Update profile",
+                "https://example.test",
+                None,
+                None,
+                False,
+                False,
+                False,
+                True,
             ),
             "durable_state_change",
         ),
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Sign in", "", None, "main", False, True),
+            ElementRef(
+                1, "e1", "button", "click", "Sign in", "", None, "main", False, True
+            ),
             BrowserRiskEvidence(
-                "click", "button", "Sign in", "https://example.test", None,
-                None, False, True, False, False,
+                "click",
+                "button",
+                "Sign in",
+                "https://example.test",
+                None,
+                None,
+                False,
+                True,
+                False,
+                False,
             ),
             "authentication_or_permission_change",
         ),
@@ -433,32 +521,74 @@ async def test_browser_ask_uses_durable_approval_gate(
                 download=True,
             ),
             BrowserRiskEvidence(
-                "click", "link", "Download report", "https://example.test", None,
-                None, False, False, True, False,
+                "click",
+                "link",
+                "Download report",
+                "https://example.test",
+                None,
+                None,
+                False,
+                False,
+                True,
+                False,
             ),
             "download",
         ),
         (
             "browser_click",
             ElementRef(
-                1, "e1", "link", "click", "Read article", "", None, "main", False, True,
+                1,
+                "e1",
+                "link",
+                "click",
+                "Read article",
+                "",
+                None,
+                "main",
+                False,
+                True,
                 target_url="https://other.test/article",
             ),
             BrowserRiskEvidence(
-                "click", "link", "Read article", "https://example.test",
-                "https://other.test/article", None, False, False, False, False,
+                "click",
+                "link",
+                "Read article",
+                "https://example.test",
+                "https://other.test/article",
+                None,
+                False,
+                False,
+                False,
+                False,
             ),
             "external_origin",
         ),
         (
             "browser_click",
             ElementRef(
-                1, "e1", "button", "click", "Continue", "", None, "main", False, True,
+                1,
+                "e1",
+                "button",
+                "click",
+                "Continue",
+                "",
+                None,
+                "main",
+                False,
+                True,
                 form_action_origin="https://other.test/submit",
             ),
             BrowserRiskEvidence(
-                "click", "button", "Continue", "https://example.test", None,
-                "https://other.test/submit", False, False, False, False,
+                "click",
+                "button",
+                "Continue",
+                "https://example.test",
+                None,
+                "https://other.test/submit",
+                False,
+                False,
+                False,
+                False,
             ),
             "external_form_action_origin",
         ),
@@ -478,8 +608,16 @@ async def test_browser_ask_uses_durable_approval_gate(
                 target_url="not a url",
             ),
             BrowserRiskEvidence(
-                "click", "button", "Unknown target", "https://example.test",
-                "not a url", None, False, False, False, False,
+                "click",
+                "button",
+                "Unknown target",
+                "https://example.test",
+                "not a url",
+                None,
+                False,
+                False,
+                False,
+                False,
             ),
             "unclassifiable_target_url",
         ),
@@ -498,7 +636,9 @@ async def test_risky_routes_fail_closed_through_real_handlers(
     registry = _registry(tmp_path, adapter, tier)
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice("e1", 0.9, ("e1",), element.affordance)
 
     async def page_gate(**_kwargs: object) -> PageStateDecision:
@@ -580,7 +720,9 @@ async def test_low_confidence_risky_choice_escalates_without_acting(
     registry.browser_goal = "choose a delete record"
     await registry.execute(ToolCall("state", "browser_state", {}))
 
-    async def choose(*_args: object, **_kwargs: object) -> jev.BrowserElementChoiceResult:
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
         return _choice(None, 0.7, ("e1", "e2", "e3"))
 
     monkeypatch.setattr(jev, "choose_browser_element", choose)
@@ -658,7 +800,9 @@ async def test_external_navigation_uses_safety_handler_route(
 
 
 @pytest.mark.asyncio
-async def test_browser_registers_stable_schemas_and_starts_lazily(tmp_path: Path) -> None:
+async def test_browser_registers_stable_schemas_and_starts_lazily(
+    tmp_path: Path,
+) -> None:
     adapter = FakeBrowserAdapter([_observation()])
     registry = _registry(tmp_path, adapter)
 
@@ -914,7 +1058,9 @@ async def test_browser_extract_returns_ranked_search_results(
     result = await _execute_search_extract(
         tmp_path,
         monkeypatch,
-        jev.SearchResultScoreResult({"a": 0.6, "b": 0.9}, 0.95, {"output_tokens": 2}, 0.95),
+        jev.SearchResultScoreResult(
+            {"a": 0.6, "b": 0.9}, 0.95, {"output_tokens": 2}, 0.95
+        ),
     )
     structured = _structured(result)
 
@@ -922,7 +1068,9 @@ async def test_browser_extract_returns_ranked_search_results(
     assert structured["triage"]["decision"] == "accepted"
     assert [item["result_id"] for item in structured["ranked_results"]] == ["b", "a"]
     assert structured["ranked_results"][0]["relevance_score"] == pytest.approx(0.9)
-    assert "search triage: status=ranked decision=accepted warnings=none" in _text(result)
+    assert "search triage: status=ranked decision=accepted warnings=none" in _text(
+        result
+    )
 
 
 @pytest.mark.asyncio
@@ -939,7 +1087,10 @@ async def test_browser_extract_degrades_to_unranked_results_on_provider_failure(
     assert structured["triage"]["status"] == "unranked"
     assert "provider unavailable" in structured["warning"]
     assert "relevance_score" not in structured["results"][0]
-    assert "search triage: status=unranked decision=degraded warnings=degraded" in _text(result)
+    assert (
+        "search triage: status=unranked decision=degraded warnings=degraded"
+        in _text(result)
+    )
 
 
 @pytest.mark.asyncio
@@ -955,4 +1106,7 @@ async def test_browser_extract_exposes_close_search_tie_below_floor(
 
     assert structured["triage"]["decision"] == "expose_candidates"
     assert structured["triage"]["exposed"] == ["a", "b"]
-    assert "search triage: status=ranked decision=expose_candidates warnings=tie" in _text(result)
+    assert (
+        "search triage: status=ranked decision=expose_candidates warnings=tie"
+        in _text(result)
+    )

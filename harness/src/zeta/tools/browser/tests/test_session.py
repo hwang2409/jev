@@ -10,7 +10,9 @@ from zeta.tools.browser.session import BrowserSession
 
 class _SlowAdapter(FakeBrowserAdapter):
     def __init__(self) -> None:
-        super().__init__([PageObservation(1, 1, "https://example.test", "", "", (), True, True)])
+        super().__init__(
+            [PageObservation(1, 1, "https://example.test", "", "", (), True, True)]
+        )
         self.launches = 0
 
     async def launch(self) -> None:

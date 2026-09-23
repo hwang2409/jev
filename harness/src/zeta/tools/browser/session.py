@@ -110,9 +110,9 @@ class BrowserSession:
         self._adapter = adapter
 
     async def navigate(self, url: str) -> BrowserState:
-        observation = await (
-            await self.adapter()
-        ).navigate(url, self.navigation_timeout_ms)
+        observation = await (await self.adapter()).navigate(
+            url, self.navigation_timeout_ms
+        )
         state = self._record_observation(observation)
         self._record_action(f"navigate:{url}")
         return state
@@ -142,9 +142,7 @@ class BrowserSession:
         elif action == "select":
             if value is None:
                 raise ValueError("browser_select requires value")
-            result = await adapter.select(
-                element_ref, value, self.action_timeout_ms
-            )
+            result = await adapter.select(element_ref, value, self.action_timeout_ms)
         else:
             raise ValueError(f"unsupported browser action: {action}")
         state = await self.observe()
@@ -178,7 +176,11 @@ class BrowserSession:
         if catalog is None or catalog.snapshot_id != snapshot_id:
             raise StaleSnapshotError(snapshot_id)
         entry = next(
-            (candidate for candidate in catalog.entries if candidate.element_id == element_id),
+            (
+                candidate
+                for candidate in catalog.entries
+                if candidate.element_id == element_id
+            ),
             None,
         )
         if entry is None:

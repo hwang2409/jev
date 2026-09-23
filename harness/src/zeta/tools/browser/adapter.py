@@ -39,6 +39,7 @@ class ElementRef:
     form_action_origin: str | None = None
     download: bool = False
     durable_state_change: bool = False
+    generation: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +101,9 @@ class BrowserAdapter(Protocol):
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
         raise NotImplementedError
 
-    async def click(self, element_ref: ElementRef, timeout_ms: int) -> ActionObservation:
+    async def click(
+        self, element_ref: ElementRef, timeout_ms: int
+    ) -> ActionObservation:
         raise NotImplementedError
 
     async def type_text(
@@ -173,6 +176,22 @@ OBSERVE_SCRIPT = """
   elementTextBytes,
 }) => {
   const bounded = (value, limit) => String(value || '').slice(0, Math.max(limit * 2, 0));
+  const domGeneration = () => {
+    if (!Number.isInteger(window.__zetaBrowserDomGeneration)) {
+      window.__zetaBrowserDomGeneration = 0;
+      new MutationObserver((records) => {
+        if (records.some((record) => record.attributeName !== 'data-zeta-browser-ref')) {
+          window.__zetaBrowserDomGeneration += 1;
+        }
+      }).observe(document, {
+        subtree: true,
+        childList: true,
+        attributes: true,
+        characterData: true,
+      });
+    }
+    return window.__zetaBrowserDomGeneration;
+  };
   const visible = (element) => {
     const style = window.getComputedStyle(element);
     const rect = element.getBoundingClientRect();
@@ -246,6 +265,7 @@ OBSERVE_SCRIPT = """
     });
   }
   return {
+    dom_generation: domGeneration(),
     url: document.location.href,
     title: document.title || '',
     text: bounded(document.body ? (document.body.innerText || document.body.textContent || '') : '', pageTextBytes),
@@ -270,6 +290,7 @@ class PlaywrightBrowserAdapter:
         self._locators: dict[str, object] = {}
         self._snapshot_id = 0
         self._generation = 0
+        self._dom_generation: int | None = None
         self._url = ""
         self._closed = False
 
@@ -301,7 +322,9 @@ class PlaywrightBrowserAdapter:
         _validate_browser_url(url)
         self._url = ""
         try:
-            await self._page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+            await self._page.goto(
+                url, wait_until="domcontentloaded", timeout=timeout_ms
+            )
             await self._page.wait_for_load_state("load", timeout=timeout_ms)
         except Exception as exc:  # noqa: BLE001 - framework errors cross this seam
             _raise_playwright_error(exc, "browser navigation failed")
@@ -322,9 +345,16 @@ class PlaywrightBrowserAdapter:
         if not isinstance(raw, dict):
             raise BrowserError("browser observation returned an invalid shape")
         url = _raw_string(raw, "url")
+        dom_generation = raw.get("dom_generation", 0)
+        if not isinstance(dom_generation, int):
+            raise BrowserError("browser observation returned an invalid generation")
         if url != self._url:
             self._generation += 1
             self._url = url
+            self._dom_generation = dom_generation
+        elif self._dom_generation != dom_generation:
+            self._generation += 1
+            self._dom_generation = dom_generation
         self._snapshot_id += 1
         self._locators.clear()
         elements: list[ElementRef] = []
@@ -334,7 +364,12 @@ class PlaywrightBrowserAdapter:
         for item in raw_elements:
             if not isinstance(item, dict):
                 continue
-            element = _element_from_raw(self._snapshot_id, item)
+            element = _element_from_raw(
+                self._snapshot_id,
+                self._generation,
+                item,
+                limits.element_text_bytes,
+            )
             elements.append(element)
             self._locators[element.element_id] = self._page.locator(
                 f'[data-zeta-browser-ref="{element.element_id}"]'
@@ -350,8 +385,15 @@ class PlaywrightBrowserAdapter:
             stable=bool(raw.get("stable")),
         )
 
-    async def click(self, element_ref: ElementRef, timeout_ms: int) -> ActionObservation:
-        return await self._act(element_ref, "click", timeout_ms, lambda locator: locator.click(timeout=timeout_ms))
+    async def click(
+        self, element_ref: ElementRef, timeout_ms: int
+    ) -> ActionObservation:
+        return await self._act(
+            element_ref,
+            "click",
+            timeout_ms,
+            lambda locator: locator.click(timeout=timeout_ms),
+        )
 
     async def type_text(
         self,
@@ -510,6 +552,9 @@ class PlaywrightBrowserAdapter:
             return
         if target.snapshot_id != self._snapshot_id:
             raise ElementUnavailableError(target.element_id)
+        await self._refresh_generation()
+        if target.generation != self._generation:
+            raise ElementUnavailableError(target.element_id)
         locator = self._locators.get(target.element_id)
         if locator is None:
             raise ElementUnavailableError(target.element_id)
@@ -526,6 +571,19 @@ class PlaywrightBrowserAdapter:
         if self._page is None or self._closed:
             raise BrowserError("browser adapter is not launched")
 
+    async def _refresh_generation(self) -> None:
+        try:
+            dom_generation = await self._page.evaluate(
+                "() => Number(window.__zetaBrowserDomGeneration || 0)"
+            )
+        except Exception as exc:  # noqa: BLE001 - framework errors cross this seam
+            _raise_playwright_error(exc, "browser generation check failed")
+        if not isinstance(dom_generation, int):
+            raise BrowserError("browser generation check returned an invalid value")
+        if self._dom_generation != dom_generation:
+            self._dom_generation = dom_generation
+            self._generation += 1
+
 
 def make_browser_adapter_factory(
     *,
@@ -535,14 +593,17 @@ def make_browser_adapter_factory(
 ) -> Callable[[], BrowserAdapter]:
     """Select the real adapter from the opt-in browser configuration."""
 
-    selected = mode or os.environ.get("ZETA_BROWSER_ADAPTER", "disabled")
-    if selected != "playwright":
+    selected = mode or os.environ.get("ZETA_BROWSER_ADAPTER", "fake")
+    if selected == "fake":
+        return lambda: FakeBrowserAdapter([_default_fake_observation()])
+    if selected == "disabled":
+
         def disabled() -> BrowserAdapter:
-            raise BrowserError(
-                "browser adapter is disabled; set ZETA_BROWSER_ADAPTER=playwright"
-            )
+            raise BrowserError("browser adapter is disabled; select fake or playwright")
 
         return disabled
+    if selected != "playwright":
+        raise ValueError(f"unknown browser adapter mode: {selected}")
     adapter_limits = limits or SnapshotLimits()
     return lambda: PlaywrightBrowserAdapter(headless=headless, limits=adapter_limits)
 
@@ -575,19 +636,26 @@ def _raw_string(raw: dict[str, object], name: str) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-def _element_from_raw(snapshot_id: int, raw: dict[str, object]) -> ElementRef:
+def _element_from_raw(
+    snapshot_id: int,
+    generation: int,
+    raw: dict[str, object],
+    element_text_bytes: int,
+) -> ElementRef:
     return ElementRef(
         snapshot_id=snapshot_id,
         element_id=_raw_string(raw, "element_id"),
         role=_raw_string(raw, "role"),
         affordance=_raw_string(raw, "affordance"),
-        text=_raw_string(raw, "text"),
-        name=_raw_string(raw, "name"),
-        value_hint=raw.get("value_hint") if isinstance(raw.get("value_hint"), str) else None,
-        landmark=raw.get("landmark") if isinstance(raw.get("landmark"), str) else None,
+        text=_bounded_string(_raw_string(raw, "text"), element_text_bytes),
+        name=_bounded_string(_raw_string(raw, "name"), element_text_bytes),
+        value_hint=_bounded_optional_string(raw.get("value_hint"), element_text_bytes),
+        landmark=_bounded_optional_string(raw.get("landmark"), element_text_bytes),
         disabled=bool(raw.get("disabled")),
         visible=bool(raw.get("visible")),
-        target_url=raw.get("target_url") if isinstance(raw.get("target_url"), str) else None,
+        target_url=raw.get("target_url")
+        if isinstance(raw.get("target_url"), str)
+        else None,
         form_action_origin=(
             raw.get("form_action_origin")
             if isinstance(raw.get("form_action_origin"), str)
@@ -595,14 +663,31 @@ def _element_from_raw(snapshot_id: int, raw: dict[str, object]) -> ElementRef:
         ),
         download=bool(raw.get("download")),
         durable_state_change=bool(raw.get("durable_state_change")),
+        generation=generation,
     )
+
+
+def _bounded_optional_string(value: object, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    return _bounded_string(value, limit)
+
+
+def _default_fake_observation() -> PageObservation:
+    return PageObservation(1, 1, "https://example.test/", "", "", (), True, True)
 
 
 def _raise_playwright_error(exc: Exception, message: str) -> None:
     detail = f"{exc.__class__.__name__}: {exc}".lower()
-    if exc.__class__.__name__ in {"TimeoutError", "PlaywrightTimeoutError"} or "timeout" in detail:
+    if (
+        exc.__class__.__name__ in {"TimeoutError", "PlaywrightTimeoutError"}
+        or "timeout" in detail
+    ):
         raise BrowserTimeoutError(message) from exc
-    if any(word in detail for word in ("detached", "not attached", "strict mode", "target closed")):
+    if any(
+        word in detail
+        for word in ("detached", "not attached", "strict mode", "target closed")
+    ):
         raise ElementUnavailableError(message) from exc
     raise BrowserError(message) from exc
 
@@ -651,7 +736,9 @@ class FakeBrowserAdapter:
         del limits
         return self._current_observation()
 
-    async def click(self, element_ref: ElementRef, timeout_ms: int) -> ActionObservation:
+    async def click(
+        self, element_ref: ElementRef, timeout_ms: int
+    ) -> ActionObservation:
         self._maybe_fail("click")
         self._check_element(element_ref)
         self.clicks.append(element_ref)
@@ -694,7 +781,8 @@ class FakeBrowserAdapter:
         self.extractions.append((target, list(attributes), limit))
         if attributes:
             value: str | dict[str, str | None] = {
-                attribute: self._attribute_value(target, attribute) for attribute in attributes
+                attribute: self._attribute_value(target, attribute)
+                for attribute in attributes
             }
         else:
             value = "" if target is None else target.text

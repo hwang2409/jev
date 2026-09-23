@@ -148,16 +148,19 @@ def test_page_state_allows_a_clear_action_without_post_action_evidence() -> None
 def test_action_failure_or_uncertainty_requests_a_fresh_state(
     action_succeeded: float, expected: PageStateDecision
 ) -> None:
-    assert evaluate_page_state(
-        page_loaded_and_stable=0.9,
-        goal_element_present=0.9,
-        action_is_the_next_step=0.9,
-        action_succeeded=action_succeeded,
-        dead_end=None,
-        needs_different_approach=None,
-        deterministic_loaded=True,
-        deterministic_attached=True,
-    ) == expected
+    assert (
+        evaluate_page_state(
+            page_loaded_and_stable=0.9,
+            goal_element_present=0.9,
+            action_is_the_next_step=0.9,
+            action_succeeded=action_succeeded,
+            dead_end=None,
+            needs_different_approach=None,
+            deterministic_loaded=True,
+            deterministic_attached=True,
+        )
+        == expected
+    )
 
 
 @pytest.mark.asyncio
@@ -234,16 +237,19 @@ async def test_real_provider_errors_follow_the_failed_gate(
         "action_succeeded": PageStateDecision(True, "state", None),
     }[gate]
 
-    assert await evaluate_page_state_with_provider(
-        goal="continue",
-        action="click",
-        page_state={},
-        candidates=[],
-        deterministic_loaded=True,
-        deterministic_attached=True,
-        action_result={"changed": True},
-        gate=gate,
-    ) == expected
+    assert (
+        await evaluate_page_state_with_provider(
+            goal="continue",
+            action="click",
+            page_state={},
+            candidates=[],
+            deterministic_loaded=True,
+            deterministic_attached=True,
+            action_result={"changed": True},
+            gate=gate,
+        )
+        == expected
+    )
 
 
 @pytest.mark.asyncio
@@ -303,7 +309,9 @@ def test_untagged_provider_failure_uses_distinct_last_resort_decision() -> None:
 
 
 @pytest.mark.asyncio
-async def test_uncertain_action_with_changed_state_increments_recovery_attempt() -> None:
+async def test_uncertain_action_with_changed_state_increments_recovery_attempt() -> (
+    None
+):
     async def judge(**_kwargs: object) -> jev.BrowserPageStateResult:
         return jev.BrowserPageStateResult(
             page_loaded_and_stable=0.9,
@@ -422,17 +430,32 @@ async def test_provider_result_drives_all_page_state_gates() -> None:
 @pytest.mark.parametrize(
     ("gate", "expected"),
     [
-        ("page_loaded_and_stable", PageStateDecision(False, "observe", "page_load_failed")),
-        ("goal_element_present", PageStateDecision(False, "state", "goal_element_absent")),
-        ("action_is_the_next_step", PageStateDecision(False, "state", "action_not_next_step")),
+        (
+            "page_loaded_and_stable",
+            PageStateDecision(False, "observe", "page_load_failed"),
+        ),
+        (
+            "goal_element_present",
+            PageStateDecision(False, "state", "goal_element_absent"),
+        ),
+        (
+            "action_is_the_next_step",
+            PageStateDecision(False, "state", "action_not_next_step"),
+        ),
         ("action_succeeded", PageStateDecision(True, "state", None)),
         ("dead_end", PageStateDecision(False, "stop", "dead_end")),
-        ("needs_different_approach", PageStateDecision(False, "reroute", "different_approach")),
+        (
+            "needs_different_approach",
+            PageStateDecision(False, "reroute", "different_approach"),
+        ),
     ],
 )
 def test_provider_failure_maps_each_gate_to_its_safe_direction(
     gate: str, expected: PageStateDecision
 ) -> None:
-    assert conservative_provider_error_decision(
-        gate, jev.JevRouterError("provider failure")
-    ) == expected
+    assert (
+        conservative_provider_error_decision(
+            gate, jev.JevRouterError("provider failure")
+        )
+        == expected
+    )

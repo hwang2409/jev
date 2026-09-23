@@ -222,8 +222,7 @@ async def _run_element_action(
         role = arguments["role"]
         affordance = arguments["affordance"]
         if not all(
-            isinstance(item, str)
-            for item in (element_id, role, affordance)
+            isinstance(item, str) for item in (element_id, role, affordance)
         ) or not isinstance(snapshot_id, int):
             raise ValueError("browser element identity is invalid")
         if text is not None and not isinstance(text, str):
@@ -427,11 +426,7 @@ async def _browser_extract(
         value = extracted.value
         truncated = extracted.truncated
         full_size = extracted.full_size
-    escaped_full_size = (
-        extracted.escaped_full_size
-        if extracted is not None
-        else None
-    )
+    escaped_full_size = extracted.escaped_full_size if extracted is not None else None
     content, escaped_truncated, escaped_size = _extracted_text(value, limit)
     truncated = truncated or escaped_truncated
     content_full_size = max(escaped_size, escaped_full_size or 0)
@@ -680,7 +675,10 @@ def register(registry: ToolRegistry) -> None:
             "browser_type",
             _browser_type,
             "Replace or append text in one input by snapshot id.",
-            _element_schema({"text": {"type": "string"}, "replace": {"type": "boolean"}}, ["text", "replace"]),
+            _element_schema(
+                {"text": {"type": "string"}, "replace": {"type": "boolean"}},
+                ["text", "replace"],
+            ),
         ),
         (
             "browser_select",
@@ -753,8 +751,10 @@ def _origin(url: str) -> str | None:
     except ValueError:
         return None
     host = parsed.hostname.casefold()
-    if port is None or (parsed.scheme == "http" and port == 80) or (
-        parsed.scheme == "https" and port == 443
+    if (
+        port is None
+        or (parsed.scheme == "http" and port == 80)
+        or (parsed.scheme == "https" and port == 443)
     ):
         return f"{parsed.scheme.casefold()}://{host}"
     return f"{parsed.scheme.casefold()}://{host}:{port}"
@@ -901,9 +901,7 @@ def _choice_result(
         if isinstance(item.get("element_id"), str)
     }
     candidate_ids = [
-        element_id
-        for element_id in choice.candidate_ids
-        if element_id in by_id
+        element_id for element_id in choice.candidate_ids if element_id in by_id
     ][:BROWSER_ELEMENT_TOPN]
     if not candidate_ids:
         candidate_ids = [
@@ -999,9 +997,7 @@ def _extracted_text(value: object, limit: int) -> tuple[str, bool, int]:
 
 
 def _bound_utf8(value: str, limit: int) -> tuple[str, bool]:
-    bounded = value.encode("utf-8")[: max(limit, 0)].decode(
-        "utf-8", errors="ignore"
-    )
+    bounded = value.encode("utf-8")[: max(limit, 0)].decode("utf-8", errors="ignore")
     return bounded, bounded != value
 
 
@@ -1013,14 +1009,22 @@ def _browser_exception(exc: Exception) -> StructuredToolResult:
     if isinstance(exc, StaleSnapshotError):
         return _browser_error(str(exc) or "browser snapshot is stale", "stale_snapshot")
     if isinstance(exc, AdapterElementUnavailableError):
-        return _browser_error(str(exc) or "browser element is unavailable", "element_unavailable")
+        return _browser_error(
+            str(exc) or "browser element is unavailable", "element_unavailable"
+        )
     if isinstance(exc, NavigationRaceError):
-        return _browser_error(str(exc) or "browser navigation raced with the action", "navigation_race")
+        return _browser_error(
+            str(exc) or "browser navigation raced with the action", "navigation_race"
+        )
     if isinstance(exc, BrowserTimeoutError):
-        return _browser_error(str(exc) or "browser operation timed out", "browser_timeout")
+        return _browser_error(
+            str(exc) or "browser operation timed out", "browser_timeout"
+        )
     if isinstance(exc, ValueError):
         return _browser_error(str(exc), "invalid_arguments")
-    return _browser_error(str(exc) or "browser operation failed", "browser_start_failed")
+    return _browser_error(
+        str(exc) or "browser operation failed", "browser_start_failed"
+    )
 
 
 def _browser_error(message: str, kind: str) -> StructuredToolResult:
