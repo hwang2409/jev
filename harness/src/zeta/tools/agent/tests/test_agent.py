@@ -1,37 +1,85 @@
 import asyncio
+
+
 import json
+
+
 import threading
+
+
 import time
+
+
 from collections.abc import AsyncIterator, Sequence
+
+
 from dataclasses import replace
+
+
 from pathlib import Path
+
 
 import pytest
 
+
 import zeta.execution as execution_module
+
+
 import zeta.tools.agent_send as agent_send_module
+
+
 from zeta.agent_background import (
     BackgroundAgentOwner,
     adopt_agent_children,
     finish_background_child,
 )
+
+
 from zeta.agent_budget import MAX_AGENT_TURN_CAP, AgentTree
+
+
 from zeta.core.abort import AbortGenerationRegistry
+
+
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
+
+
 from zeta.core.fake import FakeBackend, ScriptedTurn
+
+
 from zeta.core.store import ConversationStore, PendingPromptsClosedError
+
+
 from zeta.loop import AgentLoop
+
+
 from zeta.mcp import MCPMount
+
+
 from zeta.skills import SkillCatalog
+
+
 from zeta.tools import ToolRegistry
+
+
 from zeta.tools.agent import ChildApprovalPolicy, send_to_run
+
+
 from zeta.agent.presets import (
     AGENT_PRESETS,
     GENERAL_PRESET,
 )
+
+
 from zeta.tui.agent_card import AgentRunCommandMixin
+
+
 from zeta.tui.render import render_event
+
+
 from zeta.tui.todo import TodoWidget
+
+
 from zeta.types import (
     CompletionBackend,
     Message,
@@ -45,88 +93,12 @@ from zeta.types import (
     ToolUseContent,
 )
 
+
 pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
 
 async def _collect(events):
     return [event async for event in events]
-
-
-@pytest.mark.asyncio
-async def test_background_owner_waits_for_child_close_before_unregister(
-    tmp_path: Path,
-) -> None:
-    parent_store = ConversationStore(tmp_path / "parent")
-    child_store = ConversationStore(tmp_path / "child")
-    call = _agent_call()
-    parent_store.register_agent_child(
-        call,
-        child_session_path=str(child_store.session_dir),
-        description="task research",
-    )
-    child_store.mark_agent_parent(call.id)
-    owner = BackgroundAgentOwner(parent_store)
-    close_started = asyncio.Event()
-    release_close = asyncio.Event()
-    cleanup_called = asyncio.Event()
-
-    async def close_child() -> None:
-        close_started.set()
-        await release_close.wait()
-
-    def cleanup() -> None:
-        cleanup_called.set()
-        owner.unregister("child-1")
-
-    watcher = asyncio.create_task(
-        finish_background_child(
-            child_task=asyncio.create_task(
-                asyncio.sleep(
-                    0,
-                    result={
-                        "content": [{"text": "done"}],
-                        "isError": False,
-                    },
-                )
-            ),
-            child_store=child_store,
-            parent_store=parent_store,
-            notification_store=parent_store,
-            tool_call=call,
-            child_instance_id="child-1",
-            child_path=str(child_store.session_dir),
-            description="task research",
-            child_turns=lambda: 0,
-            build_result=lambda text, error, status: {
-                "content": [{"text": text}],
-                "isError": error,
-                "structuredContent": {"status": status},
-            },
-            validate_result=lambda result, tool_call_id: ToolResult(
-                tool_call_id,
-                result["content"][0]["text"],
-                is_error=result["isError"],
-                structured_content=result["structuredContent"],
-            ),
-            publish_event=lambda event: None,
-            cleanup=cleanup,
-            close_child=close_child,
-            error_message=lambda exc: str(exc),
-            background_owner=owner,
-        )
-    )
-    owner.register("child-1", lambda: None, watcher, parent_store)
-
-    await close_started.wait()
-    waiting = asyncio.create_task(owner.wait())
-    await asyncio.sleep(0)
-    assert not waiting.done()
-    assert not cleanup_called.is_set()
-
-    release_close.set()
-    await watcher
-    await waiting
-    assert cleanup_called.is_set()
 
 
 def _agent_call(
@@ -442,6 +414,242 @@ async def _wait_for_notification(
     raise AssertionError(f"missing {status} background notification")
 
 
+def _persist_background_receipt(
+    store: ConversationStore, call: ToolCall, child: ConversationStore
+) -> None:
+    store.append_message(Message(MessageRole.USER, [TextContent("start")]))
+    store.append_message(
+        Message(MessageRole.ASSISTANT, [ToolUseContent(call)])
+    )
+    store.append_message(
+        Message(
+            MessageRole.TOOL_RESULT,
+            [TextContent("background agent started")],
+            tool_result=ToolResult(
+                call.id,
+                "background agent started",
+                structured_content={
+                    "turns_used": 0,
+                    "child_session_path": str(child.session_dir),
+                    "status": "running",
+                    "child_instance_id": f"{store.session_id}:1",
+                    "description": "background research",
+                },
+            ),
+        )
+    )
+
+
+def _model_agent_call(
+    model: str = "gpt-5.4",
+    call_id: str = "agent-model-1",
+    **extra: object,
+) -> ToolCall:
+    arguments: dict[str, object] = {
+        "prompt": "inspect the task",
+        "description": "cross provider research",
+        "model": model,
+    }
+    arguments.update(extra)
+    return ToolCall(call_id, "agent", arguments)
+
+
+class _ValidTokens:
+    def is_valid(self, *, skew: float = 60) -> bool:
+        del skew
+        return True
+
+
+class _FakeCredentialStore:
+    """Stand in for an OAuth store without touching the real credential files."""
+
+    def __init__(self, tokens: object | None) -> None:
+        self._tokens = tokens
+
+    def read(self) -> object | None:
+        return self._tokens
+
+
+def _stub_backend_factory(
+    monkeypatch: pytest.MonkeyPatch,
+    child_backend: CompletionBackend,
+    *,
+    tokens: object | None = None,
+) -> list[tuple[str, str | None]]:
+    """Record what the runner asks the factory for, and hand back child_backend."""
+
+    requested: list[tuple[str, str | None]] = []
+
+    def build(provider: str, model: str | None, **kwargs: object):
+        del kwargs
+        requested.append((provider, model))
+        return child_backend, model or ""
+
+    monkeypatch.setattr("zeta.agent_runner.build_backend", build)
+    monkeypatch.setattr(
+        "zeta.agent_runner.credential_store",
+        lambda provider, **kwargs: _FakeCredentialStore(
+            _ValidTokens() if tokens is None else tokens
+        ),
+    )
+    return requested
+
+
+class RunBackend(CompletionBackend):
+    """Drive a long run whose first turn can be held open mid-flight."""
+
+    def __init__(self) -> None:
+        self.child_started = asyncio.Event()
+        self.release_child = asyncio.Event()
+        self.child_prompts: list[str] = []
+
+    async def complete(
+        self,
+        messages: Sequence[Message],
+        tool_schemas: Sequence[ToolSchema],
+    ) -> AsyncIterator[StreamEvent]:
+        del tool_schemas
+        last_user = next(
+            (
+                block.text
+                for message in reversed(messages)
+                if message.role is MessageRole.USER
+                for block in message.content
+                if isinstance(block, TextContent)
+            ),
+            "",
+        )
+        if last_user == "start":
+            blocks = [ToolUseContent(_run_agent_call())]
+        elif last_user == "work the big task":
+            self.child_prompts.append(last_user)
+            self.child_started.set()
+            await self.release_child.wait()
+            blocks = [TextContent("first pass done")]
+        else:
+            self.child_prompts.append(last_user)
+            blocks = [TextContent("follow-up handled")]
+        yield StreamEvent(StreamEventType.MESSAGE_START)
+        for block in blocks:
+            yield StreamEvent(StreamEventType.MESSAGE_UPDATE, content=block)
+        yield StreamEvent(
+            StreamEventType.MESSAGE_END,
+            message=Message(MessageRole.ASSISTANT, blocks),
+        )
+
+
+def _run_agent_call(call_id: str = "run-1") -> ToolCall:
+    return ToolCall(
+        call_id,
+        "agent",
+        {
+            "prompt": "work the big task",
+            "description": "long horizon run",
+            "agent_type": "run",
+        },
+    )
+
+
+class _RunCommands(AgentRunCommandMixin):
+    """Minimal host for the mixin: it only needs loop.store."""
+
+    def __init__(self, loop: AgentLoop) -> None:
+        self.loop = loop
+
+
+def _run_handle_from_receipt(store: ConversationStore) -> str:
+    """Return the child_instance_id a real model would receive for the run."""
+
+    for message in store.messages():
+        result = message.tool_result
+        if result is None:
+            continue
+        structured = result.structured_content
+        if structured is None:
+            continue
+        handle = structured.get("child_instance_id")
+        if type(handle) is str and handle:
+            return handle
+    raise AssertionError("no run receipt with a child_instance_id")
+
+
+@pytest.mark.asyncio
+async def test_background_owner_waits_for_child_close_before_unregister(
+    tmp_path: Path,
+) -> None:
+    parent_store = ConversationStore(tmp_path / "parent")
+    child_store = ConversationStore(tmp_path / "child")
+    call = _agent_call()
+    parent_store.register_agent_child(
+        call,
+        child_session_path=str(child_store.session_dir),
+        description="task research",
+    )
+    child_store.mark_agent_parent(call.id)
+    owner = BackgroundAgentOwner(parent_store)
+    close_started = asyncio.Event()
+    release_close = asyncio.Event()
+    cleanup_called = asyncio.Event()
+
+    async def close_child() -> None:
+        close_started.set()
+        await release_close.wait()
+
+    def cleanup() -> None:
+        cleanup_called.set()
+        owner.unregister("child-1")
+
+    watcher = asyncio.create_task(
+        finish_background_child(
+            child_task=asyncio.create_task(
+                asyncio.sleep(
+                    0,
+                    result={
+                        "content": [{"text": "done"}],
+                        "isError": False,
+                    },
+                )
+            ),
+            child_store=child_store,
+            parent_store=parent_store,
+            notification_store=parent_store,
+            tool_call=call,
+            child_instance_id="child-1",
+            child_path=str(child_store.session_dir),
+            description="task research",
+            child_turns=lambda: 0,
+            build_result=lambda text, error, status: {
+                "content": [{"text": text}],
+                "isError": error,
+                "structuredContent": {"status": status},
+            },
+            validate_result=lambda result, tool_call_id: ToolResult(
+                tool_call_id,
+                result["content"][0]["text"],
+                is_error=result["isError"],
+                structured_content=result["structuredContent"],
+            ),
+            publish_event=lambda event: None,
+            cleanup=cleanup,
+            close_child=close_child,
+            error_message=lambda exc: str(exc),
+            background_owner=owner,
+        )
+    )
+    owner.register("child-1", lambda: None, watcher, parent_store)
+
+    await close_started.wait()
+    waiting = asyncio.create_task(owner.wait())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    assert not cleanup_called.is_set()
+
+    release_close.set()
+    await watcher
+    await waiting
+    assert cleanup_called.is_set()
+
+
 @pytest.mark.asyncio
 async def test_background_agent_returns_handle_and_parent_continues(
     tmp_path: Path,
@@ -712,32 +920,6 @@ async def test_background_and_foreground_tools_mix_in_one_turn(
     backend.release_child.set()
     await _wait_for_notification(store, "completed")
     await loop.close()
-
-
-def _persist_background_receipt(
-    store: ConversationStore, call: ToolCall, child: ConversationStore
-) -> None:
-    store.append_message(Message(MessageRole.USER, [TextContent("start")]))
-    store.append_message(
-        Message(MessageRole.ASSISTANT, [ToolUseContent(call)])
-    )
-    store.append_message(
-        Message(
-            MessageRole.TOOL_RESULT,
-            [TextContent("background agent started")],
-            tool_result=ToolResult(
-                call.id,
-                "background agent started",
-                structured_content={
-                    "turns_used": 0,
-                    "child_session_path": str(child.session_dir),
-                    "status": "running",
-                    "child_instance_id": f"{store.session_id}:1",
-                    "description": "background research",
-                },
-            ),
-        )
-    )
 
 
 def test_resume_cancels_live_background_child(tmp_path: Path) -> None:
@@ -2428,61 +2610,6 @@ def test_resume_preserves_typed_child_receipt(tmp_path: Path) -> None:
     assert reopened_child.agent_type() == "explore"
 
 
-def _model_agent_call(
-    model: str = "gpt-5.4",
-    call_id: str = "agent-model-1",
-    **extra: object,
-) -> ToolCall:
-    arguments: dict[str, object] = {
-        "prompt": "inspect the task",
-        "description": "cross provider research",
-        "model": model,
-    }
-    arguments.update(extra)
-    return ToolCall(call_id, "agent", arguments)
-
-
-class _ValidTokens:
-    def is_valid(self, *, skew: float = 60) -> bool:
-        del skew
-        return True
-
-
-class _FakeCredentialStore:
-    """Stand in for an OAuth store without touching the real credential files."""
-
-    def __init__(self, tokens: object | None) -> None:
-        self._tokens = tokens
-
-    def read(self) -> object | None:
-        return self._tokens
-
-
-def _stub_backend_factory(
-    monkeypatch: pytest.MonkeyPatch,
-    child_backend: CompletionBackend,
-    *,
-    tokens: object | None = None,
-) -> list[tuple[str, str | None]]:
-    """Record what the runner asks the factory for, and hand back child_backend."""
-
-    requested: list[tuple[str, str | None]] = []
-
-    def build(provider: str, model: str | None, **kwargs: object):
-        del kwargs
-        requested.append((provider, model))
-        return child_backend, model or ""
-
-    monkeypatch.setattr("zeta.agent_runner.build_backend", build)
-    monkeypatch.setattr(
-        "zeta.agent_runner.credential_store",
-        lambda provider, **kwargs: _FakeCredentialStore(
-            _ValidTokens() if tokens is None else tokens
-        ),
-    )
-    return requested
-
-
 def test_provider_for_model_maps_each_catalog_entry() -> None:
     from zeta.model_catalog import PROVIDER_MODELS, provider_for_model
 
@@ -2856,68 +2983,6 @@ async def test_max_turns_bounded_by_hard_cap_constant() -> None:
     )
 
 
-class RunBackend(CompletionBackend):
-    """Drive a long run whose first turn can be held open mid-flight."""
-
-    def __init__(self) -> None:
-        self.child_started = asyncio.Event()
-        self.release_child = asyncio.Event()
-        self.child_prompts: list[str] = []
-
-    async def complete(
-        self,
-        messages: Sequence[Message],
-        tool_schemas: Sequence[ToolSchema],
-    ) -> AsyncIterator[StreamEvent]:
-        del tool_schemas
-        last_user = next(
-            (
-                block.text
-                for message in reversed(messages)
-                if message.role is MessageRole.USER
-                for block in message.content
-                if isinstance(block, TextContent)
-            ),
-            "",
-        )
-        if last_user == "start":
-            blocks = [ToolUseContent(_run_agent_call())]
-        elif last_user == "work the big task":
-            self.child_prompts.append(last_user)
-            self.child_started.set()
-            await self.release_child.wait()
-            blocks = [TextContent("first pass done")]
-        else:
-            self.child_prompts.append(last_user)
-            blocks = [TextContent("follow-up handled")]
-        yield StreamEvent(StreamEventType.MESSAGE_START)
-        for block in blocks:
-            yield StreamEvent(StreamEventType.MESSAGE_UPDATE, content=block)
-        yield StreamEvent(
-            StreamEventType.MESSAGE_END,
-            message=Message(MessageRole.ASSISTANT, blocks),
-        )
-
-
-def _run_agent_call(call_id: str = "run-1") -> ToolCall:
-    return ToolCall(
-        call_id,
-        "agent",
-        {
-            "prompt": "work the big task",
-            "description": "long horizon run",
-            "agent_type": "run",
-        },
-    )
-
-
-class _RunCommands(AgentRunCommandMixin):
-    """Minimal host for the mixin: it only needs loop.store."""
-
-    def __init__(self, loop: AgentLoop) -> None:
-        self.loop = loop
-
-
 def test_run_preset_is_registered_with_a_long_cap(tmp_path: Path) -> None:
     from zeta.agent.presets import AGENT_PRESETS, RUN_PRESET
 
@@ -3156,195 +3221,6 @@ async def test_restart_keeps_run_lifecycle_open_for_an_in_flight_prompt(
 
 
 @pytest.mark.asyncio
-async def test_agent_send_waits_for_blocked_append_before_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    parent_store = ConversationStore(tmp_path / "parent")
-    child_store = ConversationStore(
-        parent_store.session_dir / "agents", session_id="1"
-    )
-    call = _run_agent_call()
-    child_store.mark_agent_parent(call.id, agent_type="run")
-    parent_store.allocate_agent_index()
-    parent_store.register_agent_child(
-        call,
-        child_session_path=str(child_store.session_dir),
-        description="long horizon run",
-        agent_type="run",
-        background=True,
-        child_instance_id="parent:1",
-    )
-
-    started = threading.Event()
-    release = threading.Event()
-    original_send = agent_send_module.send_to_run
-
-    def blocked_send(*args):
-        started.set()
-        release.wait(timeout=2)
-        return original_send(*args)
-
-    monkeypatch.setattr(agent_send_module, "send_to_run", blocked_send)
-    registry = ToolRegistry(tmp_path, session_store=parent_store, skill_catalog=SkillCatalog.empty())
-    task = asyncio.create_task(
-        registry.execute(
-            ToolCall(
-                "agent-send-call",
-                "agent_send",
-                {"child_instance_id": "parent:1", "message": "follow up"},
-            )
-        )
-    )
-    await asyncio.wait_for(asyncio.to_thread(started.wait), timeout=2)
-
-    task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done()
-    task.cancel()
-    await asyncio.sleep(0)
-    assert not task.done()
-    release.set()
-    result = await task
-
-    assert result["isError"] is False
-    assert [entry.data["text"] for entry in child_store.pending_prompts()] == [
-        "follow up"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_tool_registry_reports_agent_send_result_after_cleanup_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    parent_store = ConversationStore(tmp_path / "parent")
-    child_store = ConversationStore(
-        parent_store.session_dir / "agents", session_id="1"
-    )
-    call = _run_agent_call()
-    child_store.mark_agent_parent(call.id, agent_type="run")
-    parent_store.allocate_agent_index()
-    parent_store.register_agent_child(
-        call,
-        child_session_path=str(child_store.session_dir),
-        description="long horizon run",
-        agent_type="run",
-        background=True,
-        child_instance_id="parent:1",
-    )
-
-    cleanup_started = asyncio.Event()
-    release_cleanup = asyncio.Event()
-    original_gather = execution_module.asyncio.gather
-
-    async def blocked_cleanup(*args, **kwargs):
-        cleanup_started.set()
-        await release_cleanup.wait()
-        return await original_gather(*args, **kwargs)
-
-    monkeypatch.setattr(execution_module.asyncio, "gather", blocked_cleanup)
-    registry = ToolRegistry(tmp_path, session_store=parent_store, skill_catalog=SkillCatalog.empty())
-    task = asyncio.create_task(
-        registry.execute(
-            ToolCall(
-                "agent-send-cleanup-cancel",
-                "agent_send",
-                {"child_instance_id": "parent:1", "message": "follow up"},
-            )
-        )
-    )
-
-    await asyncio.wait_for(cleanup_started.wait(), timeout=2)
-    task.cancel()
-    release_cleanup.set()
-    result = await task
-
-    assert result["isError"] is False
-    assert [entry.data["text"] for entry in child_store.pending_prompts()] == [
-        "follow up"
-    ]
-
-
-@pytest.mark.asyncio
-async def test_agent_send_aborts_before_append_when_store_lock_is_held(
-    tmp_path: Path,
-) -> None:
-    parent_store = ConversationStore(tmp_path / "parent")
-    child_store = ConversationStore(
-        parent_store.session_dir / "agents", session_id="1"
-    )
-    call = _run_agent_call()
-    child_store.mark_agent_parent(call.id, agent_type="run")
-    parent_store.allocate_agent_index()
-    parent_store.register_agent_child(
-        call,
-        child_session_path=str(child_store.session_dir),
-        description="long horizon run",
-        agent_type="run",
-        background=True,
-        child_instance_id="parent:1",
-    )
-
-    registry = ToolRegistry(tmp_path, session_store=parent_store, skill_catalog=SkillCatalog.empty())
-    lock = child_store._append_lock()
-    lock.__enter__()
-    try:
-        task = asyncio.create_task(
-            registry.execute(
-                ToolCall(
-                    "agent-send-call",
-                    "agent_send",
-                    {"child_instance_id": "parent:1", "message": "follow up"},
-                )
-            )
-        )
-        await asyncio.sleep(0)
-        started = time.monotonic()
-        task.cancel()
-        result = await asyncio.wait_for(task, timeout=2)
-        elapsed = time.monotonic() - started
-    finally:
-        lock.__exit__(None, None, None)
-
-    assert elapsed < 1.8
-    assert result["isError"] is True
-    assert "timed out" in result["content"][0]["text"]
-    assert child_store.pending_prompts() == []
-
-
-@pytest.mark.asyncio
-async def test_agent_send_reports_when_the_run_just_closed(tmp_path: Path) -> None:
-    """The race the closed-queue marker prevents: a queued prompt after finish."""
-
-    from zeta.tools.agent import send_to_run
-
-    backend = RunBackend()
-    store = ConversationStore(tmp_path)
-    loop = AgentLoop(backend, store, max_turns=1, skill_catalog=SkillCatalog.empty())
-
-    await _collect(loop.run_turn("start"))
-    await asyncio.wait_for(backend.child_started.wait(), timeout=2)
-    handle = _run_handle_from_receipt(store)
-
-    # Simulate the race: parent looked at the marker before the run finished,
-    # then the run drained and closed its queue before the parent got here.
-    marker = store.agent_children()[handle]
-    child_path = Path(str(marker["child_session_path"]))
-    child_store = ConversationStore(
-        child_path.parent, session_id=child_path.name, cwd=store.cwd
-    )
-    assert child_store.close_pending_queue_if_empty() == []
-
-    error = send_to_run(store, handle, "too late")
-    assert error is not None and "no live run" in error
-
-    backend.release_child.set()
-    await _wait_for_notification(store, "completed")
-    await loop.close()
-
-
-@pytest.mark.asyncio
 async def test_a_queued_prompt_stays_out_of_the_run_context(tmp_path: Path) -> None:
     """Only messages reach the model; a queued follow-up must not leak in early."""
 
@@ -3365,43 +3241,6 @@ async def test_a_queued_prompt_stays_out_of_the_run_context(tmp_path: Path) -> N
     assert "secret follow-up" not in rendered
 
 
-def _run_handle_from_receipt(store: ConversationStore) -> str:
-    """Return the child_instance_id a real model would receive for the run."""
-
-    for message in store.messages():
-        result = message.tool_result
-        if result is None:
-            continue
-        structured = result.structured_content
-        if structured is None:
-            continue
-        handle = structured.get("child_instance_id")
-        if type(handle) is str and handle:
-            return handle
-    raise AssertionError("no run receipt with a child_instance_id")
-
-
-@pytest.mark.asyncio
-async def test_a_follow_up_reaches_the_run_at_its_next_turn(tmp_path: Path) -> None:
-    backend = RunBackend()
-    store = ConversationStore(tmp_path)
-    loop = AgentLoop(backend, store, max_turns=1, skill_catalog=SkillCatalog.empty())
-
-    await _collect(loop.run_turn("start"))
-    await asyncio.wait_for(backend.child_started.wait(), timeout=2)
-
-    # The model queues follow-ups by the child_instance_id it saw in the tool
-    # result, not by the provider tool_call.id, so round-trip that handle.
-    handle = _run_handle_from_receipt(store)
-    assert send_to_run(store, handle, "also check the tests") is None
-
-    backend.release_child.set()
-    await _wait_for_notification(store, "completed")
-
-    assert backend.child_prompts == ["work the big task", "also check the tests"]
-    await loop.close()
-
-
 @pytest.mark.asyncio
 async def test_a_run_with_an_empty_queue_finishes_normally(tmp_path: Path) -> None:
     backend = RunBackend()
@@ -3414,88 +3253,4 @@ async def test_a_run_with_an_empty_queue_finishes_normally(tmp_path: Path) -> No
 
     assert backend.child_prompts == ["work the big task"]
     assert not store.agent_children()
-    await loop.close()
-
-
-def test_send_to_run_rejects_unknown_and_finished_runs(tmp_path: Path) -> None:
-    store = ConversationStore(tmp_path)
-
-    error = send_to_run(store, "run-1", "hello")
-    assert error is not None and "no live run" in error
-
-    assert send_to_run(store, "", "hello") == (
-        "child_instance_id must be a nonempty string"
-    )
-    error = send_to_run(store, "run-1", "  ")
-    assert error == "message must be a nonempty string"
-
-
-def test_send_to_run_rejects_non_run_children(tmp_path: Path) -> None:
-    """A queued prompt would rot: only consume_run drains the queue."""
-
-    store = ConversationStore(tmp_path)
-    child_call = ToolCall(
-        "explore-1",
-        "agent",
-        {"prompt": "look", "description": "explore", "agent_type": "explore"},
-    )
-    store.register_agent_child(
-        child_call,
-        child_session_path=str(tmp_path / "agents" / "1"),
-        description="explore",
-        agent_type="explore",
-        background=True,
-        child_instance_id="sess:1",
-    )
-
-    error = send_to_run(store, "sess:1", "hello")
-    assert error is not None
-    assert "explore" in error and "agent_send" in error
-
-
-@pytest.mark.asyncio
-async def test_runs_and_send_commands_drive_a_live_run(tmp_path: Path) -> None:
-    backend = RunBackend()
-    store = ConversationStore(tmp_path)
-    loop = AgentLoop(backend, store, max_turns=1, skill_catalog=SkillCatalog.empty())
-    commands = _RunCommands(loop)
-
-    explore_call = ToolCall(
-        "explore-1",
-        "agent",
-        {"prompt": "look", "description": "explore", "agent_type": "explore"},
-    )
-    store.register_agent_child(
-        explore_call,
-        child_session_path=str(tmp_path / "agents" / "explore"),
-        description="explore",
-        agent_type="explore",
-        background=True,
-        child_instance_id="sess:explore",
-    )
-
-    assert commands.slash_runs("") == "no live runs"
-
-    await _collect(loop.run_turn("start"))
-    await asyncio.wait_for(backend.child_started.wait(), timeout=2)
-
-    listing = commands.slash_runs("")
-    assert "long horizon run" in listing
-    assert "explore" not in listing
-    handle = _run_handle_from_receipt(store)
-    # /runs shows the model-facing handle, not the opaque provider tool_call.id.
-    assert handle in listing
-    assert "run-1" not in listing
-
-    assert commands.slash_send("nonsense") == (
-        "use /send <run-id> <message>; /runs lists the live ones"
-    )
-    assert "no live run" in commands.slash_send("bogus-id hello")
-    assert f"queued for {handle}" in commands.slash_send(
-        f"{handle} also check the tests"
-    )
-
-    backend.release_child.set()
-    await _wait_for_notification(store, "completed")
-    assert backend.child_prompts == ["work the big task", "also check the tests"]
     await loop.close()

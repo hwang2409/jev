@@ -31,6 +31,7 @@ zeta = "zeta.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/zeta"]
+exclude = ["src/zeta/**/tests/**"]
 
 [tool.hatch.metadata]
 allow-direct-references = true
@@ -40,7 +41,9 @@ allow-direct-references = true
 "src/zeta/skills/review.md" = "zeta/skills/review.md"
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "src/zeta/tools"]
+pythonpath = ["tests", "src", "."]
+addopts = ["--import-mode=importlib", "-p", "zeta_test_plugin"]
 asyncio_mode = "auto"
 markers = [
     "environment_sensitive: test behavior that depends on terminal environment",

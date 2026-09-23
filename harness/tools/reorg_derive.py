@@ -89,7 +89,7 @@ SPLIT_TABLE = {
     "test_skills.py": ["src/zeta/tools/skill/tests/test_skill_tool.py", "tests/test_skills.py"],
     "test_tools.py": ["src/zeta/tools/read/tests/test_read.py", "src/zeta/tools/bash/tests/test_bash.py", "src/zeta/tools/exec/tests/test_exec.py", "src/zeta/tools/edit/tests/test_edit.py", "src/zeta/tools/write/tests/test_write.py", "tests/test_tools_integration.py"],
     "test_todo.py": ["src/zeta/tools/todo/tests/test_todo.py", "tests/test_todo_persistence.py", "tests/test_todo_tui.py"],
-    "test_webtools.py": ["src/zeta/tools/fetch/tests/test_fetch.py", "src/zeta/tools/websearch/tests/test_websearch.py"],
+    "test_webtools.py": ["src/zeta/tools/fetch/tests/test_fetch.py", "src/zeta/tools/websearch/tests/test_websearch.py", "tests/test_webtools.py"],
 }
 SPLIT_TABLE["conftest.py"] = ["tests/zeta_test_plugin.py"]
 for path in sorted((HARNESS / "tests").glob("test_*.py")):
