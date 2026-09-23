@@ -37,7 +37,7 @@ def test_builtins_have_expected_metadata_and_batteries() -> None:
             {question["type"] for question in preset.questions.values()},
         ) == expected[name]
         assert preset.version == "1"
-        assert preset.model == "jev-1.13.0"
+        assert preset.model == "typesafe-ai/jev"
         assert preset.chunking["limits"] == {
             "focus_bytes": 16384,
             "context_field_bytes": 4096,
@@ -92,7 +92,7 @@ def test_validation_rejects_unknown_fields_and_alias_models() -> None:
     data = copy.deepcopy(data)
     data.pop("unexpected")
     data["model"] = "jev-latest"
-    with pytest.raises(PresetValidationError, match="pinned"):
+    with pytest.raises(PresetValidationError, match="model"):
         validate_preset(data)
 
 

@@ -108,6 +108,8 @@ class CacheEntry:
         }
         if self.usage is not None:
             result["usage"] = self.usage
+        if self.response.served_model is not None:
+            result["served_model"] = self.response.served_model
         return result
 
 
@@ -264,6 +266,15 @@ def _parse_entry(
     created_at = payload.get("created_at")
     if not isinstance(created_at, str):
         raise ValueError("cache entry has no creation time")
+    served_model = payload.get("served_model")
+    if served_model is not None and not isinstance(served_model, str):
+        raise ValueError("cache entry has an invalid served model")
+    if served_model is not None:
+        response = JudgeResponse(
+            response.answers,
+            response.missing_questions,
+            served_model=served_model,
+        )
     return CacheEntry(expected_key, dict(preimage), response, usage, created_at)
 
 

@@ -33,7 +33,7 @@ QUESTIONS = {
 
 def _preimage() -> dict[str, object]:
     return build_cache_preimage(
-        model="jev-1.13.0",
+        model="typesafe-ai/jev",
         preset="jgrep",
         preset_version="1",
         chunking={"by": "para", "context_paragraphs": 0, "max_chunks": 512},
@@ -53,7 +53,7 @@ def test_cache_key_has_the_exact_canonical_preimage() -> None:
         b'{"cache_schema":"jmap-answer/v1","chunking":{"by":"para",'
         b'"context_paragraphs":0,"limits":{"context_field_bytes":4096,'
         b'"focus_bytes":16384,"state_bytes":32768},"max_chunks":512},'
-        b'"model":"jev-1.13.0",'
+        b'"model":"typesafe-ai/jev",'
         b'"preset":"jgrep","preset_version":"1","question_battery":'
         b'{"matches_query":{"criteria":{"true":{"what":"direct evidence"}},'
         b'"instructions":"judge the focus","type":"noul"},"risk":{"criteria":'
@@ -118,7 +118,7 @@ def test_each_key_input_perturbation_changes_the_digest() -> None:
 def test_chunking_requires_exact_resolved_fields() -> None:
     with pytest.raises(ValueError, match="chunking"):
         build_cache_preimage(
-            model="jev-1.13.0",
+            model="typesafe-ai/jev",
             preset="jgrep",
             preset_version="1",
             chunking={"by": "para"},
@@ -129,7 +129,7 @@ def test_chunking_requires_exact_resolved_fields() -> None:
 
     with pytest.raises(ValueError, match="chunking"):
         build_cache_preimage(
-            model="jev-1.13.0",
+            model="typesafe-ai/jev",
             preset="jgrep",
             preset_version="1",
             chunking={

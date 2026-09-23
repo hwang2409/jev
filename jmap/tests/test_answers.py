@@ -59,12 +59,36 @@ def test_parse_valid_typed_answers() -> None:
     }
 
 
+def test_parse_gateway_answers_derives_optional_fields() -> None:
+    response = parse_judge_response(
+        {
+            "answers": {
+                "kind": {
+                    "type": "choice",
+                    "choice": "yes",
+                    "probabilities": {"yes": 0.8, "no": 0.2},
+                },
+                "risk": {
+                    "type": "score",
+                    "score": 2.5,
+                    "probabilities": {"0": 0.1, "3": 0.9},
+                },
+            }
+        },
+        {"kind": {"type": "choice"}, "risk": {"type": "score"}},
+    )
+
+    assert response.answers["kind"].confidence == pytest.approx(0.6)
+    assert response.answers["risk"].legend == {}
+    assert response.answers["risk"].confidence == 0.8
+
+
 @pytest.mark.parametrize(
     "question_id,answer",
     [
         ("matches", {"type": "noul"}),
         ("kind", {"type": "choice", "choice": "yes", "confidence": 0.5}),
-        ("risk", {"type": "score", "score": 1, "legend": {}, "probabilities": {}}),
+        ("risk", {"type": "score", "score": 1, "legend": {}}),
     ],
 )
 def test_parse_rejects_missing_fields(
@@ -140,7 +164,7 @@ def test_parse_rejects_null_confidence(
 
 
 def test_canonical_records_preserve_each_typed_answer_shape() -> None:
-    meta = RecordMeta("diff-risk-heat", "1", "jev-1.13.0", "hunk", "miss")
+    meta = RecordMeta("diff-risk-heat", "1", "typesafe-ai/jev", "hunk", "miss")
     answers = {
         "matches": NoulAnswer(0.75),
         "kind": ChoiceAnswer("yes", {"yes": 0.8, "no": 0.2}, 0.6),
@@ -175,7 +199,7 @@ def test_canonical_records_preserve_each_typed_answer_shape() -> None:
         "meta": {
             "preset": "diff-risk-heat",
             "preset_version": "1",
-            "model": "jev-1.13.0",
+            "model": "typesafe-ai/jev",
             "chunker": "hunk",
             "cache": "miss",
         },
@@ -183,7 +207,7 @@ def test_canonical_records_preserve_each_typed_answer_shape() -> None:
 
 
 def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
-    meta = RecordMeta("jgrep", "1", "jev-1.13.0", "para", "miss")
+    meta = RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "miss")
     partial = PartialResultRecord(
         "notes#p1", {"matches": NoulAnswer(0.5)}, ("other",), meta
     )
@@ -208,7 +232,7 @@ def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
         ErrorDetail(
             "input_error", "invalid JSON record", skip_summary=None
         ),
-        RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+        RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
         source_ref="stdin:byte=128,line=4",
     ).to_dict()["source_ref"] == "stdin:byte=128,line=4"
     skip = ErrorRecord(
@@ -220,14 +244,14 @@ def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
                 "max_chunks=8", 9, tuple(f"p{i}" for i in range(9))
             ),
         ),
-        RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+        RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
     )
     assert len(skip.to_dict()["error"]["skip_summary"]["sample_refs"]) == 8
     assert CoverageRecord(
         "partial",
         {"discovered": 10, "judged": 1, "emitted": 1, "skipped": 9, "failed": 0},
         ("scan_cap",),
-        RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+        RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
     ).to_dict() == {
         "record_type": "coverage",
         "coverage": "partial",
@@ -242,7 +266,7 @@ def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
         "meta": {
             "preset": "jgrep",
             "preset_version": "1",
-            "model": "jev-1.13.0",
+            "model": "typesafe-ai/jev",
             "chunker": "para",
             "cache": "not_applicable",
         },
@@ -255,7 +279,7 @@ def test_coverage_rejects_complete_when_states_are_skipped() -> None:
             "complete",
             {"discovered": 1, "judged": 0, "emitted": 0, "skipped": 1, "failed": 0},
             (),
-            RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+            RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
         )
 
 
@@ -265,6 +289,6 @@ def test_input_errors_require_canonical_source_refs(source_ref: str) -> None:
         ErrorRecord(
             None,
             ErrorDetail("input_error", "invalid input"),
-            RecordMeta("jgrep", "1", "jev-1.13.0", "para", "not_applicable"),
+            RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
             source_ref=source_ref,
         )

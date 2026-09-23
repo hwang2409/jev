@@ -1,7 +1,7 @@
 schema: jmap.preset/v1
 name: diff-risk-heat
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Classify changed hunks for review triage.
 chunking:
   by: hunk

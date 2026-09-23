@@ -85,7 +85,7 @@ def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
         def read(self):
             raise AssertionError("stdin should not be read")
 
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.setattr("jmap.cli.resolve_gateway_key", lambda: None)
     stderr = io.StringIO()
     code = main(
         ["run", "--preset", "jgrep", "--query", "launch"],
@@ -95,7 +95,7 @@ def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
     )
 
     assert code == 2
-    assert "JEV_API_KEY is not set" in stderr.getvalue()
+    assert "Vercel AI Gateway API key is not set" in stderr.getvalue()
 
 
 def test_jgrep_uses_the_preset_context_paragraph_setting(tmp_path: Path) -> None:
@@ -386,18 +386,25 @@ def test_module_accepts_file_path_arguments_before_judgment(tmp_path: Path) -> N
         ["uv", "run", "jmap"],
     )
     for command in commands:
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "VERCEL_AI_GATEWAY",
+                "AI_GATEWAY_API_KEY",
+                "VERCEL_JEV_KEY",
+            }
+        }
+        environment["HOME"] = str(tmp_path)
         result = subprocess.run(
             [*command, "jgrep", "--query", "launch", "--by", "file", str(path)],
             cwd=ROOT,
             check=False,
             capture_output=True,
             text=True,
-            env={
-                key: value
-                for key, value in os.environ.items()
-                if key != "JEV_API_KEY"
-            },
+            env=environment,
         )
         assert result.returncode == 2
-        assert "JEV_API_KEY is not set" in result.stderr
+        assert "Vercel AI Gateway API key is not set" in result.stderr
         assert "unrecognized arguments" not in result.stderr

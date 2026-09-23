@@ -10,13 +10,14 @@ from typing import Any
 
 import yaml
 
+from .api import GATEWAY_MODEL
+
 SCHEMA = "jmap.preset/v1"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 RESERVED_QUESTION_IDS = frozenset({"any", "all", "not"})
 _QUESTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
 _PRESET_NAME = re.compile(r"^[a-z][a-z0-9-]*(?:\.(?:yml|yaml))?$")
-_PINNED_MODEL = re.compile(r"^jev-[0-9]+\.[0-9]+\.[0-9]+$")
 _REQUIRED_FIELDS = frozenset(
     {
         "schema",
@@ -137,8 +138,8 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     _string(root["name"], "name")
     _string(root["version"], "version")
     model = _string(root["model"], "model")
-    if not _PINNED_MODEL.fullmatch(model):
-        raise PresetValidationError("model must be a pinned jev semver version")
+    if model != GATEWAY_MODEL:
+        raise PresetValidationError(f"model must be {GATEWAY_MODEL!r}")
     if "description" in root:
         _string(root["description"], "description")
 
@@ -231,7 +232,7 @@ def _validate_pretty_template(
         "meta": {
             "preset": "preset",
             "preset_version": "1",
-            "model": "jev-1.0.0",
+            "model": GATEWAY_MODEL,
             "chunker": "para",
             "cache": "not_applicable",
         },

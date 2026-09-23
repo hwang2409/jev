@@ -12,7 +12,7 @@ Install the package from this directory with `uv sync`, then use either
 same CLI.
 
 ```bash
-export JEV_API_KEY='...'
+export VERCEL_AI_GATEWAY='...'
 printf 'the launch decision is go\n\nold notes\n' | \
   jmap jgrep --query 'describes the launch decision' --filter=keep
 ```
@@ -49,8 +49,8 @@ the record shape and terminal coverage line are stable.
 
 ```text
 $ printf 'the launch decision is go\n' | jmap jgrep --query 'describes the launch decision'
-{"answers":{"matches_query":{"noul":0.93,"type":"noul"}},"meta":{"cache":"miss","chunker":"para","model":"jev-1.13.0","preset":"jgrep","preset_version":"1"},"record_type":"result","state_ref":"stdin#P1"}
-{"coverage":"complete","coverage_counts":{"discovered":1,"emitted":1,"failed":0,"judged":1,"skipped":0},"coverage_reasons":[],"meta":{"cache":"not_applicable","chunker":"para","model":"jev-1.13.0","preset":"jgrep","preset_version":"1"},"record_type":"coverage"}
+{"answers":{"matches_query":{"noul":0.93,"type":"noul"}},"meta":{"cache":"miss","chunker":"para","model":"typesafe-ai/jev","preset":"jgrep","preset_version":"1"},"record_type":"result","state_ref":"stdin#P1"}
+{"coverage":"complete","coverage_counts":{"discovered":1,"emitted":1,"failed":0,"judged":1,"skipped":0},"coverage_reasons":[],"meta":{"cache":"not_applicable","chunker":"para","model":"typesafe-ai/jev","preset":"jgrep","preset_version":"1"},"record_type":"coverage"}
 ```
 
 If an input limit or scan cap prevents a formed state from being judged, jmap
@@ -99,15 +99,15 @@ cd jmap && uv run pytest -q tests/test_eval.py tests/test_answers.py \
 ```
 
 The live smoke is manual and is not part of pytest or CI. It skips before
-creating a client when `JEV_API_KEY` is absent. When a key is available, run:
+creating a client when a Vercel AI Gateway key is absent. When a key is available, run:
 
 ```bash
-cd jmap && JEV_API_KEY="$JEV_API_KEY" uv run python scripts/live_api_smoke.py \
-  --cache-dir "$(mktemp -d)"
+cd jmap && VERCEL_AI_GATEWAY="$VERCEL_AI_GATEWAY" \
+  uv run python scripts/live_api_smoke.py
 ```
 
-The smoke runs one `jgrep`, one `jfilter`, one `diff-risk-heat` run, and one
-gate. It prints only a compact status table.
+The smoke sends one small three-question battery. It prints latency, model,
+usage, and typed answers.
 
 ### exit codes
 

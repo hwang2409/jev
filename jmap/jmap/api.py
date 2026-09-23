@@ -3,10 +3,13 @@ from __future__ import annotations
 import math
 import os
 import random
+import re
 import time
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import UTC
 from email.utils import parsedate_to_datetime
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -16,7 +19,17 @@ from .answers import ErrorResponse, JudgeResponse, parse_judge_response
 if TYPE_CHECKING:
     from .runner import State
 
-SYSTEMONE_URL = "https://api.typesafe.ai/v1/systemone"
+GATEWAY_ENDPOINT = "https://ai-gateway.vercel.sh/v4/ai/evaluation-model"
+GATEWAY_MODEL = "typesafe-ai/jev"
+GATEWAY_KEY_NAMES = ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY")
+GATEWAY_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept-Encoding": "identity",
+    "ai-evaluation-model-specification-version": "4",
+    "ai-gateway-auth-method": "api-key",
+    "ai-gateway-protocol-version": "0.0.1",
+    "ai-model-id": GATEWAY_MODEL,
+}
 DEFAULT_MAX_ATTEMPTS = 3
 # Keep retry delays bounded so server hints and injected jitter cannot hang a run.
 MAX_WAIT_SECONDS = 30.0
@@ -24,8 +37,8 @@ MAX_WAIT_SECONDS = 30.0
 MAX_RESPONSE_BYTES = 1_048_576
 
 
-class TypeSafeClient:
-    """Synchronous TypeSafe SystemOne client for the judge function seam."""
+class GatewayClient:
+    """Synchronous Vercel AI Gateway client for the judge function seam."""
 
     def __init__(
         self,
@@ -56,24 +69,24 @@ class TypeSafeClient:
     def __call__(
         self, state: State, questions: Mapping[str, Any], model: str
     ) -> JudgeResponse | ErrorResponse:
-        if model == "jev-latest":
-            return ErrorResponse("model must be a pinned version")
-        api_key = os.environ.get("JEV_API_KEY")
+        if model != GATEWAY_MODEL:
+            return ErrorResponse(f"model must be {GATEWAY_MODEL}")
+        api_key = resolve_gateway_key()
         if not api_key:
-            return ErrorResponse("JEV_API_KEY is not set")
+            return ErrorResponse("Vercel AI Gateway API key is not set")
 
         payload = {
+            "providerOptions": {"gateway": {"zeroDataRetention": True}},
             "state": state.api_payload,
-            "model": model,
-            "questions": dict(questions),
+            "questions": _gateway_questions(questions),
         }
+        started = time.monotonic()
         response, attempts = self._post(payload, api_key)
         if isinstance(response, ErrorResponse):
             return response
 
-        try:
-            parsed = parse_judge_response(response.json(), questions)
-        except (TypeError, ValueError):
+        parsed = self._parse_response(response, questions, started)
+        if parsed is None:
             return ErrorResponse(
                 "malformed answer",
                 http_status=response.status_code,
@@ -85,14 +98,33 @@ class TypeSafeClient:
         response, retry_attempts = self._post(payload, api_key, attempts)
         if isinstance(response, ErrorResponse):
             return response
+        parsed = self._parse_response(response, questions, started)
+        if parsed is not None:
+            return parsed
+        return ErrorResponse(
+            "malformed answer",
+            http_status=response.status_code,
+            attempts=retry_attempts,
+        )
+
+    @staticmethod
+    def _parse_response(
+        response: httpx.Response,
+        questions: Mapping[str, Any],
+        started: float,
+    ) -> JudgeResponse | None:
         try:
-            return parse_judge_response(response.json(), questions)
+            payload = response.json()
+            normalized = _normalize_gateway_response(payload, questions)
+            parsed = parse_judge_response(normalized, questions)
         except (TypeError, ValueError):
-            return ErrorResponse(
-                "malformed answer",
-                http_status=response.status_code,
-                attempts=retry_attempts,
-            )
+            return None
+        return replace(
+            parsed,
+            served_model=_served_model(payload),
+            usage=payload.get("usage"),
+            latency_ms=round((time.monotonic() - started) * 1000),
+        )
 
     def close(self) -> None:
         if self._owns_http_client:
@@ -103,7 +135,7 @@ class TypeSafeClient:
     ) -> tuple[httpx.Response | ErrorResponse, int]:
         headers = {
             "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
+            **GATEWAY_HEADERS,
         }
         attempts = attempts_used
         if attempts >= self.max_attempts:
@@ -116,7 +148,7 @@ class TypeSafeClient:
             try:
                 with self.http_client.stream(
                     "POST",
-                    SYSTEMONE_URL,
+                    GATEWAY_ENDPOINT,
                     headers=headers,
                     json=payload,
                     timeout=self.timeout,
@@ -188,6 +220,79 @@ class TypeSafeClient:
         )
 
 
+def resolve_gateway_key() -> str | None:
+    """Resolve the gateway key from the environment, then local shell config."""
+    for name in GATEWAY_KEY_NAMES:
+        value = os.environ.get(name)
+        if value:
+            return value
+    try:
+        zshrc = (Path.home() / ".zshrc").read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for name in GATEWAY_KEY_NAMES:
+        match = re.search(
+            rf"^\s*(?:export\s+)?{name}=[\"']?([^\"'\s#]+)",
+            zshrc,
+            re.MULTILINE,
+        )
+        if match:
+            return match.group(1)
+    return None
+
+
+def _gateway_questions(questions: Mapping[str, Any]) -> dict[str, Any]:
+    result = {}
+    for question_id, question in questions.items():
+        if isinstance(question, Mapping) and question.get("type") == "noul":
+            result[question_id] = {**question, "type": "boolean"}
+        else:
+            result[question_id] = question
+    return result
+
+
+def _normalize_gateway_response(
+    payload: Any, questions: Mapping[str, Any]
+) -> Mapping[str, Any]:
+    if not isinstance(payload, Mapping):
+        raise ValueError("response must be an object")
+    answers = payload.get("answers")
+    if not isinstance(answers, Mapping):
+        raise ValueError("response requires an answers object")
+    normalized_answers = {}
+    for question_id, raw_answer in answers.items():
+        question = questions.get(question_id)
+        question_type = (
+            question.get("type") if isinstance(question, Mapping) else None
+        )
+        if question_type == "noul":
+            if not isinstance(raw_answer, Mapping):
+                raise ValueError("boolean answer must be an object")
+            if raw_answer.get("type") == "noul":
+                normalized_answers[question_id] = raw_answer
+                continue
+            if raw_answer.get("type") != "boolean":
+                raise ValueError("gateway noul answer must have boolean type")
+            normalized_answers[question_id] = {
+                "type": "noul",
+                "noul": raw_answer.get("probability"),
+            }
+        else:
+            normalized_answers[question_id] = raw_answer
+    return {**payload, "answers": normalized_answers}
+
+
+def _served_model(payload: Mapping[str, Any]) -> str | None:
+    metadata = payload.get("providerMetadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    typesafe = metadata.get("typesafe")
+    if not isinstance(typesafe, Mapping):
+        return None
+    model = typesafe.get("model")
+    return model if isinstance(model, str) and model else None
+
+
 def _retry_after(response: httpx.Response) -> float | None:
     value = response.headers.get("Retry-After")
     if value is None:
@@ -207,5 +312,4 @@ def _retry_after(response: httpx.Response) -> float | None:
     return seconds
 
 
-JevClient = TypeSafeClient
-SystemOneClient = TypeSafeClient
+JevClient = GatewayClient

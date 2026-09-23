@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .answers import NoulAnswer, ResultRecord, ScoreAnswer
-from .api import TypeSafeClient
+from .api import GatewayClient, resolve_gateway_key
 from .cache import CacheStore
 from .chunkers import chunk_file, chunk_input
 from .presets import (
@@ -199,9 +199,10 @@ def _judgment_command(
 
     effective_preset = _with_max_chunks(preset, args.max_chunks)
     _validate_preset_parameters(effective_preset, query, predicate)
-    if judge_fn is None and not os.environ.get("JEV_API_KEY"):
+    if judge_fn is None and not resolve_gateway_key():
         raise _OperationalError(
-            "JEV_API_KEY is not set; set it before running a judgment command"
+            "Vercel AI Gateway API key is not set; set it before running a "
+            "judgment command"
         )
     limits = StateLimits(**effective_preset.chunking["limits"])
     states, rejections = _form_states(
@@ -215,7 +216,7 @@ def _judgment_command(
     )
 
     if judge_fn is None:
-        client = TypeSafeClient()
+        client = GatewayClient()
         active_judge = client
     else:
         client = None

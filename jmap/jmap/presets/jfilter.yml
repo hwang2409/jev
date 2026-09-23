@@ -1,7 +1,7 @@
 schema: jmap.preset/v1
 name: jfilter
 version: "1"
-model: jev-1.13.0
+model: typesafe-ai/jev
 description: Keep records that satisfy a natural-language predicate.
 chunking:
   by: record

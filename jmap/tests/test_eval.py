@@ -525,7 +525,7 @@ def test_gate_covers_pass_fail_fail_closed_and_usage_exit_paths() -> None:
 def test_fake_judge_can_return_an_uncertain_choice_answer() -> None:
     judge = EvalJudge()
     questions = {"kind": {"type": "choice"}}
-    response = judge(State("positive", "data", {}), questions, "jev-1.13.0")
+    response = judge(State("positive", "data", {}), questions, "typesafe-ai/jev")
 
     answer = response.answers["kind"]
     assert isinstance(answer, ChoiceAnswer)
@@ -542,11 +542,12 @@ def test_live_smoke_skips_without_a_key_and_does_not_create_a_client(
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
 
-    monkeypatch.delenv("JEV_API_KEY", raising=False)
+    monkeypatch.delenv("AI_GATEWAY_API_KEY", raising=False)
+    monkeypatch.setattr(module, "resolve_gateway_key", lambda: None)
     def fail_client():
         raise AssertionError("client was created")
 
-    monkeypatch.setattr(module, "TypeSafeClient", fail_client)
+    monkeypatch.setattr(module, "GatewayClient", fail_client)
 
     output = io.StringIO()
     assert module.main_cli(output=output) == 0
