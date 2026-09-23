@@ -5,10 +5,11 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, TypedDict
 
-from ...runtime.execution import ToolExecutionContext
+from ...protocol.types import StructuredToolResult
 from ...providers.jev import route_step
 from ...routing import ROUTE_TOPK_CONFIDENCE
-from ...protocol.types import StructuredToolResult
+from ...runtime.execution import ToolExecutionContext
+from ..browser import catalog_criteria as browser_catalog_criteria
 from ..calendar import catalog_criteria
 from ..memory import catalog_criteria as memory_catalog_criteria
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
@@ -146,6 +147,15 @@ _BOUNDARIES.update(
             [str(example) for example in criteria["examples"]],
         )
         for name, criteria in memory_catalog_criteria().items()
+    }
+)
+_BOUNDARIES.update(
+    {
+        name: (
+            str(criteria["not_for"]),
+            [str(example) for example in criteria["examples"]],
+        )
+        for name, criteria in browser_catalog_criteria().items()
     }
 )
 

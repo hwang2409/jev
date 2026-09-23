@@ -1,52 +1,18 @@
 from __future__ import annotations
 
-
-import io
-
-
-import json
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 import zeta.tools.route as route_module
-
-
-from zeta.cli.main import build_parser
-
-
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-
-
 from zeta.core.fake import FakeBackend, ScriptedTurn
-
-
 from zeta.core.store import ConversationStore
-
-
-from zeta.runtime.loop import AgentLoop
-
-
-from zeta.providers.jev import JevRouterError, RouteResult
-
-
-from zeta.runtime.driver import drive_turn
-
-
-from zeta.config.settings import load_settings, resolve
-
-
-from zeta.skills import SkillCatalog
-
-
-from zeta.tools.registry import ToolRegistry
-
-
 from zeta.protocol.types import TextContent, ToolCall, ToolResult
+from zeta.providers.jev import JevRouterError, RouteResult
+from zeta.runtime.loop import AgentLoop
+from zeta.skills import SkillCatalog
+from zeta.tools.registry import ToolRegistry
 
 
 async def collect(events):
