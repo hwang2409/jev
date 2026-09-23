@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from html import escape
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -425,16 +426,31 @@ async def _browser_extract(
         value = extracted.value
         truncated = extracted.truncated
         full_size = extracted.full_size
-    content = _extracted_text(value)
+    escaped_full_size = (
+        extracted.escaped_full_size
+        if extracted is not None
+        else None
+    )
+    content, escaped_truncated, escaped_size = _extracted_text(value, limit)
+    truncated = truncated or escaped_truncated
+    content_full_size = max(escaped_size, escaped_full_size or 0)
     structured: dict[str, object] = {
         "value": value,
         "truncated": truncated,
         "full_size": full_size,
     }
     if triage is not None:
+        receipt = f"{_triage_receipt(triage['triage'])}\n"
         structured.update(triage)
-        content = f"{_triage_receipt(triage['triage'])}\n{content}"
-    return _success_result(text_block(content, full_size=full_size), structured_content=structured)
+        content = receipt + content
+        content_full_size += len(receipt.encode("utf-8"))
+    content, final_truncated = _bound_utf8(content, limit)
+    truncated = truncated or final_truncated
+    structured["truncated"] = truncated
+    return _success_result(
+        text_block(content, full_size=max(full_size, content_full_size)),
+        structured_content=structured,
+    )
 
 
 async def _triage_search_results(
@@ -965,10 +981,21 @@ def _state_result(state: Any, *, action: str | None = None) -> StructuredToolRes
     return _success_result(text_block(text), structured_content=payload)
 
 
-def _extracted_text(value: object) -> str:
+def _extracted_text(value: object, limit: int) -> tuple[str, bool, int]:
     if isinstance(value, str):
-        return value
-    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        serialized = value
+    else:
+        serialized = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    escaped = escape(serialized, quote=False)
+    bounded, truncated = _bound_utf8(escaped, limit)
+    return bounded, truncated, len(escaped.encode("utf-8"))
+
+
+def _bound_utf8(value: str, limit: int) -> tuple[str, bool]:
+    bounded = value.encode("utf-8")[: max(limit, 0)].decode(
+        "utf-8", errors="ignore"
+    )
+    return bounded, bounded != value
 
 
 def _browser_exception(exc: Exception) -> StructuredToolResult:
