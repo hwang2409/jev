@@ -253,7 +253,7 @@ def test_jgrep_prefilter_pins_bm25_document_frequency_and_parameters(
             "--prefilter-fields",
             "focus",
         ],
-        input_text="needle needle\n\nrare\n\nneedle rare\n",
+        input_text="needle needle\n\nrare\n\nneedle common\n",
         judge_fn=judge,
         cache_store=CacheStore(tmp_path),
     )
@@ -263,14 +263,14 @@ def test_jgrep_prefilter_pins_bm25_document_frequency_and_parameters(
         for state_ref, focus in (
             ("p1", "needle needle"),
             ("p2", "rare"),
-            ("p3", "needle rare"),
+            ("p3", "needle common"),
         )
     )
     query_tokens = tokenize("needle rare")
     corpus_stats = BM25CorpusStats(
         document_count=3,
         average_length=5 / 3,
-        document_frequency={"needle": 2, "rare": 2},
+        document_frequency={"needle": 2, "rare": 1},
     )
     scores = tuple(
         bm25_score(query_tokens, tokenize(state.focus), corpus_stats)
@@ -279,13 +279,13 @@ def test_jgrep_prefilter_pins_bm25_document_frequency_and_parameters(
 
     assert code == 2
     assert scores == pytest.approx(
-        (0.6118390439885317, 0.561960861054684, 0.8689142725551416)
+        (0.6118390439885317, 1.1727306286009773, 0.4344571362775708)
     )
     ranked_refs = [
         state.state_ref for state in bm25_rank(states, "needle rare", ("focus",))
     ]
-    assert ranked_refs == ["p3", "p1", "p2"]
-    assert calls == ["stdin#P3"]
+    assert ranked_refs == ["p2", "p1", "p3"]
+    assert calls == ["stdin#P2"]
 
 
 def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
