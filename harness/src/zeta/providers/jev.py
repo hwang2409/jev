@@ -30,6 +30,7 @@ GATEWAY_HEADERS = {
     "ai-model-id": MODEL,
 }
 _MAX_ATTEMPTS = 3
+_MAX_WAIT_SECONDS = 300.0
 
 
 def _noul_confidence(value: float) -> float:
@@ -97,7 +98,31 @@ def _normalize_gateway_response(
                 "noul": raw_answer["probability"],
             }
         else:
-            normalized_answers[question_id] = raw_answer
+            normalized_answer = raw_answer
+            if (
+                isinstance(raw_answer, dict)
+                and isinstance(question, dict)
+                and question.get("type") in {"choice", "score"}
+                and "confidence" not in raw_answer
+            ):
+                probabilities = raw_answer.get("probabilities", {})
+                criteria = question.get("criteria")
+                option_count = (
+                    len(criteria)
+                    if isinstance(criteria, (dict, list))
+                    else len(probabilities)
+                )
+                if option_count <= 1 or not probabilities:
+                    derived_confidence = 1.0
+                else:
+                    derived_confidence = (
+                        option_count * max(probabilities.values()) - 1
+                    ) / (option_count - 1)
+                normalized_answer = {
+                    **raw_answer,
+                    "confidence": derived_confidence,
+                }
+            normalized_answers[question_id] = normalized_answer
     usage = payload.get("usage", {})
     if not isinstance(usage, dict):
         raise TypeError("usage must be an object")
@@ -148,7 +173,7 @@ def _retry_after(response: Any) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return seconds
+    return min(_MAX_WAIT_SECONDS, seconds)
 
 
 class JevRouterError(RuntimeError):
@@ -1085,7 +1110,11 @@ async def _post_json(
                     f"Jev request failed: {exc}", gate=gate
                 ) from exc
             if response.status_code in {429, 529} and attempt < _MAX_ATTEMPTS - 1:
-                await asyncio.sleep(_retry_after(response) or delay)
+                # hint honored as given; jm parity (PR #24)
+                retry_after = _retry_after(response)
+                await asyncio.sleep(
+                    delay if retry_after is None else retry_after
+                )
                 delay = min(300.0, delay * 2)
                 continue
             if response.status_code >= 400:

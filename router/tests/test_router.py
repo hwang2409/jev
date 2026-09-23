@@ -125,6 +125,32 @@ def test_route_maps_gateway_booleans_and_derives_missing_confidence():
     assert result.usage == {"input_tokens": 2, "output_tokens": 1}
 
 
+def test_route_uses_question_criteria_count_for_confidence():
+    response = {
+        "answers": {
+            "tool": {
+                "type": "choice",
+                "choice": "Read",
+                "probabilities": {"Read": 0.8, "Bash": 0.2},
+            },
+            "needs_tool": {"type": "boolean", "probability": 0.75},
+            "step_clarity": {"type": "boolean", "probability": 0.9},
+        },
+        "usage": {"inputTokens": 2, "outputTokens": 1},
+    }
+    sess = FakeSession([FakeResponse(200, response)])
+
+    result = route(
+        "t",
+        "s",
+        session=sess,
+        api_key="k",
+        catalog={"Read": "read", "Bash": "run", "Search": "search"},
+    )
+
+    assert result.confidence == pytest.approx(0.7)
+
+
 def test_route_retries_on_429_then_succeeds(monkeypatch):
     delays = []
     monkeypatch.setattr(router.time, "sleep", delays.append)

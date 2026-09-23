@@ -24,6 +24,7 @@ GATEWAY_HEADERS = {
     "ai-gateway-protocol-version": "0.0.1",
     "ai-model-id": MODEL,
 }
+_MAX_WAIT_SECONDS = 300.0
 
 
 def _resolve_gateway_key() -> str:
@@ -77,8 +78,13 @@ def _normalize_gateway_answers(result: dict, questions: dict) -> dict:
             answer = dict(answer)
             if "confidence" not in answer:
                 probabilities = answer.get("probabilities", {})
-                option_count = len(probabilities)
-                if option_count <= 1:
+                criteria = question.get("criteria", ())
+                option_count = (
+                    len(criteria)
+                    if isinstance(criteria, (dict, list))
+                    else len(probabilities)
+                )
+                if option_count <= 1 or not probabilities:
                     answer["confidence"] = 1.0
                 else:
                     answer["confidence"] = (
@@ -116,7 +122,7 @@ def _retry_after(error: HTTPError) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return seconds
+    return min(_MAX_WAIT_SECONDS, seconds)
 
 
 def _call_case(case: dict) -> dict:
@@ -140,7 +146,9 @@ def _call_case(case: dict) -> dict:
                 result = json.load(resp)
         except HTTPError as exc:
             if exc.code in {429, 529} and attempt < 2:
-                time.sleep(_retry_after(exc) or delay)
+                # hint honored as given; jm parity (PR #24)
+                retry_after = _retry_after(exc)
+                time.sleep(delay if retry_after is None else retry_after)
                 delay = min(300.0, delay * 2)
                 continue
             raise

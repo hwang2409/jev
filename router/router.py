@@ -23,6 +23,7 @@ GATEWAY_HEADERS = {
     "ai-gateway-protocol-version": "0.0.1",
     "ai-model-id": MODEL,
 }
+_MAX_WAIT_SECONDS = 300.0
 
 
 @dataclass
@@ -110,11 +111,13 @@ def route(
     for attempt in range(3):
         resp = sess.post(API_URL, json=gateway_body, headers=headers, timeout=60)
         if resp.status_code in (429, 529) and attempt < 2:
-            time.sleep(_retry_after(resp) or delay)
+            # hint honored as given; jm parity (PR #24)
+            retry_after = _retry_after(resp)
+            time.sleep(delay if retry_after is None else retry_after)
             delay = min(300.0, delay * 2)
             continue
         resp.raise_for_status()
-        return parse_response(_normalize_gateway_response(resp.json()))
+        return parse_response(_normalize_gateway_response(resp.json(), body["questions"]))
     raise AssertionError("unreachable")
 
 
@@ -144,16 +147,39 @@ def _gateway_questions(questions: dict) -> dict:
     }
 
 
-def _normalize_gateway_response(data: dict) -> dict:
+def _normalize_gateway_response(data: dict, questions: dict) -> dict:
     answers = data["answers"]
-    normalized = {
-        question_id: (
-            {"type": "noul", "noul": answer["probability"]}
-            if isinstance(answer, dict) and answer.get("type") == "boolean"
-            else answer
-        )
-        for question_id, answer in answers.items()
-    }
+    normalized = {}
+    for question_id, answer in answers.items():
+        if isinstance(answer, dict) and answer.get("type") == "boolean":
+            normalized[question_id] = {
+                "type": "noul",
+                "noul": answer["probability"],
+            }
+            continue
+        question = questions.get(question_id)
+        if (
+            isinstance(answer, dict)
+            and isinstance(question, dict)
+            and question.get("type") in {"choice", "score"}
+            and "confidence" not in answer
+        ):
+            probabilities = answer.get("probabilities", {})
+            criteria = question.get("criteria")
+            option_count = (
+                len(criteria)
+                if isinstance(criteria, (dict, list))
+                else len(probabilities)
+            )
+            if option_count <= 1 or not probabilities:
+                confidence = 1.0
+            else:
+                confidence = (
+                    option_count * max(probabilities.values()) - 1
+                ) / (option_count - 1)
+            normalized[question_id] = {**answer, "confidence": confidence}
+        else:
+            normalized[question_id] = answer
     return {
         **data,
         "answers": normalized,
@@ -208,4 +234,4 @@ def _retry_after(response) -> float | None:
         seconds = retry_at.timestamp() - time.time()
     if not math.isfinite(seconds) or seconds < 0:
         return None
-    return seconds
+    return min(_MAX_WAIT_SECONDS, seconds)

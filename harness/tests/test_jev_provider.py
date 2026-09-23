@@ -1032,7 +1032,10 @@ async def test_gateway_maps_boolean_answers_and_derives_missing_confidence(
     monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
     monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
 
-    result = await jev.route_step("read it", {"read": "Read", "bash": "Run"})
+    result = await jev.route_step(
+        "read it",
+        {"read": "Read", "bash": "Run", "search": "Search"},
+    )
 
     request = Client.requests[0]
     assert request["headers"] == {
@@ -1047,7 +1050,7 @@ async def test_gateway_maps_boolean_answers_and_derives_missing_confidence(
     assert request["json"]["questions"]["needs_tool"]["type"] == "boolean"
     assert result.needs_tool == pytest.approx(0.75)
     assert result.step_clarity == pytest.approx(0.9)
-    assert result.confidence == pytest.approx(0.6)
+    assert result.confidence == pytest.approx(0.7)
 
 
 @pytest.mark.asyncio

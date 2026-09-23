@@ -10,7 +10,7 @@ def test_normalize_gateway_answers_rebuilds_native_fields() -> None:
     questions = {
         "kind": {
             "type": "choice",
-            "criteria": {"yes": "yes", "no": "no"},
+            "criteria": {"yes": "yes", "no": "no", "maybe": "maybe"},
         },
         "risk": {
             "type": "score",
@@ -41,7 +41,7 @@ def test_normalize_gateway_answers_rebuilds_native_fields() -> None:
     assert result["answers"]["kind"]["type"] == "choice"
     assert result["answers"]["kind"]["choice"] == "yes"
     assert result["answers"]["kind"]["probabilities"] == {"yes": 0.8, "no": 0.2}
-    assert result["answers"]["kind"]["confidence"] == pytest.approx(0.6)
+    assert result["answers"]["kind"]["confidence"] == pytest.approx(0.7)
     assert result["answers"]["risk"] == {
         "type": "score",
         "score": 2,
