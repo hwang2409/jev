@@ -47,7 +47,7 @@ def build_cache_preimage(
     questions: Mapping[str, Any],
     state: Mapping[str, Any] | Any,
     limits: Mapping[str, int] | Any | None = None,
-    cache_schema: str = LEGACY_CACHE_SCHEMA,
+    cache_schema: str = CACHE_SCHEMA,
 ) -> dict[str, Any]:
     """Build the exact section 6.1 cache-key object."""
     resolved_chunking = _json_value(chunking)

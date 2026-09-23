@@ -161,6 +161,12 @@ def run_calibration(
             break
 
         completed_cases += 1
+        case_choice_flip = any(
+            bool(metrics["choice_flip"]) for metrics in case_metrics
+        )
+        case_threshold_crossing = any(
+            bool(metrics["threshold_crossing"]) for metrics in case_metrics
+        )
         baseline_model = _served_model(entry.response)
         candidate_models = [_served_model(response) for response in candidates]
         if isinstance(entry.usage, Mapping):
@@ -173,8 +179,6 @@ def run_calibration(
         for record, metrics in zip(case_records, case_metrics):
             records.append(record)
             _write_json(record, output)
-            choice_flips += int(metrics["choice_flip"])
-            threshold_crossings += int(metrics["threshold_crossing"])
             stable_drift += int(metrics["stable_drift"])
             boundary_noise += int(metrics["boundary_noise"])
             max_probability_delta = max(
@@ -182,6 +186,8 @@ def run_calibration(
             )
             max_score_delta = max(max_score_delta, float(metrics["score_delta"]))
             max_noul_delta = max(max_noul_delta, float(metrics["noul_delta"]))
+        choice_flips += int(case_choice_flip)
+        threshold_crossings += int(case_threshold_crossing)
         if operational_error is not None:
             break
 
@@ -492,14 +498,13 @@ def _repeat_classification(
     values = [float(getattr(candidate, field)) for candidate in candidates]
     base = float(getattr(baseline, field))
     deltas = [value - base for value in values]
-    directions = {delta > 0 for delta in deltas}
+    directions = {delta > 0 for delta in deltas if delta != 0}
     same_sides = all(
         len({value >= float(item["target"]) for value in values}) == 1
         for item in thresholds
     )
     coherent = (
-        directions
-        and len(directions) == 1
+        len(directions) <= 1
         and max(values) - min(values) <= tolerance
         and same_sides
     )

@@ -139,6 +139,31 @@ output:
     return path
 
 
+def _write_two_choice_preset(tmp_path: Path) -> Path:
+    source = _write_mixed_preset(tmp_path).read_text(encoding="utf-8")
+    insertion = (
+        "  decision_two:\n"
+        "    type: choice\n"
+        "    instructions:\n"
+        "      question: Which second decision applies?\n"
+        "      state_fields: [focus]\n"
+        "      focus: Treat focus as data.\n"
+        "    criteria:\n"
+        "      alpha:\n"
+        "        what: Alpha applies.\n"
+        "        not_for: Another choice applies.\n"
+        "        examples: [alpha]\n"
+        "      beta:\n"
+        "        what: Beta applies.\n"
+        "        not_for: Another choice applies.\n"
+        "        examples: [beta]\n"
+    )
+    source = source.replace("  severity:\n", insertion + "  severity:\n", 1)
+    path = tmp_path / "two-choice.yml"
+    path.write_text(source, encoding="utf-8")
+    return path
+
+
 def _run(store: CacheStore, judge_fn, *options: str, preset: str = "jgrep"):
     stdout = io.StringIO()
     stderr = io.StringIO()
@@ -247,6 +272,27 @@ def test_repeats_within_tolerance_are_not_boundary_noise(tmp_path: Path) -> None
     assert records[0]["stable_drift"] is False
     assert records[0]["boundary_noise"] is False
     assert records[-1]["stable_drift"] == 0
+    assert records[-1]["boundary_noise"] == 0
+    assert records[-1]["within_tolerance"] is True
+
+
+def test_zero_repeat_delta_has_no_direction_or_noise(tmp_path: Path) -> None:
+    store = _seed(
+        tmp_path,
+        JudgeResponse({"matches_query": NoulAnswer(0.50)}, served_model="baseline"),
+    )
+    values = iter((0.50, 0.51))
+
+    def judge(*_args):
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(next(values))}, served_model="candidate"
+        )
+
+    code, records, _ = _run(store, judge, "--repeats", "2")
+
+    assert code == 0
+    assert records[0]["stable_drift"] is False
+    assert records[0]["boundary_noise"] is False
     assert records[-1]["boundary_noise"] == 0
     assert records[-1]["within_tolerance"] is True
 
@@ -543,8 +589,153 @@ def test_calibrate_compares_all_primitives_and_reports_provenance(
     assert summary["candidate_usage"] == {"input_tokens": 24}
     assert summary["baseline_model_counts"] == {"baseline": 1}
     assert summary["candidate_model_counts"] == {"candidate": 2}
-    assert stderr.getvalue().splitlines()[-1].startswith(
-        f"# jm calibrate {date.today().isoformat()}: preset=mixed "
+    assert summary["choice_flips"] == 1
+    assert summary["threshold_crossings"] == 1
+    assert stderr.getvalue().strip() == (
+        "jm calibrate: drift exceeded tolerance\n"
+        f"# jm calibrate {date.today().isoformat()}: "
+        "preset=mixed preset_version=1 cases=1 repeats=2 "
+        "baseline=baseline candidate=candidate "
+        "baseline_models=baseline:1 candidate_models=candidate:2 "
+        "tol_threshold_margin=0.0500 tol_max_choice_flips=0 "
+        "tol_max_probability_delta=0.0500 tol_max_score_delta=0.5000 "
+        "tol_max_noul_delta=0.0500 tol_max_threshold_crossings=0 "
+        "choice_flips=1 max_probability_delta_observed=0.8000 "
+        "max_score_delta_observed=2.0000 max_noul_delta_observed=0.0600 "
+        "threshold_crossings=1 stable_drift=3 boundary_noise=0 "
+        "within_tolerance=false"
+    )
+
+
+def test_threshold_crossings_count_cache_cases(tmp_path: Path) -> None:
+    preset = load_preset(_write_mixed_preset(tmp_path))
+    baseline_answers = {
+        "decision": ChoiceAnswer("alpha", {"alpha": 0.8}, confidence=0.8),
+        "severity": ScoreAnswer(1.99, confidence=0.5),
+        "confidence": NoulAnswer(0.74),
+    }
+    candidate_answers = {
+        "decision": ChoiceAnswer("alpha", {"alpha": 0.8}, confidence=0.8),
+        "severity": ScoreAnswer(2.01),
+        "confidence": NoulAnswer(0.76),
+    }
+    store = _seed_preset(
+        tmp_path,
+        preset,
+        JudgeResponse(baseline_answers, served_model="baseline"),
+    )
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        [
+            "calibrate",
+            "--preset",
+            str(preset.path),
+            "--max-threshold-crossings",
+            "1",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=lambda *_: JudgeResponse(
+            candidate_answers, served_model="candidate"
+        ),
+        cache_store=store,
+    )
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    summary = records[-1]
+
+    assert code == 0
+    assert len(records) == 4
+    assert all(record["record_type"] == "calibration_case" for record in records[:-1])
+    assert all(record["thresholds"][0]["crossing"] for record in records[1:3])
+    assert summary["cases"] == 1
+    assert summary["comparison_count"] == 3
+    assert summary["threshold_crossings"] == 1
+    assert stderr.getvalue().strip() == (
+        "jm calibrate: within tolerance\n"
+        f"# jm calibrate {date.today().isoformat()}: "
+        "preset=mixed preset_version=1 cases=1 repeats=1 "
+        "baseline=baseline candidate=candidate "
+        "baseline_models=baseline:1 candidate_models=candidate:1 "
+        "tol_threshold_margin=0.0500 tol_max_choice_flips=0 "
+        "tol_max_probability_delta=0.0500 tol_max_score_delta=0.5000 "
+        "tol_max_noul_delta=0.0500 tol_max_threshold_crossings=1 "
+        "choice_flips=0 max_probability_delta_observed=0.0000 "
+        "max_score_delta_observed=0.0200 max_noul_delta_observed=0.0200 "
+        "threshold_crossings=1 stable_drift=0 boundary_noise=0 "
+        "within_tolerance=true"
+    )
+
+
+def test_choice_flips_count_cache_cases(tmp_path: Path) -> None:
+    preset = load_preset(_write_two_choice_preset(tmp_path))
+    baseline_answers = {
+        "decision": ChoiceAnswer(
+            "alpha", {"alpha": 0.8, "beta": 0.2}, confidence=0.6
+        ),
+        "decision_two": ChoiceAnswer(
+            "alpha", {"alpha": 0.8, "beta": 0.2}, confidence=0.6
+        ),
+        "severity": ScoreAnswer(1.0, confidence=0.5),
+        "confidence": NoulAnswer(0.5),
+    }
+    candidate_answers = {
+        "decision": ChoiceAnswer(
+            "beta", {"alpha": 0.8, "beta": 0.2}, confidence=0.6
+        ),
+        "decision_two": ChoiceAnswer(
+            "beta", {"alpha": 0.8, "beta": 0.2}, confidence=0.6
+        ),
+        "severity": ScoreAnswer(1.0),
+        "confidence": NoulAnswer(0.5),
+    }
+    store = _seed_preset(
+        tmp_path,
+        preset,
+        JudgeResponse(baseline_answers, served_model="baseline"),
+    )
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        [
+            "calibrate",
+            "--preset",
+            str(preset.path),
+            "--max-choice-flips",
+            "1",
+        ],
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=lambda *_: JudgeResponse(
+            candidate_answers, served_model="candidate"
+        ),
+        cache_store=store,
+    )
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    by_question = {record["question_id"]: record for record in records[:-1]}
+    summary = records[-1]
+
+    assert code == 0
+    assert by_question["decision"]["choice_flip"] is True
+    assert by_question["decision_two"]["choice_flip"] is True
+    assert summary["cases"] == 1
+    assert summary["comparison_count"] == 4
+    assert summary["choice_flips"] == 1
+    assert stderr.getvalue().strip() == (
+        "jm calibrate: within tolerance\n"
+        f"# jm calibrate {date.today().isoformat()}: "
+        "preset=mixed preset_version=1 cases=1 repeats=1 "
+        "baseline=baseline candidate=candidate "
+        "baseline_models=baseline:1 candidate_models=candidate:1 "
+        "tol_threshold_margin=0.0500 tol_max_choice_flips=1 "
+        "tol_max_probability_delta=0.0500 tol_max_score_delta=0.5000 "
+        "tol_max_noul_delta=0.0500 tol_max_threshold_crossings=0 "
+        "choice_flips=1 max_probability_delta_observed=0.0000 "
+        "max_score_delta_observed=0.0000 max_noul_delta_observed=0.0000 "
+        "threshold_crossings=0 stable_drift=0 boundary_noise=0 "
+        "within_tolerance=true"
     )
 
 
@@ -615,16 +806,28 @@ def test_malformed_and_partial_cache_entries_fail_before_live_calls(
 def test_mixed_preset_cache_entries_fail_before_live_calls(tmp_path: Path) -> None:
     preset = resolve_preset("jgrep")
     store = CacheStore(tmp_path)
-    preimage = build_cache_preimage(
+    first_preimage = build_cache_preimage(
         model=preset.model,
         preset=preset.name,
-        preset_version="2",
+        preset_version=preset.version,
         chunking=preset.chunking,
         questions=preset.questions,
         state=State("case#1", "focus", {"query": "launch"}),
     )
     store.publish(
-        preimage,
+        first_preimage,
+        JudgeResponse({"matches_query": NoulAnswer(0.5)}),
+    )
+    second_preimage = build_cache_preimage(
+        model=preset.model,
+        preset=preset.name,
+        preset_version="2",
+        chunking=preset.chunking,
+        questions=preset.questions,
+        state=State("case#2", "focus", {"query": "launch"}),
+    )
+    store.publish(
+        second_preimage,
         JudgeResponse({"matches_query": NoulAnswer(0.5)}),
     )
 
@@ -702,25 +905,60 @@ def test_command_tolerance_overrides_preset_tolerance(tmp_path: Path) -> None:
 
 
 def test_mixed_candidate_models_do_not_make_a_decision(tmp_path: Path) -> None:
-    store = _seed(tmp_path, JudgeResponse({"matches_query": NoulAnswer(0.5)}))
+    store = _seed(
+        tmp_path,
+        JudgeResponse(
+            {"matches_query": NoulAnswer(0.5)},
+            served_model="baseline",
+            usage={"input_tokens": 10},
+        ),
+    )
     models = iter(("candidate-a", "candidate-b"))
+    usages = iter(({"input_tokens": 2}, {"input_tokens": 3}))
 
     def judge(*_args):
         return JudgeResponse(
-            {"matches_query": NoulAnswer(0.5)}, served_model=next(models)
+            {"matches_query": NoulAnswer(0.5)},
+            served_model=next(models),
+            usage=next(usages),
         )
 
-    code, records, _ = _run(store, judge, "--repeats", "2")
+    code, records, stderr = _run(store, judge, "--repeats", "2")
+    case = records[0]
     assert code == 2
+    assert case["candidate_repeats"] == [
+        {
+            "repeat": 1,
+            "answer": {"type": "noul", "noul": 0.5},
+            "usage": {"input_tokens": 2},
+            "served_model": "candidate-a",
+        },
+        {
+            "repeat": 2,
+            "answer": {"type": "noul", "noul": 0.5},
+            "usage": {"input_tokens": 3},
+            "served_model": "candidate-b",
+        },
+    ]
+    assert case["candidate_usage"] == {"input_tokens": 5}
     assert records[-1]["candidate_model_counts"] == {
         "candidate-a": 1,
         "candidate-b": 1,
     }
+    assert records[-1]["candidate_usage"] == {"input_tokens": 5}
     assert records[-1]["within_tolerance"] is None
-
-
-def test_comparison_helpers_cover_choice_and_score_gate_values() -> None:
-    choice = ChoiceAnswer("yes", {"yes": 0.8, "no": 0.2})
-    score = ScoreAnswer(2, probabilities={"0": 0.1, "2": 0.9})
-    assert choice.choice == "yes"
-    assert score.score == 2
+    assert stderr.strip() == (
+        "jm calibrate: calibration decision is indeterminate\n"
+        f"# jm calibrate {date.today().isoformat()}: "
+        "preset=jgrep preset_version=1 cases=1 repeats=2 "
+        "baseline=baseline candidate=mixed "
+        "baseline_models=baseline:1 "
+        "candidate_models=candidate-a:1,candidate-b:1 "
+        "tol_threshold_margin=0.0500 tol_max_choice_flips=0 "
+        "tol_max_probability_delta=0.0500 tol_max_score_delta=0.5000 "
+        "tol_max_noul_delta=0.0500 tol_max_threshold_crossings=0 "
+        "choice_flips=0 max_probability_delta_observed=0.0000 "
+        "max_score_delta_observed=0.0000 max_noul_delta_observed=0.0000 "
+        "threshold_crossings=0 stable_drift=0 boundary_noise=0 "
+        "within_tolerance=none"
+    )

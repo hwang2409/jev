@@ -9,6 +9,7 @@ import pytest
 
 from jm.answers import ErrorResponse, JudgeResponse, NoulAnswer, ScoreAnswer
 from jm.cache import (
+    CACHE_SCHEMA,
     CacheStore,
     build_cache_preimage,
     cache_key,
@@ -49,8 +50,9 @@ def _preimage() -> dict[str, object]:
 
 def test_cache_key_has_the_exact_canonical_preimage() -> None:
     preimage = _preimage()
+    assert preimage["cache_schema"] == CACHE_SCHEMA
     expected = (
-        b'{"cache_schema":"jm-answer/v1","chunking":{"by":"para",'
+        b'{"cache_schema":"jm-answer/v2","chunking":{"by":"para",'
         b'"context_paragraphs":0,"limits":{"context_field_bytes":4096,'
         b'"focus_bytes":16384,"state_bytes":32768},"max_chunks":512},'
         b'"model":"typesafe-ai/jev",'
@@ -82,7 +84,7 @@ def test_cache_key_ignores_object_insertion_order() -> None:
 def test_each_key_input_perturbation_changes_the_digest() -> None:
     baseline = _preimage()
     paths = [
-        ("cache_schema", "jm-answer/v2"),
+        ("cache_schema", "jm-answer/v1"),
         ("model", "jev-2.0.0"),
         ("preset", "jfilter"),
         ("preset_version", "2"),
@@ -183,6 +185,8 @@ def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
         }
     )
     entry = store.publish(_preimage(), response)
+    assert entry.cache_key == cache_key(_preimage())
+    assert store.get(cache_key(_preimage()), QUESTIONS) is not None
 
     path = store.path_for(entry.cache_key)
     assert (
