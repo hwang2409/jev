@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 from ...core.abort import AbortSignal
 from ...core.safety import (
     BrowserRiskEvidence,
+    SafetyOutcome,
     browser_action_requires_safety,
 )
 from ...protocol.types import StructuredToolResult
@@ -602,12 +603,33 @@ async def _check_browser_safety(
             execution_context.lifecycle_sink,
             skip_approval=True,
             safety_outcome=outcome,
+            approval_label=_browser_approval_label(registry, evidence, outcome),
         )
         if gate_result is None:
             return None
         return _browser_error(gate_result.content, "safety_denied")
     message = safety_tier.teaching_error(outcome)
     return _browser_error(message, "safety_denied")
+
+
+def _browser_approval_label(
+    registry: ToolRegistry,
+    evidence: BrowserRiskEvidence,
+    outcome: SafetyOutcome,
+) -> str:
+    safety_tier = registry.safety_tier
+    if safety_tier is None:
+        return "browser action requires approval"
+    details = [
+        f"action={evidence.action}",
+        f"target_text={evidence.text or 'unknown'}",
+    ]
+    if evidence.target_url is not None:
+        details.append(f"destination={evidence.target_url}")
+    if evidence.form_action_origin is not None:
+        details.append(f"form_action={evidence.form_action_origin}")
+    details.append(f"risk_reason={outcome.reason or 'safety_threshold_not_met'}")
+    return f"{safety_tier.approval_label(outcome)}; " + ", ".join(details)
 
 
 def _browser_goal(

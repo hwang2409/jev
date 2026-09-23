@@ -581,6 +581,7 @@ class ApprovalGate:
         persist_request: bool = True,
         safety_cwd: str | None = None,
         safety_outcome: SafetyOutcome | None = None,
+        approval_label: str | None = None,
     ) -> tuple[ToolResult | None, AbortSignal]:
         execution_signal = signal
         force_ask = False
@@ -600,7 +601,9 @@ class ApprovalGate:
                 ), execution_signal
             force_ask = safety_outcome.decision == "ask"
             if force_ask:
-                safety_label = self.safety_tier.approval_label(safety_outcome)
+                safety_label = approval_label or self.safety_tier.approval_label(
+                    safety_outcome
+                )
         safety_applies = (
             self.safety_tier is not None
             and self.policy is not None

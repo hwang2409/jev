@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-from zeta.core.safety import SafetyOutcome, SafetyTier
+from zeta.core.safety import BrowserRiskEvidence, SafetyOutcome, SafetyTier
 from zeta.core.store import ConversationStore
 from zeta.protocol.types import ToolCall
 from zeta.providers import jev
@@ -308,6 +308,7 @@ async def test_browser_ask_uses_durable_approval_gate(
         "main",
         False,
         True,
+        target_url="https://payments.example/checkout",
     )
     adapter = FakeBrowserAdapter([_element_observation(submit)])
     store = ConversationStore(tmp_path / "sessions", cwd=tmp_path)
@@ -355,6 +356,15 @@ async def test_browser_ask_uses_durable_approval_gate(
     else:
         pytest.fail("browser approval request was not persisted")
 
+    request = next(
+        request for request in policy.pending_requests() if request.request_id == call.id
+    )
+    assert request.label is not None
+    assert "action=submit" in request.label
+    assert "target_text=Pay now" in request.label
+    assert "destination=https://payments.example/checkout" in request.label
+    assert "risk_reason=score_exceeds" in request.label
+
     assert policy.resolve(call.id, decision) is True
     result = await task
 
@@ -364,26 +374,42 @@ async def test_browser_ask_uses_durable_approval_gate(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("tool_name", "element", "reason"),
+    ("tool_name", "element", "expected_evidence", "reason"),
     [
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Delete record", "Delete record", None, "main", False, True),
+            ElementRef(1, "e1", "button", "click", "Delete record", "", None, "main", False, True),
+            BrowserRiskEvidence(
+                "click", "button", "Delete record", "https://example.test", None,
+                None, False, False, False, False,
+            ),
             "destructive_action",
         ),
         (
-            "browser_submit",
-            ElementRef(1, "e1", "button", "submit", "Pay now", "Pay now", None, "main", False, True),
+            "browser_click",
+            ElementRef(1, "e1", "button", "click", "Pay now", "", None, "main", False, True),
+            BrowserRiskEvidence(
+                "click", "button", "Pay now", "https://example.test", None,
+                None, True, False, False, False,
+            ),
             "payment_or_financial_commitment",
         ),
         (
-            "browser_submit",
-            ElementRef(1, "e1", "button", "submit", "Delete record", "Delete record", None, "main", False, True),
+            "browser_click",
+            ElementRef(1, "e1", "button", "click", "Update profile", "", None, "main", False, True, durable_state_change=True),
+            BrowserRiskEvidence(
+                "click", "button", "Update profile", "https://example.test", None,
+                None, False, False, False, True,
+            ),
             "durable_state_change",
         ),
         (
             "browser_click",
-            ElementRef(1, "e1", "button", "click", "Sign in", "Sign in", None, "main", False, True),
+            ElementRef(1, "e1", "button", "click", "Sign in", "", None, "main", False, True),
+            BrowserRiskEvidence(
+                "click", "button", "Sign in", "https://example.test", None,
+                None, False, True, False, False,
+            ),
             "authentication_or_permission_change",
         ),
         (
@@ -394,14 +420,42 @@ async def test_browser_ask_uses_durable_approval_gate(
                 "link",
                 "click",
                 "Download report",
-                "Download report",
+                "",
                 None,
                 "main",
                 False,
                 True,
                 download=True,
             ),
+            BrowserRiskEvidence(
+                "click", "link", "Download report", "https://example.test", None,
+                None, False, False, True, False,
+            ),
             "download",
+        ),
+        (
+            "browser_click",
+            ElementRef(
+                1, "e1", "link", "click", "Read article", "", None, "main", False, True,
+                target_url="https://other.test/article",
+            ),
+            BrowserRiskEvidence(
+                "click", "link", "Read article", "https://example.test",
+                "https://other.test/article", None, False, False, False, False,
+            ),
+            "external_origin",
+        ),
+        (
+            "browser_click",
+            ElementRef(
+                1, "e1", "button", "click", "Continue", "", None, "main", False, True,
+                form_action_origin="https://other.test/submit",
+            ),
+            BrowserRiskEvidence(
+                "click", "button", "Continue", "https://example.test", None,
+                "https://other.test/submit", False, False, False, False,
+            ),
+            "external_form_action_origin",
         ),
         (
             "browser_click",
@@ -411,12 +465,16 @@ async def test_browser_ask_uses_durable_approval_gate(
                 "button",
                 "click",
                 "Unknown target",
-                "Unknown target",
+                "",
                 None,
                 "main",
                 False,
                 True,
                 target_url="not a url",
+            ),
+            BrowserRiskEvidence(
+                "click", "button", "Unknown target", "https://example.test",
+                "not a url", None, False, False, False, False,
             ),
             "unclassifiable_target_url",
         ),
@@ -427,6 +485,7 @@ async def test_risky_routes_fail_closed_through_real_handlers(
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     element: ElementRef,
+    expected_evidence: BrowserRiskEvidence,
     reason: str,
 ) -> None:
     adapter = FakeBrowserAdapter([_element_observation(element)])
@@ -440,7 +499,8 @@ async def test_risky_routes_fail_closed_through_real_handlers(
     async def page_gate(**_kwargs: object) -> PageStateDecision:
         return PageStateDecision(True, None, None)
 
-    async def deny(_evidence: object) -> SafetyOutcome:
+    async def deny(evidence: BrowserRiskEvidence) -> SafetyOutcome:
+        assert evidence == expected_evidence
         return SafetyOutcome("deny", "layer0", reason=reason)
 
     monkeypatch.setattr(jev, "choose_browser_element", choose)
