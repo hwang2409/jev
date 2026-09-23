@@ -34,6 +34,17 @@ from ..core.approval import (
 from ..core.approval import canceled_result as _canceled_result
 from ..core.safety import SafetyTier
 from ..core.store import ConversationStore
+from ..protocol.types import (
+    StructuredContentValue,
+    StructuredToolResult,
+    ToolCall,
+    ToolContentBlock,
+    ToolResult,
+    ToolSchema,
+    ToolTextBlock,
+    flatten_tool_content,
+    validate_tool_content_block,
+)
 from ..runtime.execution import (
     ToolExecutionContext,
     ToolHandler,
@@ -51,17 +62,6 @@ from ..runtime.execution import (
     run_handler_with_abort,
 )
 from ..skills import SkillCatalog
-from ..protocol.types import (
-    StructuredContentValue,
-    StructuredToolResult,
-    ToolCall,
-    ToolContentBlock,
-    ToolResult,
-    ToolSchema,
-    ToolTextBlock,
-    flatten_tool_content,
-    validate_tool_content_block,
-)
 from ._shared.process import BackgroundTaskRegistry
 from ._shared.sandbox import SandboxPolicy
 
@@ -236,6 +236,21 @@ _ERROR_HINTS: dict[str, str] = {
     "canceled": "the tool call was canceled; retry only if still useful",
     "sandbox_violation": "retarget to a path inside the session cwd",
     "invalid_result": "the tool handler returned a malformed result",
+    "stale_snapshot": "call browser_state and retry with the current snapshot",
+    "element_unavailable": "call browser_state and choose an attached element",
+    "navigation_race": "call browser_state before retrying the browser action",
+    "browser_timeout": "retry with the bounded browser operation",
+    "browser_start_failed": "the browser session could not start; retry later",
+    "jev_routing_error": "call browser_state and provide a more specific action",
+    "page_load_failed": "call browser_state after the page finishes loading",
+    "goal_element_absent": "call browser_state and choose an available goal element",
+    "action_not_next_step": "call browser_state and provide the next concrete action",
+    "dead_end": "stop this browser path and choose a different approach",
+    "different_approach": "call browser_state and choose a different approach",
+    "action_outcome_unknown": "call browser_state before taking another action",
+    "provider_error": "call browser_state and retry with a concrete action",
+    "safety_denied": "the browser action was denied by the safety policy",
+    "extraction_truncated": "reduce the extraction scope or increase its bounded limit",
     "error": "",
 }
 _ERROR_KINDS: frozenset[str] = frozenset(_ERROR_HINTS)
@@ -484,6 +499,9 @@ class ToolRegistry:
             session_store.bash_cwd if session_store is not None else str(self.cwd)
         )
         self._tools: dict[str, ToolDefinition] = {}
+        self._browser_session: Any | None = None
+        self.browser_catalog: Any | None = None
+        self.browser_adapter_factory: Callable[[], Any] | None = None
         self.skill_catalog = skill_catalog
         if agent_catalog is None:
             from ..skills.agent_catalog import discover_packaged_agents
@@ -518,6 +536,12 @@ class ToolRegistry:
         """Return the current tool names without copying definitions."""
 
         return frozenset(self._tools)
+
+    @property
+    def browser_session(self) -> Any | None:
+        """Return the lazy browser session owned by this registry."""
+
+        return self._browser_session
 
     def register(
         self,
@@ -608,6 +632,8 @@ class ToolRegistry:
             for name, definition in self._tools.items()
             if name not in exclude_names
         }
+        clone._browser_session = None
+        clone.browser_catalog = None
         clone._session_store = store
         clone._todo_store = self._todo_store or store
         clone.background_tasks = BackgroundTaskRegistry(
@@ -637,6 +663,8 @@ class ToolRegistry:
     def start_batch(self) -> None:
         """Rotate the active signal before a new tool batch."""
         self.abort_signal = self._abort_registry.new_generation()
+        if self._browser_session is not None:
+            self._browser_session.reset_turn_state()
 
     def bind_approval_store(self, store: ConversationStore) -> None:
         if self.approval_policy is not None:
@@ -662,9 +690,19 @@ class ToolRegistry:
         return self._todo_store
 
     async def close(self) -> None:
-        """Stop session-owned background processes."""
+        """Stop session-owned browser and background processes."""
 
-        await self.background_tasks.close()
+        background_error: BaseException | None = None
+        try:
+            await self.background_tasks.close()
+        except BaseException as exc:  # noqa: BLE001 - close must continue cleanup
+            background_error = exc
+        browser_session = self._browser_session
+        self._browser_session = None
+        if browser_session is not None:
+            await browser_session.close()
+        if background_error is not None:
+            raise background_error
 
     def set_pre_execute_hook(self, hook: ToolHook | None) -> None:
         self.pre_execute_hook = hook

@@ -1459,7 +1459,7 @@ class AgentLoop:
                 await asyncio.gather(self._mcp_mount_task, return_exceptions=True)
         finally:
             try:
-                await self.tool_registry.background_tasks.close()
+                await self.tool_registry.close()
             finally:
                 if self.agent_depth == 0:
                     self._background_owner.store_leases.close()
