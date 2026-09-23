@@ -1,54 +1,16 @@
 from __future__ import annotations
 
-
 import json
-
-
 from itertools import pairwise
-
-
 from pathlib import Path
-
 
 import pytest
 
-
 import zeta.runtime.loop as loop_module
-
-
-import zeta.tools.memory as memory_tools
-
-
 import zeta.tools.route as route_module
-
-
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-
-
 from zeta.core.fake import FakeBackend, ScriptedTurn
-
-
 from zeta.core.store import ConversationStore
-
-
-from zeta.runtime.loop import AgentLoop
-
-
-from zeta.providers.anthropic_payload import build_messages_payload
-
-
-from zeta.providers.codex_payload import build_responses_payload
-
-
-from zeta.providers.jev import AutoRouteResult, MemoryRelevanceResult
-
-
-from zeta.skills import SkillCatalog
-
-
-from zeta.tools.registry import ToolRegistry
-
-
 from zeta.protocol.types import (
     Message,
     MessageRole,
@@ -57,6 +19,14 @@ from zeta.protocol.types import (
     ToolResult,
     ToolUseContent,
 )
+from zeta.providers.anthropic_payload import build_messages_payload
+from zeta.providers.codex_payload import build_responses_payload
+from zeta.providers.jev import AutoRouteResult
+from zeta.runtime.loop import AgentLoop
+from zeta.skills import SkillCatalog
+from zeta.tools.browser import register as register_browser
+from zeta.tools.browser.catalog import BrowserCatalog, CatalogEntry
+from zeta.tools.registry import ToolRegistry
 
 
 async def collect(events):
@@ -135,6 +105,145 @@ def build_loop(
         router_style="auto",
         skill_catalog=SkillCatalog.empty(),
     )
+
+
+def browser_catalog(element_id: str, snapshot_id: int = 1) -> BrowserCatalog:
+    return BrowserCatalog(
+        snapshot_id=snapshot_id,
+        generation=snapshot_id,
+        url="https://example.test/",
+        title="Example",
+        summary="",
+        entries=(
+            CatalogEntry(
+                element_id,
+                "button",
+                "Continue",
+                "click",
+                "Continue",
+                None,
+                "main",
+                False,
+                True,
+            ),
+        ),
+        invalidated_element_ids=frozenset(),
+    )
+
+
+def build_browser_loop(
+    tmp_path: Path,
+    *,
+    router_style: str = "tool",
+    router_mode: bool = True,
+) -> AgentLoop:
+    store = ConversationStore(tmp_path)
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    route_module.register(registry)
+    register_browser(registry)
+    return AgentLoop(
+        FakeBackend([]),
+        store,
+        registry=registry,
+        approval_policy=ApprovalPolicy(
+            store=store, default=ApprovalDecision.ALLOW
+        ),
+        router_mode=router_mode,
+        router_style=router_style,
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+
+def test_browser_schemas_stay_static_when_catalog_changes(tmp_path: Path) -> None:
+    loop = build_browser_loop(tmp_path, router_mode=False)
+    first = loop._active_tool_schemas()
+    loop.set_browser_catalog(browser_catalog("e1"))
+    second = loop._active_tool_schemas()
+    loop.set_browser_catalog(browser_catalog("e2", snapshot_id=2))
+    third = loop._active_tool_schemas()
+
+    assert first == second == third
+    assert {schema["name"] for schema in first} == {
+        "browser_navigate",
+        "browser_state",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_extract",
+        "browser_submit",
+    }
+    assert loop._browser_catalog_state()["entries"][0]["element_id"] == "e2"
+
+
+def test_browser_tools_join_router_catalog_without_page_elements(tmp_path: Path) -> None:
+    loop = build_browser_loop(tmp_path, router_style="auto")
+    loop.set_browser_catalog(browser_catalog("e1"))
+
+    catalogs = [loop._auto_catalog(), route_module._catalog(loop.tool_registry)]
+
+    expected_names = {
+        "browser_navigate",
+        "browser_state",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_extract",
+        "browser_submit",
+    }
+    for catalog in catalogs:
+        assert {name for name in catalog if name.startswith("browser_")} == expected_names
+        assert all("e1" not in str(criteria) for criteria in catalog.values())
+
+
+@pytest.mark.asyncio
+async def test_browser_element_is_rejected_during_router_fail_open(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = build_browser_loop(tmp_path)
+    loop.set_browser_catalog(browser_catalog("current"))
+    route_call = ToolCall(
+        "route-1",
+        "route",
+        {"step": "continue in the browser"},
+    )
+    browser_call = ToolCall(
+        "browser-click-1",
+        "browser_click",
+        {
+            "snapshot_id": 1,
+            "element_id": "stale",
+            "role": "button",
+            "affordance": "click",
+        },
+    )
+    loop.backend = FakeBackend(
+        [
+            ScriptedTurn(tool_calls=[route_call]),
+            ScriptedTurn(tool_calls=[browser_call]),
+            ScriptedTurn(content=[TextContent("done")]),
+        ]
+    )
+
+    async def fail_route(*_args: object) -> object:
+        raise RuntimeError("router unavailable")
+
+    monkeypatch.setattr(route_module, "route_step", fail_route)
+
+    await collect(loop.run_turn("continue"))
+
+    result = next(
+        message.tool_result
+        for message in loop.store.messages()
+        if message.tool_result is not None
+        and message.tool_result.tool_call_id == browser_call.id
+    )
+    assert result is not None
+    assert result.structured_content["error_kind"] == "unrouted_element"
+    assert result.is_error is True
 
 
 def memory_config(tmp_path: Path, corpus: Path) -> Path:

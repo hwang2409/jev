@@ -11,11 +11,11 @@ import shlex
 import warnings
 from collections import deque
 from collections.abc import AsyncIterator, Callable, Coroutine, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import TYPE_CHECKING, Any, TypeVar
 
 import httpx
 
@@ -101,6 +101,9 @@ from ..tools.registry import (
 from ..tools.route import ROUTE_TOPK_CONFIDENCE, build_catalog
 from .tool_setup import select_tool_registry
 
+if TYPE_CHECKING:
+    from ..tools.browser.catalog import BrowserCatalog
+
 TaskResult = TypeVar("TaskResult")
 MAX_ERROR_MESSAGE = 400
 NEEDS_TOOL_GATE = 0.35
@@ -112,6 +115,15 @@ MEMORY_INJECTION_TOP_K = 2
 MEMORY_INJECTION_EXCERPT_CHARS = 600
 MEMORY_INJECTION_TOTAL_CHARS = 1500
 _logger = logging.getLogger(__name__)
+_BROWSER_ELEMENT_TOOLS = frozenset(
+    {
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_submit",
+        "browser_extract",
+    }
+)
 
 
 class MemoryInjectionSkipReason(StrEnum):
@@ -324,6 +336,9 @@ class AgentLoop:
         self._provided_tool_schemas = tool_schemas is not None
         self.tool_registry.bind_session_store(store)
         self.tool_registry.set_router_tools_sink(self._record_routed_tools)
+        self.tool_registry.set_router_browser_catalog_sink(
+            self.set_browser_catalog
+        )
         self.tool_registry.set_router_recent_steps(self._router_recent_steps)
         self.tool_registry.set_memory_store_sink(self._record_memory_store)
         self.agent_catalog = self.tool_registry.agent_catalog
@@ -446,6 +461,66 @@ class AgentLoop:
         self._routed_tools = list(dict.fromkeys(tools))
         self._router_fail_open = False
 
+    def set_browser_catalog(self, catalog: BrowserCatalog | None) -> None:
+        """Keep the current page catalog in the loop's router context."""
+
+        self.tool_registry.browser_catalog = catalog
+        self.tool_registry.router_browser_catalog = catalog
+
+    def browser_catalog(self) -> BrowserCatalog | None:
+        return self.tool_registry.router_browser_catalog
+
+    def _browser_catalog_state(self) -> dict[str, object]:
+        catalog = self.browser_catalog()
+        if catalog is None:
+            return {"snapshot_id": None, "entries": []}
+        return {
+            "snapshot_id": catalog.snapshot_id,
+            "generation": catalog.generation,
+            "entries": [asdict(entry) for entry in catalog.entries],
+        }
+
+    def _browser_element_rejection(self, tool_call: ToolCall) -> ToolResult | None:
+        if not self.router_mode or tool_call.name not in _BROWSER_ELEMENT_TOOLS:
+            return None
+        element_id = tool_call.arguments.get("element_id")
+        if tool_call.name == "browser_extract" and element_id is None:
+            return None
+        snapshot_id = tool_call.arguments.get("snapshot_id")
+        catalog = self.browser_catalog()
+        entry = None
+        if (
+            catalog is not None
+            and type(snapshot_id) is int
+            and isinstance(element_id, str)
+            and snapshot_id == catalog.snapshot_id
+        ):
+            entry = next(
+                (
+                    candidate
+                    for candidate in catalog.entries
+                    if candidate.element_id == element_id
+                ),
+                None,
+            )
+        if entry is not None:
+            role = tool_call.arguments.get("role")
+            affordance = tool_call.arguments.get("affordance")
+            if (
+                role is None
+                or affordance is None
+                or (role == entry.role and affordance == entry.affordance)
+            ):
+                return None
+        self.unrouted_attempts += 1
+        result = ToolResult(
+            tool_call.id,
+            "browser element is not in the current catalog",
+            is_error=True,
+            structured_content={"error_kind": "unrouted_element"},
+        )
+        return self.tool_registry.govern_tool_result(tool_call, result)
+
     def _router_start_batch(self, calls: Sequence[ToolCall]) -> None:
         if not self.router_mode:
             return
@@ -504,6 +579,9 @@ class AgentLoop:
         return tool_name in allowed
 
     def _router_rejection(self, tool_call: ToolCall) -> ToolResult | None:
+        browser_rejection = self._browser_element_rejection(tool_call)
+        if browser_rejection is not None:
+            return browser_rejection
         if self.router_mode and self.router_style == "auto" and tool_call.name == "invoke":
             result = ToolResult(
                 tool_call.id,

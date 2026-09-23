@@ -547,12 +547,12 @@ def register(registry: ToolRegistry) -> None:
             limits=SnapshotLimits(),
             navigation_timeout_ms=BROWSER_NAVIGATION_TIMEOUT_MS,
             action_timeout_ms=BROWSER_ACTION_TIMEOUT_MS,
-            catalog_sink=lambda catalog: setattr(target, "browser_catalog", catalog),
+            catalog_sink=target.set_browser_catalog,
         )
 
     registry._browser_session_factory = session_factory
     registry._browser_session = session_factory(registry)
-    registry.browser_catalog = None
+    registry.set_browser_catalog(None)
     registry.register_session_tool(
         "browser_navigate",
         _browser_navigate,
