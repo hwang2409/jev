@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Self
-
 import pytest
 
 from zeta.providers import jev
@@ -179,46 +177,20 @@ def test_action_failure_or_uncertainty_requests_a_fresh_state(
 async def test_real_provider_errors_follow_the_failed_gate(
     monkeypatch: pytest.MonkeyPatch, gate: str, error_kind: str
 ) -> None:
-    class Response:
-        status_code = 500 if error_kind == "api_error" else 200
-        text = "backend error"
-
-        def json(self) -> dict[str, object]:
-            if error_kind == "malformed":
-                answers = {
-                    name: {"noul": 0.9}
-                    for name in (
-                        "page_loaded_and_stable",
-                        "goal_element_present",
-                        "action_is_the_next_step",
-                        "action_succeeded",
-                        "dead_end",
-                        "needs_different_approach",
-                    )
-                    if name != gate
-                }
-                if gate == "action_succeeded":
-                    answers[gate] = {"noul": "not-a-number"}
-                return {"answers": answers}
-            return {}
-
     class Client:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        async def evaluate_async(
+            self, _state: dict[str, object], _questions: dict[str, object]
+        ) -> jev.JevResponse:
+            if error_kind == "timeout":
+                raise jev.JevError("timed out")
+            if error_kind == "malformed":
+                raise jev.JevError("malformed answer")
+            raise jev.JevError("backend error", http_status=500)
 
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
+        async def aclose(self) -> None:
             return None
 
-        async def post(self, _url: str, **_kwargs: object) -> Response:
-            if error_kind == "timeout":
-                raise jev.httpx.ReadTimeout("timed out")
-            return Response()
-
-    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
+    monkeypatch.setattr(jev, "JevClient", Client)
 
     expected = {
         "page_loaded_and_stable": PageStateDecision(
@@ -256,40 +228,16 @@ async def test_real_provider_errors_follow_the_failed_gate(
 async def test_malformed_non_active_gate_uses_active_gate_for_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Response:
-        status_code = 200
-        text = "backend error"
-
-        def json(self) -> dict[str, object]:
-            answers = {
-                name: {"noul": 0.9}
-                for name in (
-                    "page_loaded_and_stable",
-                    "goal_element_present",
-                    "action_is_the_next_step",
-                    "action_succeeded",
-                    "dead_end",
-                    "needs_different_approach",
-                )
-            }
-            answers["goal_element_present"] = {"noul": "not-a-number"}
-            return {"answers": answers}
-
     class Client:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
+        async def evaluate_async(
+            self, _state: dict[str, object], _questions: dict[str, object]
+        ) -> jev.JevResponse:
+            raise jev.JevError("malformed answer")
 
-        async def __aenter__(self) -> Self:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
+        async def aclose(self) -> None:
             return None
 
-        async def post(self, _url: str, **_kwargs: object) -> Response:
-            return Response()
-
-    monkeypatch.setattr(jev.httpx, "AsyncClient", Client)
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
+    monkeypatch.setattr(jev, "JevClient", Client)
 
     assert await evaluate_page_state_with_provider(
         goal="continue",

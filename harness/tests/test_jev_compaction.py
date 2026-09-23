@@ -889,12 +889,12 @@ async def test_triage_http_uses_route_auth_and_response_shape(
 
         async def evaluate_async(
             self, state: dict[str, Any], questions: dict[str, Any]
-        ) -> dict[str, Any]:
+        ) -> jev.JevResponse:
             self.requests.append({"state": state, "questions": questions})
-            return {
-                "answers": {"entry-1": {"noul": 0.1}},
-                "usage": {"input_tokens": 3},
-            }
+            return jev.JevResponse(
+                answers={"entry-1": {"type": "noul", "noul": 0.1}},
+                usage={"input_tokens": 3},
+            )
 
     monkeypatch.setattr(jev, "JevClient", Client)
     result = await jev.triage("task", [{"id": "entry-1"}])

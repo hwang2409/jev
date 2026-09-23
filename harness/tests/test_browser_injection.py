@@ -49,7 +49,7 @@ class _Transport:
 
     async def evaluate_async(
         self, state: dict[str, Any], questions: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> jev.JevResponse:
         request = {"state": state, "questions": questions}
         self.requests.append(request)
         response = self.responder(request)
@@ -57,6 +57,7 @@ class _Transport:
             if isinstance(response, jev.JevError):
                 raise response
             raise jev.JevError(str(response)) from response
+        assert isinstance(response, jev.JevResponse)
         return response
 
 
@@ -64,56 +65,55 @@ def _provider_response(
     request: dict[str, Any],
     *,
     choice_confidence: float = 0.95,
-) -> dict[str, Any]:
+) -> jev.JevResponse:
     questions = request["questions"]
-    if "element_id" in questions:
-        candidate = request["state"]["candidates"][0]
-        element_id = candidate["element_id"]
-        choice = element_id if choice_confidence >= 0.8 else None
-        return {
-            "answers": {
-                "element_id": {
-                    "choice": choice,
-                    "probabilities": {element_id: 1.0},
-                    "confidence": choice_confidence,
+    answers: dict[str, dict[str, Any]] = {}
+    for question_id, question in questions.items():
+        question_type = question["type"]
+        if question_type == "choice":
+            criteria = question["criteria"]
+            choices = list(criteria)
+            choice = choices[0]
+            confidence = (
+                choice_confidence if question_id == "element_id" else 0.95
+            )
+            answers[question_id] = {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": {
+                    candidate_id: 1.0 if candidate_id == choice else 0.0
+                    for candidate_id in choices
                 },
-                "goal_element_present": {"noul": 0.95},
-                "page_loaded_and_stable": {"noul": 0.95},
-                "action_is_the_next_step": {"noul": 0.95},
-            },
-            "usage": {},
-        }
-    if questions and all(item["type"] == "score" for item in questions.values()):
-        return {
-            "answers": {
-                result_id: {"score": 0.95, "confidence": 0.95}
-                for result_id in questions
-            },
-            "usage": {},
-        }
-    if "score" in questions:
-        return {
-            "answers": {
-                "score": {
-                    "choice": "0",
-                    "probabilities": {"0": 1.0},
-                    "confidence": 0.95,
+                "confidence": confidence,
+            }
+        elif question_type == "score":
+            criteria = question["criteria"]
+            answers[question_id] = {
+                "type": "score",
+                "score": 0.95,
+                "legend": {str(index): value for index, value in enumerate(criteria)},
+                "probabilities": {
+                    str(index): 0.95 if index == 1 else 0.05
+                    for index in range(len(criteria))
                 },
-                "touches_outside_cwd": {"noul": 0.05},
-                "plausibly_irreversible": {"noul": 0.05},
-            },
-            "usage": {},
-        }
-    answers = {
-        "page_loaded_and_stable": {"noul": 0.95},
-        "goal_element_present": {"noul": 0.95},
-        "action_is_the_next_step": {"noul": 0.95},
-        "dead_end": {"noul": 0.05},
-        "needs_different_approach": {"noul": 0.05},
-    }
-    if request["state"].get("action_result"):
-        answers["action_succeeded"] = {"noul": 0.95}
-    return {"answers": answers, "usage": {}}
+                "confidence": 0.95,
+            }
+        else:
+            answers[question_id] = {
+                "type": "noul",
+                "noul": (
+                    0.05
+                    if question_id
+                    in {
+                        "dead_end",
+                        "needs_different_approach",
+                        "touches_outside_cwd",
+                        "plausibly_irreversible",
+                    }
+                    else 0.95
+                ),
+            }
+    return jev.JevResponse(answers=answers, usage={})
 
 
 def _install_transport(

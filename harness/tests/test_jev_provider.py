@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 from typing import Any, ClassVar
@@ -11,36 +12,85 @@ from zeta.providers import jev
 
 def test_harness_callers_have_no_duplicate_gateway_transport() -> None:
     root = Path(__file__).parents[1]
-    provider = (root / "src/zeta/providers/jev.py").read_text(encoding="utf-8")
-    callers = "\n".join(
-        (root / path).read_text(encoding="utf-8")
-        for path in (
-            "evals/run_evals.py",
-            "evals/run_safety_eval.py",
-            "tools/browser_live_smoke.py",
-        )
+    provider_paths = (
+        root / "src/zeta/providers/jev.py",
+        root / "src/zeta/providers/jev_browser.py",
+    )
+    caller_paths = (
+        root / "src/zeta/core/context.py",
+        root / "src/zeta/core/safety.py",
+        root / "src/zeta/runtime/loop.py",
+        root / "src/zeta/tools/browser/__init__.py",
+        root / "src/zeta/tools/browser/catalog.py",
+        root / "src/zeta/tools/browser/gates.py",
+        root / "src/zeta/tools/route/__init__.py",
+        root / "evals/run_evals.py",
+        root / "evals/run_safety_eval.py",
+        root / "tools/browser_live_smoke.py",
+    )
+    paths = (*provider_paths, *caller_paths)
+    sources = {
+        path: path.read_text(encoding="utf-8") for path in paths
+    }
+
+    provider_tree = ast.parse(sources[provider_paths[0]])
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == "jm.client"
+        and any(alias.name == "JevClient" for alias in node.names)
+        for node in ast.walk(provider_tree)
     )
 
-    assert "from jm.client import JevClient" in provider
-    for source in (provider, callers):
-        for forbidden in (
-            "import httpx",
-            "from httpx",
-            "import requests",
-            "from requests",
-            "https://ai-gateway.vercel.sh",
-            "VERCEL_AI_GATEWAY",
-            "AI_GATEWAY_API_KEY",
-            "VERCEL_JEV_KEY",
-            "JEV_API_KEY",
-            "_resolve_gateway_key",
-            "_normalize_gateway_response",
-            "_gateway_questions",
-            "_retry_after",
-            "_post_json",
-            "_MAX_ATTEMPTS",
-        ):
-            assert forbidden not in source
+    forbidden_provider_imports = {
+        "httpx",
+        "requests",
+        "aiohttp",
+        "urllib",
+        "urllib.parse",
+    }
+    forbidden_text = (
+        "https://ai-gateway.vercel.sh",
+        "VERCEL_AI_GATEWAY",
+        "AI_GATEWAY_API_KEY",
+        "VERCEL_JEV_KEY",
+        "JEV_API_KEY",
+        "_resolve_gateway_key",
+        "_normalize_gateway_response",
+        "_gateway_questions",
+        "_retry_after",
+        "_post_json",
+        "_MAX_ATTEMPTS",
+        "_RETRY_DELAYS",
+    )
+
+    for path, source in sources.items():
+        tree = ast.parse(source)
+        imported_modules = {
+            node.module
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module is not None
+        }
+        imported_modules.update(
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Import)
+            for alias in node.names
+        )
+        if path in provider_paths:
+            assert not imported_modules.intersection(forbidden_provider_imports)
+        assert not any(
+            module == "jm"
+            or module.startswith("jm.") and module != "jm.client"
+            for module in imported_modules
+        )
+        assert not any(
+            isinstance(node, ast.ImportFrom)
+            and node.module == "jm.client"
+            and any(alias.name.startswith("_") for alias in node.names)
+            for node in ast.walk(tree)
+        )
+        for forbidden in forbidden_text:
+            assert forbidden not in source, f"{forbidden} found in {path}"
 
 
 class Response:
@@ -72,7 +122,7 @@ class Client:
 
     async def evaluate_async(
         self, state: dict[str, Any], questions: dict[str, Any]
-    ) -> dict[str, Any]:
+    ) -> jev.JevResponse:
         response = self.responses.pop(0)
         self.requests.append(
             {"json": {"state": state, "questions": questions}}
@@ -82,7 +132,10 @@ class Client:
                 f"request failed with HTTP {response.status_code}",
                 http_status=response.status_code,
             )
-        return response._data
+        return jev.JevResponse(
+            answers=response._data.get("answers", {}),
+            usage=response._data.get("usage", {}),
+        )
 
     async def aclose(self) -> None:
         return None
@@ -94,12 +147,13 @@ def response() -> Response:
         {
             "answers": {
                 "tool": {
+                    "type": "choice",
                     "choice": "read",
                     "probabilities": {"read": 0.9, "bash": 0.1},
                     "confidence": 0.9,
                 },
-                "needs_tool": {"noul": 0.99},
-                "step_clarity": {"noul": 0.8},
+                "needs_tool": {"type": "noul", "noul": 0.99},
+                "step_clarity": {"type": "noul", "noul": 0.8},
             },
             "usage": {"input_tokens": 10, "output_tokens": 4},
         },
@@ -112,11 +166,12 @@ def auto_response() -> Response:
         {
             "answers": {
                 "tool": {
+                    "type": "choice",
                     "choice": "read",
                     "probabilities": {"read": 0.9, "bash": 0.1},
                     "confidence": 0.9,
                 },
-                "needs_tool": {"noul": 0.99},
+                "needs_tool": {"type": "noul", "noul": 0.99},
             },
             "usage": {"input_tokens": 12, "output_tokens": 5},
         },
@@ -125,7 +180,10 @@ def auto_response() -> Response:
 
 def auto_memory_response() -> Response:
     response = auto_response()
-    response._data["answers"]["memory_relevance_0"] = {"noul": 0.75}
+    response._data["answers"]["memory_relevance_0"] = {
+        "type": "noul",
+        "noul": 0.75,
+    }
     return response
 
 
@@ -135,12 +193,13 @@ def safety_response() -> Response:
         {
             "answers": {
                 "score": {
+                    "type": "choice",
                     "choice": "1",
                     "probabilities": {"0": 0.1, "1": 0.8, "2": 0.08, "3": 0.02},
                     "confidence": 0.9,
                 },
-                "touches_outside_cwd": {"noul": 0.1},
-                "plausibly_irreversible": {"noul": 0.2},
+                "touches_outside_cwd": {"type": "noul", "noul": 0.1},
+                "plausibly_irreversible": {"type": "noul", "noul": 0.2},
             },
             "usage": {"input_tokens": 8, "output_tokens": 3},
         },
@@ -153,13 +212,14 @@ def browser_choice_response() -> Response:
         {
             "answers": {
                 "element_id": {
+                    "type": "choice",
                     "choice": "e17",
                     "probabilities": {"e17": 0.9},
                     "confidence": 0.9,
                 },
-                "goal_element_present": {"noul": 0.95},
-                "page_loaded_and_stable": {"noul": 0.8},
-                "action_is_the_next_step": {"noul": 0.9},
+                "goal_element_present": {"type": "noul", "noul": 0.95},
+                "page_loaded_and_stable": {"type": "noul", "noul": 0.8},
+                "action_is_the_next_step": {"type": "noul", "noul": 0.9},
             },
             "usage": {"input_tokens": 12, "output_tokens": 6},
         },
@@ -171,12 +231,12 @@ def browser_page_state_response() -> Response:
         200,
         {
             "answers": {
-                "page_loaded_and_stable": {"noul": 0.9},
-                "goal_element_present": {"noul": 0.8},
-                "action_is_the_next_step": {"noul": 0.7},
-                "action_succeeded": {"noul": 0.6},
-                "dead_end": {"noul": 0.1},
-                "needs_different_approach": {"noul": 0.2},
+                "page_loaded_and_stable": {"type": "noul", "noul": 0.9},
+                "goal_element_present": {"type": "noul", "noul": 0.8},
+                "action_is_the_next_step": {"type": "noul", "noul": 0.7},
+                "action_succeeded": {"type": "noul", "noul": 0.6},
+                "dead_end": {"type": "noul", "noul": 0.1},
+                "needs_different_approach": {"type": "noul", "noul": 0.2},
             },
             "usage": {"input_tokens": 16, "output_tokens": 8},
         },
@@ -194,8 +254,20 @@ def browser_search_score_response() -> Response:
         200,
         {
             "answers": {
-                "result-a": {"score": 0.92, "confidence": 0.9},
-                "result-b": {"score": 0.31, "confidence": 0.8},
+                "result-a": {
+                    "type": "score",
+                    "score": 0.92,
+                    "legend": {"0": "not relevant", "1": "relevant"},
+                    "probabilities": {"0": 0.08, "1": 0.92},
+                    "confidence": 0.9,
+                },
+                "result-b": {
+                    "type": "score",
+                    "score": 0.31,
+                    "legend": {"0": "not relevant", "1": "relevant"},
+                    "probabilities": {"0": 0.69, "1": 0.31},
+                    "confidence": 0.8,
+                },
             },
             "usage": {"input_tokens": 18, "output_tokens": 7},
         },
@@ -450,9 +522,9 @@ def test_browser_choice_confidence_gate_expands_top_three_below_cutoff(
                     },
                     "confidence": confidence,
                 },
-                "goal_element_present": {"noul": 0.95},
-                "page_loaded_and_stable": {"noul": 0.8},
-                "action_is_the_next_step": {"noul": 0.9},
+                "goal_element_present": {"type": "noul", "noul": 0.95},
+                "page_loaded_and_stable": {"type": "noul", "noul": 0.8},
+                "action_is_the_next_step": {"type": "noul", "noul": 0.9},
             }
         },
         candidates,
@@ -479,9 +551,9 @@ def test_browser_choice_confidence_gate_expands_top_three_below_cutoff(
                     "probabilities": {"e17": 1.1},
                     "confidence": 0.9,
                 },
-                "goal_element_present": {"noul": 0.95},
-                "page_loaded_and_stable": {"noul": 0.8},
-                "action_is_the_next_step": {"noul": 0.9},
+                "goal_element_present": {"type": "noul", "noul": 0.95},
+                "page_loaded_and_stable": {"type": "noul", "noul": 0.8},
+                "action_is_the_next_step": {"type": "noul", "noul": 0.9},
             }
         },
     ],
@@ -642,6 +714,29 @@ async def test_browser_page_state_maps_timeout_as_a_provider_error(
 
     with pytest.raises(jev.JevRouterError, match="request timed out"):
         await jev.judge_browser_page_state("continue", "click", {}, [])
+
+
+@pytest.mark.asyncio
+async def test_invalid_client_response_preserves_browser_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class InvalidClient:
+        async def evaluate_async(
+            self, _state: dict[str, object], _questions: dict[str, object]
+        ) -> object:
+            return {"answers": {}}
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(jev, "JevClient", InvalidClient)
+
+    with pytest.raises(jev.JevRouterError) as raised:
+        await jev.judge_browser_page_state(
+            "continue", "click", {}, [], gate="goal_element_present"
+        )
+
+    assert raised.value.gate == "goal_element_present"
 
 
 def test_parse_browser_page_state_response_rejects_missing_or_out_of_range_gate() -> None:
@@ -851,7 +946,7 @@ async def test_triage_hostile_state_keeps_request_and_decision_stable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     triage_body = {
-        "answers": {"item-1": {"noul": 0.2}},
+        "answers": {"item-1": {"type": "noul", "noul": 0.2}},
         "usage": {"input_tokens": 3, "output_tokens": 2},
     }
     Client.responses = [Response(200, triage_body), Response(200, triage_body)]
@@ -967,7 +1062,9 @@ async def test_memory_relevance_uses_quoted_candidate_state(
         Response(
             200,
             {
-                "answers": {"memory_relevance_0": {"noul": 0.8}},
+                "answers": {
+                    "memory_relevance_0": {"type": "noul", "noul": 0.8}
+                },
                 "usage": {"input_tokens": 4, "output_tokens": 2},
             },
         )

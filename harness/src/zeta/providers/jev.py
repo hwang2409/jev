@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -968,8 +967,6 @@ async def _evaluate(
         close = getattr(client, "aclose", None)
         if close is not None:
             await close()
-    if isinstance(response, Mapping):
-        return dict(response)
     if not isinstance(response, JevResponse):
         raise JevRouterError("Jev client returned an invalid response", gate=gate)
     data = asdict(response)
