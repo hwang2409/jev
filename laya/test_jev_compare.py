@@ -1,117 +1,110 @@
-import io
 import json
-from urllib.error import HTTPError
+from dataclasses import dataclass
+from pathlib import Path
+
+from jm.answers import ChoiceAnswer, NoulAnswer, ScoreAnswer
+from jm.client import JevResponse
 
 import jev_compare
-import pytest
 
 
-def test_normalize_gateway_answers_rebuilds_native_fields() -> None:
-    questions = {
-        "kind": {
-            "type": "choice",
-            "criteria": {"yes": "yes", "no": "no", "maybe": "maybe"},
-        },
-        "risk": {
-            "type": "score",
-            "criteria": ["low", "medium", "high"],
-        },
-        "matches": {"type": "noul"},
-    }
-    result = jev_compare._normalize_gateway_answers(
-        {
-            "answers": {
-                "kind": {
-                    "type": "choice",
-                    "choice": "yes",
-                    "probabilities": {"yes": 0.8, "no": 0.2},
-                },
-                "risk": {
-                    "type": "score",
-                    "score": 2,
-                    "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7},
-                },
-                "matches": {"type": "boolean", "probability": 0.75},
-            },
-            "usage": {"inputTokens": 12, "outputTokens": 5},
-        },
-        questions,
-    )
+@dataclass
+class FakeJevClient:
+    response: JevResponse
 
-    assert result["answers"]["kind"]["type"] == "choice"
-    assert result["answers"]["kind"]["choice"] == "yes"
-    assert result["answers"]["kind"]["probabilities"] == {"yes": 0.8, "no": 0.2}
-    assert result["answers"]["kind"]["confidence"] == pytest.approx(0.7)
-    assert result["answers"]["risk"] == {
-        "type": "score",
-        "score": 2,
-        "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7},
-        "confidence": pytest.approx(0.55),
-        "legend": {"0": "low", "1": "medium", "2": "high"},
-    }
-    assert result["answers"]["matches"] == {"type": "noul", "noul": 0.75}
-    assert result["usage"] == {"input_tokens": 12, "output_tokens": 5}
+    def __post_init__(self) -> None:
+        self.calls: list[tuple[dict, dict]] = []
+        self.closed = False
 
-
-def test_gateway_headers_are_literal_and_retry_after_is_honored(monkeypatch) -> None:
-    sleeps: list[float] = []
-    responses = iter(
-        [
-            HTTPError(
-                jev_compare.API,
-                429,
-                "rate limited",
-                {"Retry-After": "59"},
-                io.BytesIO(),
-            ),
-            io.BytesIO(
-                json.dumps(
-                    {
-                        "answers": {},
-                        "usage": {"inputTokens": 1, "outputTokens": 2},
-                    }
-                ).encode()
-            ),
-        ]
-    )
-
-    def urlopen(request, timeout):
-        assert timeout == 60
-        assert dict(request.header_items()) == {
-            "Authorization": "Bearer test-key",
-            "Content-type": "application/json",
-            "Accept-encoding": "identity",
-            "Ai-evaluation-model-specification-version": "4",
-            "Ai-gateway-auth-method": "api-key",
-            "Ai-gateway-protocol-version": "0.0.1",
-            "Ai-model-id": "typesafe-ai/jev",
-        }
-        value = next(responses)
-        if isinstance(value, HTTPError):
-            raise value
-        return _ResponseContext(value)
-
-    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-key")
-    monkeypatch.setattr(jev_compare.urllib.request, "urlopen", urlopen)
-    monkeypatch.setattr(jev_compare.time, "sleep", sleeps.append)
-
-    result = jev_compare._call_case(
-        {
-            "state": {},
-            "questions": {},
-        }
-    )
-
-    assert sleeps == [59.0]
-    assert result["usage"] == {"input_tokens": 1, "output_tokens": 2}
-
-
-class _ResponseContext:
-    def __init__(self, response) -> None:
-        self.response = response
-
-    def __enter__(self):
+    def evaluate(self, state: dict, questions: dict) -> JevResponse:
+        self.calls.append((state, questions))
         return self.response
 
-    def __exit__(self, *_args) -> None:
-        self.response.close()
+    def close(self) -> None:
+        self.closed = True
+
+
+def _response() -> JevResponse:
+    return JevResponse(
+        answers={
+            "department": ChoiceAnswer(
+                "billing", {"billing": 0.8, "support": 0.2}, 0.6
+            ),
+            "is_phishing": NoulAnswer(0.82),
+            "urgency": ScoreAnswer(
+                2.0,
+                {"0": "No response needed", "1": "Today", "2": "Immediately"},
+                {"0": 0.1, "1": 0.2, "2": 0.7},
+                0.55,
+            ),
+        },
+        usage={"input_tokens": 120, "output_tokens": 20},
+    )
+
+
+def test_recorded_case_renders_normalized_answers() -> None:
+    client = FakeJevClient(_response())
+
+    response = jev_compare._call_case(client, jev_compare.CASES["email_triage"])
+
+    assert jev_compare._render_response(response) == {
+        "answers": {
+            "department": {
+                "choice": "billing",
+                "probabilities": {"billing": 0.8, "support": 0.2},
+                "confidence": 0.6,
+                "type": "choice",
+            },
+            "is_phishing": {"noul": 0.82, "type": "noul"},
+            "urgency": {
+                "score": 2.0,
+                "legend": {
+                    "0": "No response needed",
+                    "1": "Today",
+                    "2": "Immediately",
+                },
+                "probabilities": {"0": 0.1, "1": 0.2, "2": 0.7},
+                "confidence": 0.55,
+                "type": "score",
+            },
+        },
+        "usage": {"input_tokens": 120, "output_tokens": 20},
+    }
+    assert client.calls == [
+        (
+            jev_compare.CASES["email_triage"]["state"],
+            jev_compare.CASES["email_triage"]["questions"],
+        )
+    ]
+
+
+def test_comparison_output_reports_normalized_usage(capsys) -> None:
+    client = FakeJevClient(_response())
+
+    jev_compare.main(client)
+
+    output = capsys.readouterr().out
+    assert '"input_tokens": 120' in output
+    assert '"output_tokens": 20' in output
+    assert "inputTokens" not in output
+    assert len(client.calls) == len(jev_compare.CASES)
+    assert not client.closed
+
+
+def test_comparison_caller_has_no_transport_or_normalization_logic() -> None:
+    source = Path(jev_compare.__file__).read_text(encoding="utf-8")
+
+    for forbidden in (
+        "urllib",
+        "GATEWAY_HEADERS",
+        "_resolve_gateway_key",
+        "retry",
+        "normalize",
+    ):
+        assert forbidden not in source
+
+
+def test_rendered_output_is_json() -> None:
+    rendered = jev_compare._render_response(_response())
+
+    assert json.loads(json.dumps(rendered)) == rendered
