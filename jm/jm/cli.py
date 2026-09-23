@@ -26,6 +26,7 @@ from .presets import (
     PresetNotFoundError,
     load_preset,
     resolve_chunker,
+    resolve_prefilter,
     resolve_preset,
     validate_preset,
 )
@@ -131,6 +132,10 @@ def _add_judgment_options(
     )
     parser.add_argument("--format", choices=("jsonl", "pretty"))
     parser.add_argument("--filter", choices=("keep",))
+    parser.add_argument("--prefilter", choices=("bm25",))
+    parser.add_argument("--prefilter-top", type=_positive_int)
+    parser.add_argument("--prefilter-fields")
+    parser.add_argument("--prefilter-query")
     if include_query:
         parser.add_argument("--query")
     if include_predicate:
@@ -280,7 +285,28 @@ def _judgment_command(
         predicate = predicate_option
 
     effective_preset = _with_max_chunks(preset, args.max_chunks)
-    _validate_preset_parameters(effective_preset, query, predicate)
+    prefilter = resolve_prefilter(
+        effective_preset,
+        command=args.command,
+        ranker=args.prefilter,
+        top=args.prefilter_top,
+        fields=args.prefilter_fields,
+        query=args.prefilter_query,
+        invocation_query=query,
+        invocation_predicate=predicate,
+    )
+    prefilter_parameters = set()
+    if prefilter is not None:
+        if prefilter["query_source"] == "context.query":
+            prefilter_parameters.add("query")
+        elif prefilter["query_source"] == "context.predicate":
+            prefilter_parameters.add("predicate")
+    _validate_preset_parameters(
+        effective_preset,
+        query,
+        predicate,
+        allowed_parameters=prefilter_parameters,
+    )
     if judge_fn is None and not resolve_gateway_key():
         raise _OperationalError(
             "Vercel AI Gateway API key is not set; set it before running a "
@@ -318,6 +344,8 @@ def _judgment_command(
             "rejections": rejections,
             "cache_store": cache_store or CacheStore(),
             "concurrency": args.concurrency,
+            "prefilter": prefilter,
+            "prefilter_warning": args.command == "jgrep",
         }
         if args.command == "gate":
             run_kwargs["policy"] = args.policy
@@ -398,8 +426,13 @@ def _read_stdin_bytes(stdin: TextIO) -> str | bytes:
 
 
 def _validate_preset_parameters(
-    preset: Preset, query: str | None, predicate: str | None
+    preset: Preset,
+    query: str | None,
+    predicate: str | None,
+    *,
+    allowed_parameters: set[str] | None = None,
 ) -> None:
+    allowed = allowed_parameters or set()
     required: set[str] = set()
     for question in preset.questions.values():
         for field in question["instructions"]["state_fields"]:
@@ -410,7 +443,11 @@ def _validate_preset_parameters(
 
     values = {"query": query, "predicate": predicate}
     for parameter, value in values.items():
-        if value is not None and parameter not in required:
+        if (
+            value is not None
+            and parameter not in required
+            and parameter not in allowed
+        ):
             raise _UsageError(
                 f"unknown parameter '{parameter}' for preset '{preset.name}'"
             )

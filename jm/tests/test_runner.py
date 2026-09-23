@@ -38,6 +38,8 @@ from jm.runner import (
     StateLimits,
     StateRejection,
     admit_states,
+    bm25_rank,
+    tokenize,
 )
 
 QUESTIONS = {
@@ -73,6 +75,58 @@ def test_fake_judge_is_injected_without_http() -> None:
     runner = Runner(judge_fn=fake, model="typesafe-ai/jev")
     assert runner.judge(state, QUESTIONS) == "answer"
     assert calls == [(state, QUESTIONS, "typesafe-ai/jev")]
+
+
+def test_bm25_tokenization_ranking_and_ties_are_deterministic() -> None:
+    assert tokenize("Äpfel API_2, API_2!") == ("äpfel", "api_2", "api_2")
+    states = (
+        State("b", "other", {"file": "none"}),
+        State("a", "other", {"file": "none"}),
+        State("c", "launch launch", {"file": "decision"}),
+    )
+    ranked = bm25_rank(states, "launch", ("focus", "context.file"))
+    assert [state.state_ref for state in ranked] == ["c", "a", "b"]
+
+
+def test_prefilter_ranks_before_scan_cap_and_assigns_one_skip_reason() -> None:
+    calls: list[str] = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    states = (
+        State("a", "irrelevant"),
+        State("b", "needle"),
+        State("c", "needle"),
+        State("d", "irrelevant"),
+    )
+    result = Runner(judge).run(
+        states,
+        {"matches": {"type": "noul"}},
+        max_chunks=1,
+        prefilter={
+            "ranker": "bm25",
+            "top": 2,
+            "fields": ("focus",),
+            "query": "needle",
+        },
+        stdout=io.StringIO(),
+    )
+    assert calls == ["b"]
+    assert result.stats.discovered == 4
+    assert result.stats.judged == 1
+    assert result.stats.skipped == 3
+    skip_kinds = {
+        record.to_dict()["error"]["kind"]
+        for record in result.records
+        if record.to_dict().get("record_type") == "error"
+    }
+    assert skip_kinds == {"prefiltered", "scan_cap"}
+    assert result.records[-1].to_dict()["coverage_reasons"] == [
+        "prefiltered",
+        "scan_cap",
+    ]
 
 
 def test_runner_uses_one_validated_preset_for_runtime_values() -> None:

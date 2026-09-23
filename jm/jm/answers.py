@@ -8,10 +8,16 @@ from typing import Any, Literal
 
 CacheStatus = Literal["hit", "miss", "not_applicable"]
 ErrorKind = Literal[
-    "api_error", "malformed_answer", "scan_cap", "context_limit", "input_error"
+    "api_error",
+    "malformed_answer",
+    "scan_cap",
+    "context_limit",
+    "input_error",
+    "prefiltered",
 ]
 CoverageStatus = Literal["complete", "partial"]
 CoverageReason = Literal[
+    "prefiltered",
     "scan_cap",
     "input_error",
     "context_limit",
@@ -87,6 +93,7 @@ class RecordMeta:
     chunker: str
     cache: CacheStatus
     partial: bool = False
+    preset_schema: str | None = None
 
     def __post_init__(self) -> None:
         if self.cache not in {"hit", "miss", "not_applicable"}:
@@ -102,6 +109,8 @@ class RecordMeta:
         }
         if self.partial:
             result["partial"] = True
+        if self.preset_schema is not None:
+            result["preset_schema"] = self.preset_schema
         return result
 
 
@@ -139,11 +148,12 @@ class ErrorDetail:
             "scan_cap",
             "context_limit",
             "input_error",
+            "prefiltered",
         }:
             raise ValueError(f"unknown error kind: {self.kind}")
         if self.attempts < 0:
             raise ValueError("attempts must not be negative")
-        is_skip = self.kind in {"scan_cap", "context_limit"}
+        is_skip = self.kind in {"scan_cap", "context_limit", "prefiltered"}
         if is_skip != (self.skip_summary is not None):
             raise ValueError("skip summaries are required only for skip errors")
         if is_skip and (self.http_status is not None or self.attempts != 0):
@@ -201,6 +211,7 @@ class PartialResultRecord:
                     self.meta.chunker,
                     self.meta.cache,
                     partial=True,
+                    preset_schema=self.meta.preset_schema,
                 ),
             )
 
@@ -234,7 +245,12 @@ class ErrorRecord:
                 raise ValueError("input errors require a canonical source reference")
         elif self.state_ref is not None or self.source_ref is not None:
             raise ValueError("skip summaries cannot identify a state")
-        if self.error.kind in {"scan_cap", "context_limit", "input_error"} and (
+        if self.error.kind in {
+            "scan_cap",
+            "context_limit",
+            "prefiltered",
+            "input_error",
+        } and (
             self.meta.cache != "not_applicable"
         ):
             raise ValueError("skip and input errors are not cacheable")
@@ -270,6 +286,7 @@ class CoverageRecord:
             reason
             not in {
                 "scan_cap",
+                "prefiltered",
                 "input_error",
                 "context_limit",
                 "api_error",

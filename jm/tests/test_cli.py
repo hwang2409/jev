@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 import pytest
+import yaml
 
 from jm.answers import JudgeResponse, NoulAnswer
 from jm.cache import CacheStore
@@ -189,6 +190,102 @@ def test_jgrep_accepts_query_option_without_positional_query(tmp_path: Path) -> 
 
     assert code == 0
     assert records[-1]["record_type"] == "coverage"
+
+
+def test_jgrep_prefilter_emits_recall_warning_and_partial_coverage(
+    tmp_path: Path,
+) -> None:
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, records, stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+        ],
+        input_text="needle here\n\nother text\n\nthird text\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+    assert code == 2
+    assert len(calls) == 1
+    assert records[-1]["coverage"] == "partial"
+    assert records[-1]["coverage_reasons"] == ["prefiltered"]
+    assert (
+        "jm: warning: BM25 prefilter skipped 2 of 3 states; recall is bounded "
+        "by the shortlist; rerun without --prefilter for full recall"
+    ) in stderr
+
+
+def test_prefilter_preset_values_and_gate_rejection_are_command_behaviors(
+    tmp_path: Path,
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "context.query",
+        "fields": ["focus"],
+    }
+    path = tmp_path / "prefilter.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    code, records, _ = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "2",
+        ],
+        input_text="needle here\n\nother text\n\nthird text\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+    assert code == 2
+    assert len(calls) == 2
+    assert records[-1]["meta"]["preset_schema"] == "jm.preset/v2"
+
+    gate_stderr = io.StringIO()
+    gate_code = main(
+        [
+            "gate",
+            "--preset",
+            str(path),
+            "--query",
+            "needle",
+            "--prefilter",
+            "bm25",
+            "--policy",
+            "any(matches_query.noul >= 0.75)",
+        ],
+        judge_fn=judge,
+        stdin=io.StringIO("needle\n"),
+        stdout=io.StringIO(),
+        stderr=gate_stderr,
+    )
+    assert gate_code == 64
+    assert "gate does not support prefiltering" in gate_stderr.getvalue()
 
 
 def test_jgrep_positional_argument_is_not_a_query() -> None:
