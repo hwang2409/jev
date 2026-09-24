@@ -9,6 +9,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+import yaml
 
 from jm.answers import (
     ChoiceAnswer,
@@ -31,6 +32,7 @@ from jm.presets import (
     Preset,
     PresetUsageError,
     PresetValidationError,
+    load_preset,
     resolve_preset,
     validate_preset,
 )
@@ -200,6 +202,34 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "cache": "not_applicable",
         "served_model": "unknown",
     }
+
+
+def test_runner_preserves_preset_diagnostics_and_effective_chunking(
+    tmp_path: Path,
+) -> None:
+    data = deepcopy(dict(resolve_preset("jgrep").data))
+    data["questions"]["matches_query"]["wire_hint"] = {"mode": "strict"}
+    preset_path = tmp_path / "wire-fields.yml"
+    preset_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    preset = load_preset(preset_path)
+    store = CacheStore(tmp_path / "cache")
+
+    result = Runner(
+        lambda *_: JudgeResponse({"matches_query": NoulAnswer(0.9)})
+    ).run([State("stdin#L1", "launch")], preset=preset, cache_store=store)
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert [diagnostic["code"] for diagnostic in diagnostics] == [
+        "unknown_wire_field"
+    ]
+    entry = next(store.entries())
+    battery = store.batteries.get("jgrep", "1", entry.battery_hash)
+    assert battery is not None
+    assert battery.effective["chunking"]["context_lines"] == 0
 
 
 def test_runner_records_gateway_served_model() -> None:

@@ -11,6 +11,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TextIO
 
+import yaml
+
+from . import __version__
 from ._transport import _resolve_gateway_key as resolve_gateway_key
 from .answers import CoverageRecord, Diagnostic, ErrorDetail, ErrorRecord, RecordMeta
 from .cache import CacheStore
@@ -22,8 +25,6 @@ from .calibrate import (
 from .chunkers import _normalise_file_path, chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
-    CHUNKER_SETTINGS,
-    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
@@ -34,6 +35,7 @@ from .presets import (
     resolve_prefilter,
     resolve_preset,
     validate_preset,
+    with_chunker,
 )
 from .runner import (
     InputError,
@@ -42,6 +44,7 @@ from .runner import (
     State,
     StateLimits,
     StateRejection,
+    _emit_diagnostic,
     _run_pipeline,
     emit,
 )
@@ -64,6 +67,12 @@ def _parser() -> argparse.ArgumentParser:
     parser = _ArgumentParser(
         prog="jm",
         description="Apply typed Jev questions to finite input states.",
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"%(prog)s {__version__}",
+        help="show the jm version and exit",
     )
     commands = parser.add_subparsers(dest="command", required=True)
 
@@ -124,7 +133,12 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--repeats", type=_positive_int)
     calibrate.add_argument("--concurrency", type=_positive_int, default=4)
     calibrate.add_argument("--max-threshold-crossings", type=_nonnegative_int)
-    calibrate.add_argument("--format", choices=("jsonl",), default="jsonl")
+    calibrate.add_argument(
+        "--format",
+        choices=("jsonl",),
+        default="jsonl",
+        help="write calibration records as JSONL",
+    )
 
     return parser
 
@@ -141,7 +155,8 @@ def _add_judgment_options(
         choices=("line", "para", "hunk", "file", "record", "state"),
         help=(
             "form states by line, paragraph, hunk, file, record, or state; "
-            "file mode skips oversized files"
+            "file mode skips oversized files; generic line mode keeps one "
+            "adjacent line, while jgrep pins zero"
         ),
     )
     parser.add_argument("--state-ref", default="id", help="record identity field")
@@ -149,14 +164,22 @@ def _add_judgment_options(
         "--metadata-fields",
         help="comma-separated record fields to expose as context.metadata",
     )
-    parser.add_argument("--max-chunks", type=_nonnegative_int)
+    parser.add_argument(
+        "--max-chunks",
+        type=_nonnegative_int,
+        help="cap formed states; excess states become scan-cap skips",
+    )
     parser.add_argument(
         "--concurrency",
         type=_positive_int,
         default=4,
         help="maximum in-flight requests",
     )
-    parser.add_argument("--format", choices=("jsonl", "pretty"))
+    parser.add_argument(
+        "--format",
+        choices=("jsonl", "pretty"),
+        help="write canonical JSONL, or also render results as pretty text",
+    )
     parser.add_argument(
         "--emit",
         choices=("judgment", "input"),
@@ -173,8 +196,15 @@ def _add_judgment_options(
         type=Path,
         help="write canonical JSONL to PATH; pretty output stays on stderr",
     )
-    parser.add_argument("--filter", choices=("keep", "policy"))
-    parser.add_argument("--filter-policy")
+    parser.add_argument(
+        "--filter",
+        choices=("keep", "policy"),
+        help="select visible results with the preset threshold or a policy",
+    )
+    parser.add_argument(
+        "--filter-policy",
+        help="typed policy expression used with --filter policy",
+    )
     parser.add_argument("--consistency", type=_consistency_count)
     parser.add_argument("--consistency-sigma", type=_nonnegative_float, default=2.0)
     parser.add_argument("--prefilter", choices=("bm25",))
@@ -188,7 +218,11 @@ def _add_judgment_options(
         help="supply a declared preset parameter as key=value",
     )
     if include_query:
-        parser.add_argument("--query", action="append")
+        parser.add_argument(
+            "--query",
+            action="append",
+            help="supply the preset's query parameter",
+        )
     if include_predicate:
         parser.add_argument("--predicate", action="append")
 
@@ -239,7 +273,7 @@ def main(
     try:
         args = parser.parse_args(argv)
         if args.command == "preset":
-            return _preset_command(args, output)
+            return _preset_command(args, output, errors)
         if args.command == "cache":
             return _cache_command(args, output, errors, cache_store)
         if args.command == "calibrate":
@@ -280,6 +314,8 @@ def _calibration_command(
     cache_store: CacheStore | None,
 ) -> int:
     preset = resolve_preset_or_path(args.preset)
+    for diagnostic in preset.diagnostics:
+        _emit_diagnostic(diagnostic, stderr)
     tolerances = tolerances_for_preset(preset)
     overrides = {
         "threshold_margin": args.threshold_margin,
@@ -412,7 +448,7 @@ def _judgment_command(
         parameters=parameters,
     )
 
-    effective_preset = _with_chunker(effective_preset, by)
+    effective_preset = with_chunker(effective_preset, by)
     result_filter = _result_filter(
         "keep" if args.emit == "input" and args.filter is None else args.filter,
         args.filter_policy or inline_filter_policy,
@@ -547,7 +583,7 @@ def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> N
 
 def resolve_preset_or_path(identifier: str) -> Preset:
     path = Path(identifier).expanduser()
-    if path.exists() or "/" in identifier:
+    if path.is_absolute() or path.parent != Path(".") or identifier.startswith("./"):
         return load_preset(path)
     return resolve_preset(identifier)
 
@@ -559,20 +595,7 @@ def _with_max_chunks(preset: Preset, max_chunks: int | None) -> Preset:
     chunking = dict(data["chunking"])
     chunking["max_chunks"] = max_chunks
     data["chunking"] = chunking
-    return Preset(validate_preset(data), preset.path)
-
-
-def _with_chunker(preset: Preset, chunker: str) -> Preset:
-    if chunker == preset.default_chunker:
-        return preset
-    data = copy.deepcopy(dict(preset.data))
-    chunking = dict(data["chunking"])
-    chunking["by"] = chunker
-    supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[chunker]
-    for setting in set(chunking) - supported:
-        del chunking[setting]
-    data["chunking"] = chunking
-    return Preset(validate_preset(data), preset.path)
+    return Preset(validate_preset(data), preset.path, preset.diagnostics)
 
 
 def _form_states(
@@ -812,7 +835,9 @@ def _result_filter(
     )
 
 
-def _preset_command(args: argparse.Namespace, stdout: TextIO) -> int:
+def _preset_command(
+    args: argparse.Namespace, stdout: TextIO, stderr: TextIO
+) -> int:
     if args.preset_command == "list":
         if getattr(args, "target", None) is not None:
             raise _UsageError("preset list does not accept a target")
@@ -822,11 +847,10 @@ def _preset_command(args: argparse.Namespace, stdout: TextIO) -> int:
 
     target = args.target or "jgrep"
     preset = resolve_preset_or_path(target)
+    for diagnostic in preset.diagnostics:
+        _emit_diagnostic(diagnostic, stderr)
     if args.preset_command == "show":
-        payload = dict(preset.data)
-        payload["path"] = str(preset.path)
-        payload["effective_chunker"] = preset.default_chunker
-        _write_json(payload, stdout)
+        _write_yaml(preset.data, stdout)
         return 0
 
     _write_metadata(preset, stdout)
@@ -867,6 +891,11 @@ def _write_metadata(preset: Preset, stdout: TextIO) -> None:
 
 def _write_json(payload: Mapping[str, object], stdout: TextIO) -> None:
     stdout.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
+    stdout.flush()
+
+
+def _write_yaml(payload: Mapping[str, object], stdout: TextIO) -> None:
+    stdout.write(yaml.safe_dump(dict(payload), sort_keys=False))
     stdout.flush()
 
 

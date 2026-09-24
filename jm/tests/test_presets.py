@@ -128,7 +128,6 @@ def test_chunker_rejects_unused_context_setting(chunker: str, setting: str) -> N
     "version",
     "model",
     "chunking",
-    "compatible_chunkers",
     "questions",
     "thresholds",
     "output",

@@ -63,14 +63,13 @@ from .gates import (
 )
 from .presets import (
     CHUNKER_CONTEXT_KEYS,
-    CHUNKER_SETTINGS,
-    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
     PresetUsageError,
     resolve_preset,
     validate_preset,
+    with_chunker,
 )
 
 
@@ -737,11 +736,8 @@ class Runner:
             runtime_chunker = loaded_preset.effective_chunker(
                 None if chunker is _UNSET else chunker
             )
-            runtime_chunking = dict(loaded_preset.chunking)
-            runtime_chunking["by"] = runtime_chunker
-            supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[runtime_chunker]
-            for setting in set(runtime_chunking) - supported:
-                del runtime_chunking[setting]
+            loaded_preset = with_chunker(loaded_preset, runtime_chunker)
+            runtime_chunking = loaded_preset.chunking
             if chunking is not _UNSET:
                 if chunking is None:
                     raise PresetUsageError(
@@ -750,20 +746,6 @@ class Runner:
                 self._reject_chunking_conflicts(
                     chunking, runtime_chunking, loaded_preset.name
                 )
-            runtime_chunking.setdefault(
-                "limits",
-                {
-                    "focus_bytes": runtime_limits.focus_bytes,
-                    "context_field_bytes": runtime_limits.context_field_bytes,
-                    "state_bytes": runtime_limits.state_bytes,
-                },
-            )
-            if runtime_chunker != loaded_preset.default_chunker or (
-                runtime_chunking != loaded_preset.chunking
-            ):
-                data = dict(loaded_preset.data)
-                data["chunking"] = runtime_chunking
-                loaded_preset = Preset(data, loaded_preset.path)
         runtime_max_chunks = (
             max_chunks
             if max_chunks is not _UNSET
@@ -846,7 +828,9 @@ class Runner:
         if preset is None:
             return None
         if isinstance(preset, Preset):
-            return Preset(validate_preset(preset.data), preset.path)
+            return Preset(
+                validate_preset(preset.data), preset.path, preset.diagnostics
+            )
         if isinstance(preset, PathLike) or "/" in preset:
             return resolve_preset("preset", explicit_path=preset)
         return resolve_preset(preset)
@@ -1194,7 +1178,7 @@ def _judge_core(
         "not_applicable",
         preset_schema=runtime_schema,
     )
-    diagnostics = list(formation_report.diagnostics)
+    diagnostics = [*loaded_preset.diagnostics, *formation_report.diagnostics]
     if runtime_schema == SCHEMA_V3:
         available = CHUNKER_CONTEXT_KEYS[runtime_chunker]
         if available is None:
@@ -1757,7 +1741,9 @@ def _public_preset(preset: Preset | str) -> Preset:
         if isinstance(preset, Preset):
             if preset.path == Path("<runtime>"):
                 return preset
-            return Preset(validate_preset(preset.data), preset.path)
+            return Preset(
+                validate_preset(preset.data), preset.path, preset.diagnostics
+            )
         if not isinstance(preset, str):
             raise ConfigurationError("preset must be a Preset or name")
         return Runner._load_preset(preset)  # type: ignore[return-value]
