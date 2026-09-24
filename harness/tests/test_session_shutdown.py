@@ -273,6 +273,8 @@ def test_construction_failure_releases_storage(
         monkeypatch.setattr("zeta.runtime.composition.apply_external_tools", fail)
     elif entry == "server":
         monkeypatch.setattr(ServerRuntime, "_bind_background_event_sink", fail)
+    elif entry == "headless":
+        monkeypatch.setattr("zeta.runtime.bootstrap.HeadlessApp", fail)
     else:
         monkeypatch.setattr("zeta.tui.bootstrap._validate_keybindings", fail)
     argv = ["--provider", "fake"] + (["--resume", session_id] if resume else [])

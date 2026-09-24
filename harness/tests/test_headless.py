@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import io
 import json
 import os
@@ -15,13 +16,13 @@ import pytest
 from zeta.cli.main import build_parser, main
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRule
 from zeta.core.fake import FakeBackend, ScriptedTurn
-from zeta.core.session import SessionManager, env_home
+from zeta.core.session import SessionError, SessionManager, env_home
 from zeta.core.store import ConversationStore
+from zeta.protocol.types import TextContent, ToolCall
 from zeta.runtime.headless import DENIAL_MARKER, drive_turn, run_headless
 from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.protocol.types import TextContent, ToolCall
 
 pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
@@ -269,12 +270,13 @@ def test_headless_run_headless_hard_denies_always_ask_tools(
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured: list[Any] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         policy = app.approval_policy
         assert policy is not None
@@ -282,7 +284,7 @@ def test_headless_run_headless_hard_denies_always_ask_tools(
         captured.append(policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -315,18 +317,19 @@ def test_headless_respects_settings_yolo_without_cli_flag(
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
     assert args.yolo is None
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         assert app.approval_policy is not None
         captured_policies.append(app.approval_policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -357,18 +360,19 @@ def test_headless_no_yolo_flag_beats_settings_yolo(
     args = build_parser().parse_args(["--provider", "fake", "--no-yolo", "-p", "hi"])
     assert args.yolo is False
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         assert app.approval_policy is not None
         captured_policies.append(app.approval_policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -400,12 +404,13 @@ def test_headless_hard_denies_argument_scoped_ask_rules(
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         policy = app.approval_policy
         assert policy is not None
@@ -414,7 +419,7 @@ def test_headless_hard_denies_argument_scoped_ask_rules(
         captured_policies.append(policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -610,3 +615,147 @@ def test_cli_format_requires_print_flag(
     assert excinfo.value.code == 2
     captured = capsys.readouterr()
     assert "--format requires --print" in captured.err
+
+def test_headless_discovers_project_skill_and_agent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Project discovery passes the repo root, not the already-nested .zeta path."""
+
+    skill = tmp_path / ".zeta" / "skills" / "project-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: project-skill\ndescription: project skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    agent = tmp_path / ".zeta" / "agents" / "project-agent.md"
+    agent.parent.mkdir(parents=True)
+    agent.write_text(
+        "---\nname: project-agent\ndescription: project agent\ntools: read\n---\nbody\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+
+    args = build_parser().parse_args(["--provider", "fake", "-p", "discover"])
+    assert run_headless(args, args.prompt) == 0
+    capsys.readouterr()
+
+    sessions = [
+        session
+        for session in SessionManager(env_home()).list_sessions()
+        if session.cwd == str(tmp_path.resolve())
+    ]
+    assert len(sessions) == 1
+    assert "project-skill" in {item["name"] for item in sessions[0].skill_catalog or []}
+    assert "project-agent" in {item["name"] for item in sessions[0].agent_catalog or []}
+
+
+def test_headless_resume_rejects_project_provider_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A project provider setting must not silently change a resumed session."""
+
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    first = parser.parse_args(["--provider", "fake", "-p", "first"])
+    assert run_headless(first, first.prompt) == 0
+    capsys.readouterr()
+    session = SessionManager(env_home()).list_sessions()[0]
+
+    project_settings = tmp_path / ".zeta"
+    project_settings.mkdir()
+    (project_settings / "settings.toml").write_text(
+        'provider = "claude"\n', encoding="utf-8"
+    )
+    second = parser.parse_args(["--resume", session.session_id, "-p", "second"])
+
+    assert run_headless(second, second.prompt) == 1
+    captured = capsys.readouterr()
+    assert "provider 'claude' does not match 'fake'" in captured.err
+    assert "--force-provider" in captured.err
+
+
+def test_headless_resume_picker_prints_session_previews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from zeta.runtime.bootstrap import create_headless_app
+
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    first = parser.parse_args(["--provider", "fake", "-p", "first prompt"])
+    assert run_headless(first, first.prompt) == 0
+    capsys.readouterr()
+
+    manager = SessionManager(env_home())
+    session = manager.list_sessions()[0]
+    opened = manager.open(session.session_id)
+    manager.record_name(opened.metadata, name="planning")
+    opened.store.close()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+
+    args = parser.parse_args(["--provider", "fake", "--resume"])
+    app = create_headless_app(args)
+    try:
+        output = capsys.readouterr().out
+        assert "recent zeta sessions:" in output
+        assert "[planning]" in output
+        assert "first prompt" in output
+    finally:
+        asyncio.run(app.close())
+
+
+def test_headless_legacy_resume_migrates_skill_index_and_wraps_errors(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy resume replaces its skill index and reports malformed prompts cleanly."""
+
+    from zeta.runtime.bootstrap import create_headless_app
+
+    skill = tmp_path / ".zeta" / "skills" / "legacy-skill" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text(
+        "---\nname: legacy-skill\ndescription: legacy skill\n---\nbody\n",
+        encoding="utf-8",
+    )
+    home = tmp_path / "zeta-home"
+    monkeypatch.setenv("ZETA_HOME", str(home))
+    monkeypatch.chdir(tmp_path)
+    manager = SessionManager(home)
+    opened = manager.create(
+        provider="fake",
+        model="offline",
+        cwd=tmp_path,
+        system_prompt="prefix\n<zeta-skills>\n- stale\n</zeta-skills>\nsuffix",
+    )
+    session_id = opened.metadata.session_id
+    opened.store.close()
+
+    args = build_parser().parse_args(
+        ["--provider", "fake", "--resume", session_id, "-p", "x"]
+    )
+    app = create_headless_app(args)
+    migrated = manager.read_metadata(session_id)
+    assert migrated.skill_catalog is not None
+    assert "legacy-skill" in migrated.system_prompt
+    assert "stale" not in migrated.system_prompt
+    asyncio.run(app.close())
+
+    malformed = manager.create(
+        provider="fake",
+        model="offline",
+        cwd=tmp_path,
+        system_prompt="<zeta-skills>unterminated",
+    )
+    malformed_id = malformed.metadata.session_id
+    malformed.store.close()
+    bad_args = build_parser().parse_args(
+        ["--provider", "fake", "--resume", malformed_id, "-p", "x"]
+    )
+    with pytest.raises(SessionError, match="session skill catalog is invalid"):
+        create_headless_app(bad_args)

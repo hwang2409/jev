@@ -40,6 +40,7 @@ from typing import IO, Any
 
 from ..core.approval import ApprovalDecision
 from ..core.session import SessionError
+from .bootstrap import create_headless_app
 from .driver import (
     DENIAL_MARKER,
     TOOL_RESULT_MAX_BYTES,
@@ -80,10 +81,8 @@ def run_headless(args: argparse.Namespace, prompt: str) -> int:
         return 2
 
     args.headless = True
-    from ..tui.app import create_app
-
     try:
-        app = create_app(args)
+        app = create_headless_app(args)
     except SessionError as exc:
         print(f"zeta: {exc}", file=sys.stderr)
         return 1

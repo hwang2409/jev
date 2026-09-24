@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any, TypedDict
 
+from ...protocol.jev import route_step
 from ...protocol.types import StructuredToolResult
-from ...providers.jev import route_step
 from ...routing import ROUTE_TOPK_CONFIDENCE
 from ...runtime.execution import ToolExecutionContext
 from ..browser import catalog_criteria as browser_catalog_criteria

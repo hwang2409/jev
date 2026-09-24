@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from ..providers import jev
+from ..protocol import jev
 
 SAFE_MAX = 1.0
 SAFETY_CONFIDENCE = 0.8

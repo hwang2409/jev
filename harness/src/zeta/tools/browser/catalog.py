@@ -17,7 +17,7 @@ from ...routing import (
 from .adapter import ElementRef, PageObservation, SnapshotLimits
 
 if TYPE_CHECKING:
-    from ...providers.jev import SearchResultScoreResult
+    from ...protocol.jev import SearchResultScoreResult
 
 
 @dataclass(frozen=True, slots=True)
