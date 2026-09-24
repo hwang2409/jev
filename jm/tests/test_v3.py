@@ -21,13 +21,18 @@ def _isolate_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("JM_CACHE_DIR", str(tmp_path / "cache"))
 
 
-def _preset(tmp_path: Path, *, context_field_bytes: int = 4096) -> Path:
+def _preset(
+    tmp_path: Path,
+    *,
+    context_field_bytes: int = 4096,
+    by: str = "state",
+) -> Path:
     data = yaml.safe_load(
         (ROOT / "jm" / "presets" / "jgrep.yml").read_text(encoding="utf-8")
     )
     data["schema"] = SCHEMA_V3
     data["chunking"] = {
-        "by": "state",
+        "by": by,
         "max_chunks": 512,
         "limits": {
             "focus_bytes": 16384,
@@ -35,10 +40,10 @@ def _preset(tmp_path: Path, *, context_field_bytes: int = 4096) -> Path:
             "state_bytes": 32768,
         },
     }
-    data["compatible_chunkers"] = ["state"]
+    data["compatible_chunkers"] = [by]
     data["parameters"] = {"declared": ["predicate", "query"]}
     data["output"]["pretty_template"] = "{state_ref}"
-    path = tmp_path / "state.yml"
+    path = tmp_path / f"{by}.yml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
 
@@ -47,6 +52,7 @@ def _invoke(
     preset: Path,
     input_text: str,
     *options: str,
+    by: str = "state",
     judge_fn=None,
     cache_store: CacheStore | None = None,
 ) -> tuple[int, list[dict[str, object]], str]:
@@ -58,7 +64,7 @@ def _invoke(
             "--preset",
             str(preset),
             "--by",
-            "state",
+            by,
             *options,
         ],
         stdin=io.StringIO(input_text),
@@ -122,6 +128,51 @@ def test_v3_raw_state_input_errors_keep_partial_coverage(tmp_path: Path) -> None
         "skipped": 0,
         "failed": 0,
     }
+    assert coverage["coverage_reasons"] == ["input_error"]
+
+
+@pytest.mark.parametrize(
+    ("input_text", "error_line"),
+    [
+        (
+            "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-old\nnot-a-body\n",
+            5,
+        ),
+        (
+            "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n+extra\n",
+            6,
+        ),
+        (
+            "--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,2 @@\n-old\n+new\n",
+            6,
+        ),
+    ],
+)
+def test_v3_hunk_input_errors_keep_canonical_refs_and_partial_coverage(
+    tmp_path: Path,
+    input_text: str,
+    error_line: int,
+) -> None:
+    preset = _preset(tmp_path, by="hunk")
+    code, records, _ = _invoke(
+        preset,
+        input_text,
+        "--param",
+        "query=q",
+        by="hunk",
+        judge_fn=_answer,
+    )
+
+    error = next(record for record in records if record["record_type"] == "error")
+    coverage = records[-1]
+    expected_offset = sum(
+        len(line.encode("utf-8"))
+        for line in input_text.splitlines(keepends=True)[: error_line - 1]
+    )
+    assert code == 2
+    assert error["error"]["kind"] == "input_error"
+    assert error["source_ref"] == f"stdin:byte={expected_offset},line={error_line}"
+    assert coverage["coverage"] == "partial"
     assert coverage["coverage_reasons"] == ["input_error"]
 
 

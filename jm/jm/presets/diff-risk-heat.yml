@@ -5,7 +5,6 @@ model: typesafe-ai/jev
 description: Classify changed hunks for review triage.
 chunking:
   by: hunk
-  context_lines: 40
   max_chunks: 512
   limits:
     focus_bytes: 16384

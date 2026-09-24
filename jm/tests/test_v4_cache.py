@@ -174,6 +174,56 @@ def test_named_context_and_wire_battery_change_key(tmp_path: Path) -> None:
     assert battery_hash(QUESTIONS) == battery_hash(dict(QUESTIONS))
 
 
+def test_named_metadata_changes_cache_key_but_unselected_context_does_not() -> None:
+    questions = {
+        "match": {
+            "type": "noul",
+            "instructions": {
+                "state_fields": ["focus", "context.metadata"]
+            },
+            "criteria": {"true": {}, "false": {}},
+        }
+    }
+
+    def key(state: State) -> str:
+        request = build_canonical_request(state, questions, model="typesafe-ai/jev")
+        return cache_key(
+            {
+                "cache_schema": CACHE_SCHEMA,
+                "wire_request": request.payload,
+                "transport_identity": request.transport_identity,
+            }
+        )
+
+    base = key(
+        State(
+            "one",
+            "focus",
+            {"metadata": {"kind": "payment"}},
+            wire_context_keys=frozenset({"metadata"}),
+        )
+    )
+    ignored = key(
+        State(
+            "two",
+            "focus",
+            {"metadata": {"kind": "payment"}, "secret": "different"},
+            wire_context_keys=frozenset({"metadata"}),
+        )
+    )
+    changed = key(
+        State(
+            "three",
+            "focus",
+            {"metadata": {"kind": "refund"}},
+            wire_context_keys=frozenset({"metadata"}),
+        )
+    )
+
+    assert base == ignored
+    assert base != changed
+
+
 def test_model_identity_prevents_cross_model_hits() -> None:
     state = {"focus": "focus", "context": {"query": "q"}}
     first = build_canonical_request(state, QUESTIONS, model="model-a")

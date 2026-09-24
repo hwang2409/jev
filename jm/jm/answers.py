@@ -14,6 +14,7 @@ ErrorKind = Literal[
     "context_limit",
     "input_error",
     "prefiltered",
+    "heading_only",
 ]
 CoverageStatus = Literal["complete", "partial"]
 CoverageReason = Literal[
@@ -24,6 +25,7 @@ CoverageReason = Literal[
     "api_error",
     "malformed_answer",
     "partial_answer",
+    "heading_only",
 ]
 DiagnosticSeverity = Literal["info", "warning", "error"]
 
@@ -185,11 +187,17 @@ class ErrorDetail:
             "context_limit",
             "input_error",
             "prefiltered",
+            "heading_only",
         }:
             raise ValueError(f"unknown error kind: {self.kind}")
         if self.attempts < 0:
             raise ValueError("attempts must not be negative")
-        is_skip = self.kind in {"scan_cap", "context_limit", "prefiltered"}
+        is_skip = self.kind in {
+            "scan_cap",
+            "context_limit",
+            "prefiltered",
+            "heading_only",
+        }
         if is_skip != (self.skip_summary is not None):
             raise ValueError("skip summaries are required only for skip errors")
         if is_skip and (self.http_status is not None or self.attempts != 0):
@@ -291,6 +299,7 @@ class ErrorRecord:
             "context_limit",
             "prefiltered",
             "input_error",
+            "heading_only",
         } and (
             self.meta.cache != "not_applicable"
         ):
@@ -333,6 +342,7 @@ class CoverageRecord:
                 "api_error",
                 "malformed_answer",
                 "partial_answer",
+                "heading_only",
             }
             for reason in self.coverage_reasons
         ):

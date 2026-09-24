@@ -386,6 +386,91 @@ def test_jgrep_uses_the_preset_context_paragraph_setting(tmp_path: Path) -> None
     assert [state.context["surrounding"] for state in states] == [[], [], []]
 
 
+def test_record_metadata_fields_reach_the_chunker(tmp_path: Path) -> None:
+    states = []
+
+    def judge(state, *_args):
+        states.append(state)
+        return _filter_judge(state)
+
+    code, _, _ = _invoke(
+        ["jfilter", "--predicate", "failed", "--metadata-fields", "kind"],
+        input_text='{"id":"event-1","kind":"payment","secret":"x"}\n',
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert states[0].context["metadata"] == {"kind": "payment"}
+
+
+def test_line_state_field_warning_names_the_unavailable_key(tmp_path: Path) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v3"
+    data["chunking"] = {"by": "line", "limits": data["chunking"]["limits"]}
+    data["compatible_chunkers"] = ["line"]
+    data["parameters"] = {"declared": ["query"]}
+    data["questions"]["matches_query"]["instructions"]["state_fields"] = [
+        "focus",
+        "context.heading",
+        "context.state_ref",
+    ]
+    path = tmp_path / "line-preset.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+
+    code, records, stderr = _invoke(
+        [
+            "run",
+            "--preset",
+            str(path),
+            "--by",
+            "line",
+            "--param",
+            "query=needle",
+        ],
+        input_text="needle\n",
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+    assert "context.heading" in stderr
+    assert "context.state_ref" not in stderr
+
+
+def test_oversized_file_is_a_context_limit_skip(tmp_path: Path) -> None:
+    path = tmp_path / "large.txt"
+    path.write_text("x" * 16_385, encoding="utf-8")
+    calls = []
+
+    def judge(state, *_args):
+        calls.append(state.state_ref)
+        return _judge(state)
+
+    stdout = io.StringIO()
+    code = main(
+        ["jgrep", "--query", "large", "--by", "file", str(path)],
+        stdin=io.StringIO(),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+
+    assert code == 2
+    assert calls == []
+    assert records[-1]["coverage_counts"] == {
+        "discovered": 1,
+        "judged": 0,
+        "emitted": 0,
+        "skipped": 1,
+        "failed": 0,
+    }
+    assert records[-1]["coverage_reasons"] == ["context_limit"]
+
+
 @pytest.mark.parametrize(
     ("argv", "message"),
     [

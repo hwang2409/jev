@@ -22,6 +22,8 @@ from .calibrate import (
 from .chunkers import chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
+    CHUNKER_SETTINGS,
+    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
@@ -133,9 +135,18 @@ def _add_judgment_options(
 ) -> None:
     parser.add_argument("--input", type=Path, help="read finite input from PATH")
     parser.add_argument(
-        "--by", choices=("line", "para", "hunk", "file", "record", "state")
+        "--by",
+        choices=("line", "para", "hunk", "file", "record", "state"),
+        help=(
+            "form states by line, paragraph, hunk, file, record, or state; "
+            "file mode skips oversized files"
+        ),
     )
     parser.add_argument("--state-ref", default="id", help="record identity field")
+    parser.add_argument(
+        "--metadata-fields",
+        help="comma-separated record fields to expose as context.metadata",
+    )
     parser.add_argument("--max-chunks", type=_nonnegative_int)
     parser.add_argument(
         "--concurrency",
@@ -295,6 +306,8 @@ def _judgment_command(
     preset = resolve_preset_or_path(preset_name)
     _validate_consistency_options(args, preset)
     by = resolve_chunker(preset, args.by)
+    if args.metadata_fields is not None and by != "record":
+        raise _UsageError("--metadata-fields requires --by record")
     paths = tuple(getattr(args, "paths", ()))
     if paths and by != "file":
         raise _UsageError("positional input paths require --by file")
@@ -496,6 +509,9 @@ def _with_chunker(preset: Preset, chunker: str) -> Preset:
     data = copy.deepcopy(dict(preset.data))
     chunking = dict(data["chunking"])
     chunking["by"] = chunker
+    supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[chunker]
+    for setting in set(chunking) - supported:
+        del chunking[setting]
     data["chunking"] = chunking
     return Preset(validate_preset(data), preset.path)
 
@@ -541,12 +557,26 @@ def _form_states(
         chunk_kwargs["adjacent_paragraphs"] = chunking.get("context_paragraphs", 1)
     if by == "record":
         chunk_kwargs["state_ref_field"] = args.state_ref
+        chunk_kwargs["metadata_fields"] = _parse_metadata_fields(
+            args.metadata_fields
+        )
     if by in {"line", "para", "file", "record"}:
         chunk_kwargs["query"] = query
         chunk_kwargs["predicate"] = predicate
     chunk_kwargs["parameters"] = parameters or {}
     result = chunk_input(by, value, **chunk_kwargs)
     return result.formed, result.rejections
+
+
+def _parse_metadata_fields(value: str | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    fields = tuple(item.strip() for item in value.split(","))
+    if not fields or any(not field for field in fields):
+        raise _UsageError("--metadata-fields must not contain empty fields")
+    if len(set(fields)) != len(fields):
+        raise _UsageError("--metadata-fields must not contain duplicates")
+    return fields
 
 
 def _read_stdin_bytes(stdin: TextIO) -> str | bytes:

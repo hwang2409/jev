@@ -20,6 +20,7 @@ from .runner import (
 DEFAULT_FOCUS_BYTES = 16_384
 DEFAULT_CONTEXT_FIELD_BYTES = 4_096
 DEFAULT_STATE_BYTES = 32_768
+SURROUNDING_TRUNCATION_MARKER = "[... surrounding truncated ...]"
 
 
 def decode_stdin(value: bytes) -> str:
@@ -32,6 +33,89 @@ def _as_text(value: str | bytes) -> str:
 
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _fits_context(value: Any, limit: int) -> bool:
+    return len(_canonical_json(value).encode("utf-8")) <= limit
+
+
+def _prefix_with_marker(value: str, limit: int) -> str:
+    marker = SURROUNDING_TRUNCATION_MARKER
+    low = 0
+    high = len(value)
+    best = marker
+    while low <= high:
+        midpoint = (low + high) // 2
+        candidate = value[:midpoint] + marker
+        if _fits_context(candidate, limit):
+            best = candidate
+            low = midpoint + 1
+        else:
+            high = midpoint - 1
+    if not _fits_context(marker, limit):
+        raise ValueError(
+            "context_field_bytes is too small for the surrounding truncation marker"
+        )
+    return best
+
+
+def _truncate_surrounding_list(value: list[Any], limit: int) -> list[Any]:
+    marker = SURROUNDING_TRUNCATION_MARKER
+    if not _fits_context([marker], limit):
+        raise ValueError(
+            "context_field_bytes is too small for the surrounding truncation marker"
+        )
+
+    retained: list[Any] = []
+    for item in value:
+        candidate = [*retained, item, marker]
+        if _fits_context(candidate, limit):
+            retained.append(item)
+            continue
+        if not isinstance(item, str):
+            return [*retained, marker]
+
+        low = 0
+        high = len(item)
+        best: list[Any] | None = None
+        while low <= high:
+            midpoint = (low + high) // 2
+            truncated = [*retained, item[:midpoint] + marker]
+            if _fits_context(truncated, limit):
+                best = truncated
+                low = midpoint + 1
+            else:
+                high = midpoint - 1
+        if best is None:
+            raise ValueError(
+                "context_field_bytes is too small for the surrounding truncation marker"
+            )
+        return best
+    return [*retained, marker]
+
+
+def _truncate_surrounding(value: Any, limit: int) -> Any:
+    """Bound surrounding context while keeping its list-shaped contract."""
+
+    if _fits_context(value, limit):
+        return value
+    if isinstance(value, str):
+        return _prefix_with_marker(value, limit)
+    if isinstance(value, list):
+        return _truncate_surrounding_list(value, limit)
+    return _prefix_with_marker(_canonical_json(value), limit)
+
+
+def _bounded_context(
+    context: Mapping[str, Any], limits: StateLimits
+) -> dict[str, Any]:
+    bounded = dict(context)
+    surrounding = bounded.get("surrounding")
+    if surrounding is not None:
+        bounded["surrounding"] = _truncate_surrounding(
+            surrounding, limits.context_field_bytes
+        )
+    return bounded
 
 
 def _split_utf8(value: str, max_bytes: int) -> list[str]:
@@ -64,7 +148,12 @@ def _state(
     rejections: list[StateRejection] | None = None,
     source_ref: str | None = None,
 ) -> list[State]:
-    state = State(state_ref, focus, context, source_ref=source_ref)
+    state = State(
+        state_ref,
+        focus,
+        _bounded_context(context, limits),
+        source_ref=source_ref,
+    )
     try:
         validate_state(state, limits)
     except StateLimitError as exc:
@@ -229,21 +318,39 @@ def chunk_para(
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     decoded = _as_text(text)
-    units = _paragraph_units(decoded)
+    all_units = _paragraph_units(decoded)
+    units: list[tuple[int, int, str]] = []
+    for paragraph, (line_number, focus) in enumerate(all_units, start=1):
+        if all(
+            re.match(r"^\s{0,3}#{1,6}\s+", line)
+            for line in focus.splitlines()
+        ):
+            if _rejections is not None:
+                _rejections.append(
+                    StateRejection(
+                        f"{source}#P{paragraph}",
+                        "heading_only",
+                        "heading-only paragraph skipped",
+                    )
+                )
+            continue
+        units.append((paragraph, line_number, focus))
     lines = decoded.splitlines()
     states: list[State] = []
-    for index, (line_number, focus) in enumerate(units, start=1):
+    for index, (paragraph, line_number, focus) in enumerate(units, start=1):
         start = max(0, index - 1 - adjacent_paragraphs)
         end = min(len(units), index + adjacent_paragraphs)
         surrounding = [
             paragraph
-            for offset, (_, paragraph) in enumerate(units[start:end], start=start + 1)
+            for offset, (_, _, paragraph) in enumerate(
+                units[start:end], start=start + 1
+            )
             if offset != index
         ]
         context: dict[str, Any] = {
             "source": source,
             "unit": "para",
-            "paragraph": index,
+            "paragraph": paragraph,
             "heading": _heading_before(lines, line_number),
             "surrounding": surrounding,
         }
@@ -254,7 +361,7 @@ def chunk_para(
         context = _with_parameters(context, parameters)
         states.extend(
             _state(
-                f"{source}#P{index}",
+                f"{source}#P{paragraph}",
                 focus,
                 context,
                 limits,
@@ -325,6 +432,40 @@ def _diff_path(line: str) -> str:
     return _normalise_path(path, strip_git_prefix=True)
 
 
+_NO_NEWLINE_MARKER = r"\ No newline at end of file"
+
+
+def _strict_hunk_lines(
+    diff: str | bytes,
+    rejections: list[StateRejection] | None,
+) -> Iterable[tuple[int, int, str | None]]:
+    if isinstance(diff, str):
+        offset = 0
+        for line_number, raw_line in enumerate(
+            diff.splitlines(keepends=True), start=1
+        ):
+            line = raw_line.rstrip("\r\n")
+            yield line_number, offset, line
+            offset += len(raw_line.encode("utf-8"))
+        return
+
+    offset = 0
+    for line_number, raw_line in enumerate(diff.splitlines(keepends=True), start=1):
+        try:
+            line = raw_line.decode("utf-8")
+        except UnicodeDecodeError:
+            _input_error(
+                rejections,
+                f"hunk input line {line_number} is not valid UTF-8",
+                f"stdin:byte={offset},line={line_number}",
+            )
+            line = None
+        else:
+            line = line.rstrip("\r\n")
+        yield line_number, offset, line
+        offset += len(raw_line)
+
+
 def chunk_hunk(
     diff: str | bytes,
     *,
@@ -333,7 +474,6 @@ def chunk_hunk(
     parameters: Mapping[str, str] | None = None,
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
-    lines = _as_text(diff).splitlines()
     file_path = "stdin"
     current_header: str | None = None
     current_body: list[str] = []
@@ -341,19 +481,80 @@ def chunk_hunk(
     pending_old_path: str | None = None
     old_remaining = 0
     new_remaining = 0
-    for line in lines:
+    no_newline_can_attach = False
+    last_line_number = 0
+    input_byte_length = (
+        len(diff.encode("utf-8")) if isinstance(diff, str) else len(diff)
+    )
+
+    def finish_hunk() -> None:
+        nonlocal current_header, current_body, old_remaining, new_remaining
+        nonlocal no_newline_can_attach
         if current_header is not None:
-            if old_remaining or new_remaining:
-                current_body.append(line)
-                if line != r"\ No newline at end of file":
-                    if line.startswith((" ", "-")):
-                        old_remaining -= 1
-                    if line.startswith((" ", "+")):
-                        new_remaining -= 1
-                continue
             hunks.append((file_path, current_header, current_body))
-            current_header = None
-            current_body = []
+        current_header = None
+        current_body = []
+        old_remaining = 0
+        new_remaining = 0
+        no_newline_can_attach = False
+
+    for line_number, byte_offset, line in _strict_hunk_lines(diff, _rejections):
+        last_line_number = line_number
+        if line is None:
+            finish_hunk()
+            continue
+        if current_header is not None:
+            if old_remaining > 0 or new_remaining > 0:
+                if not line.startswith((" ", "+", "-")) and line != _NO_NEWLINE_MARKER:
+                    _input_error(
+                        _rejections,
+                        "invalid unified diff hunk body line",
+                        f"stdin:byte={byte_offset},line={line_number}",
+                    )
+                    finish_hunk()
+                elif line == _NO_NEWLINE_MARKER:
+                    if no_newline_can_attach:
+                        current_body.append(line)
+                        no_newline_can_attach = False
+                        continue
+                    _input_error(
+                        _rejections,
+                        "extra unified diff hunk body line",
+                        f"stdin:byte={byte_offset},line={line_number}",
+                    )
+                    finish_hunk()
+                else:
+                    excess = (
+                        line.startswith((" ", "-")) and old_remaining == 0
+                    ) or (line.startswith((" ", "+")) and new_remaining == 0)
+                    if excess:
+                        _input_error(
+                            _rejections,
+                            "extra unified diff hunk body line",
+                            f"stdin:byte={byte_offset},line={line_number}",
+                        )
+                        finish_hunk()
+                    else:
+                        current_body.append(line)
+                        if line.startswith((" ", "-")):
+                            old_remaining -= 1
+                        if line.startswith((" ", "+")):
+                            new_remaining -= 1
+                        no_newline_can_attach = True
+                        continue
+            elif line == _NO_NEWLINE_MARKER and no_newline_can_attach:
+                current_body.append(line)
+                no_newline_can_attach = False
+                continue
+            elif not line.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
+                _input_error(
+                    _rejections,
+                    "extra unified diff hunk body line",
+                    f"stdin:byte={byte_offset},line={line_number}",
+                )
+                finish_hunk()
+            else:
+                finish_hunk()
         if line.startswith("diff --git "):
             pending_old_path = None
         elif line.startswith("--- "):
@@ -368,8 +569,15 @@ def chunk_hunk(
             current_body = []
             old_remaining = int(match.group(2) or "1")
             new_remaining = int(match.group(4) or "1")
+            no_newline_can_attach = False
     if current_header is not None:
-        hunks.append((file_path, current_header, current_body))
+        if old_remaining > 0 or new_remaining > 0:
+            _input_error(
+                _rejections,
+                "unified diff hunk body ended before the declared counts",
+                f"stdin:byte={input_byte_length},line={last_line_number + 1}",
+            )
+        finish_hunk()
 
     tests = sorted({_normalise_path(path) for path in changed_test_paths or ()})
     if not tests:
