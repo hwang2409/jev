@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from collections import Counter
@@ -18,7 +19,7 @@ from .answers import (
     answer_to_dict,
     probability_keys_for_question,
 )
-from .cache import CacheEntry, CacheStore, battery_hash
+from .cache import CacheEntry, CacheStore, battery_hash, canonical_json_bytes
 from .presets import Preset
 from .runner import State, _repeat_state
 
@@ -257,10 +258,14 @@ def _load_entries(preset: Preset, store: CacheStore) -> tuple[CacheEntry, ...]:
     except ValueError as exc:
         raise CalibrationOperationalError(str(exc)) from exc
     for entry in entries:
-        if entry.preset_version != preset.version:
+        target = entry.provenance_for(
+            preset.name,
+            preset.version,
+            battery_hash(preset.questions),
+        )
+        if target is None:
             raise CalibrationOperationalError(
-                f"cache entry {entry.cache_key} has preset version "
-                f"{entry.preset_version!r}, expected {preset.version!r}"
+                f"cache entry {entry.cache_key} has no target provenance"
             )
         if entry.configured_model != preset.model:
             raise CalibrationOperationalError(
@@ -370,6 +375,9 @@ def _comparison_record(
     ]
     record = {
         "record_type": "calibration_case",
+        "calibration_case_id": _calibration_case_id(
+            entry, target_group
+        ),
         "cache_key": entry.cache_key,
         "state_ref": target_group["state_refs"][0],
         "state_refs": list(target_group["state_refs"]),
@@ -406,6 +414,17 @@ def _comparison_record(
         "boundary_noise": noise,
     }
     return record, metrics
+
+
+def _calibration_case_id(
+    entry: CacheEntry, target_group: Mapping[str, Any]
+) -> str:
+    value = {
+        "cache_key": entry.cache_key,
+        "wire_state": entry.wire_state,
+        "target_provenance": target_group,
+    }
+    return "sha256:" + hashlib.sha256(canonical_json_bytes(value)).hexdigest()
 
 
 def _choice_flip(baseline: Answer, candidates: Sequence[Answer]) -> bool:

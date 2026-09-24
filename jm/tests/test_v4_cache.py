@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 from pathlib import Path
 
 import httpx
@@ -21,12 +23,12 @@ QUESTIONS = {
 }
 
 
-def _preset(name: str = "test") -> Preset:
+def _preset(name: str = "test", version: str = "1") -> Preset:
     return Preset(
         {
             "schema": SCHEMA_V3,
             "name": name,
-            "version": "1",
+            "version": version,
             "model": "typesafe-ai/jev",
             "chunking": {
                 "by": "state",
@@ -131,20 +133,16 @@ def test_model_identity_prevents_cross_model_hits() -> None:
 
 def test_entry_has_no_embedded_battery_or_envelope(tmp_path: Path) -> None:
     store = CacheStore(tmp_path)
-    request = build_canonical_request(
-        {"focus": "focus", "context": {"query": "q"}},
-        QUESTIONS,
+    tuple(
+        judge(
+            _preset("p"),
+            (State("ref", "focus", {"query": "q"}),),
+            formation_report=_report(),
+            cache_store=store,
+            judge_fn=lambda *_args: _answer(),
+        )
     )
-    entry = store.publish(
-        request.payload["state"],
-        _answer(),
-        battery=QUESTIONS,
-        preset="p",
-        preset_version="1",
-        configured_model="typesafe-ai/jev",
-        transport_identity=request.transport_identity,
-        state_ref="ref",
-    )
+    entry = next(store.entries())
     payload = json.loads(store.path_for(entry.cache_key).read_text())
     assert set(payload) == {
         "cache_key",
@@ -164,85 +162,126 @@ def test_entry_has_no_embedded_battery_or_envelope(tmp_path: Path) -> None:
 
 def test_noul_battery_round_trip_and_export(tmp_path: Path) -> None:
     store = CacheStore(tmp_path)
-    request = build_canonical_request(
-        {"focus": "focus", "context": {"query": "q"}}, QUESTIONS
+    records = tuple(
+        judge(
+            _preset("p"),
+            (
+                State("ref", "focus", {"query": "q"}),
+                State("other", "other", {"query": "q"}),
+            ),
+            formation_report=_report(),
+            cache_store=store,
+            judge_fn=lambda *_args: _answer(),
+        )
     )
-    entry = store.publish(
-        request.payload["state"],
-        _answer(),
-        battery=QUESTIONS,
-        preset="p",
-        preset_version="1",
-        configured_model="typesafe-ai/jev",
-        transport_identity=request.transport_identity,
-        state_ref="ref",
-    )
-    second_request = build_canonical_request(
-        {"focus": "other", "context": {"query": "q"}}, QUESTIONS
-    )
-    store.publish(
-        second_request.payload["state"],
-        _answer(),
-        battery=QUESTIONS,
-        preset="p",
-        preset_version="1",
-        configured_model="typesafe-ai/jev",
-        transport_identity=second_request.transport_identity,
-        state_ref="other",
-    )
-    assert store.get(entry.cache_key) is not None
+    assert len([record for record in records if isinstance(record, ResultRecord)]) == 2
     assert next(store.export_triples("p"))["question"]["type"] == "noul"
     assert len(list((tmp_path / "batteries").rglob("*.json"))) == 1
 
 
-def test_limits_do_not_change_key_when_wire_state_is_unchanged() -> None:
-    state = {"focus": "focus", "context": {"query": "q"}}
-    keys = []
-    for _limits in ({"state_bytes": 100}, {"state_bytes": 1000}):
-        request = build_canonical_request(state, QUESTIONS)
-        keys.append(
-            cache_key(
-                {
-                    "cache_schema": CACHE_SCHEMA,
-                    "wire_request": request.payload,
-                    "transport_identity": request.transport_identity,
-                }
+def test_limits_do_not_change_key_when_wire_state_is_unchanged(tmp_path: Path) -> None:
+    store = CacheStore(tmp_path)
+    calls: list[str] = []
+
+    def judge_fn(state: State, *_args: object) -> JudgeResponse:
+        calls.append(state.state_ref)
+        return _answer()
+
+    first = _preset("small")
+    second_data = dict(_preset("large").data)
+    second_chunking = dict(second_data["chunking"])
+    second_chunking["limits"] = {
+        "focus_bytes": 2000,
+        "context_field_bytes": 2000,
+        "state_bytes": 4000,
+    }
+    second_data["chunking"] = second_chunking
+    second = Preset(second_data, Path("<runtime>"))
+    for preset, state_ref in ((first, "small-ref"), (second, "large-ref")):
+        tuple(
+            judge(
+                preset,
+                (State(state_ref, "focus", {"query": "q"}),),
+                formation_report=_report(),
+                cache_store=store,
+                judge_fn=judge_fn,
             )
         )
-    assert keys[0] == keys[1]
+    assert calls == ["small-ref"]
+    assert len(list(store.entries())) == 1
 
 
 def test_cross_preset_hit_appends_provenance(tmp_path: Path) -> None:
     store = CacheStore(tmp_path)
-    request = build_canonical_request(
-        {"focus": "focus", "context": {"query": "q"}}, QUESTIONS
+    calls: list[str] = []
+
+    def judge_fn(state: State, *_args: object) -> JudgeResponse:
+        calls.append(state.state_ref)
+        return _answer()
+
+    first_records = tuple(
+        judge(
+            _preset("first"),
+            (State("a", "focus", {"query": "q"}),),
+            formation_report=_report(),
+            cache_store=store,
+            judge_fn=judge_fn,
+        )
     )
-    first = store.publish(
-        request.payload["state"],
-        _answer(),
-        battery=QUESTIONS,
-        preset="first",
-        preset_version="1",
-        configured_model="typesafe-ai/jev",
-        transport_identity=request.transport_identity,
-        state_ref="a",
+    second_records = tuple(
+        judge(
+            _preset("second"),
+            (State("b", "focus", {"query": "q"}),),
+            formation_report=_report(),
+            cache_store=store,
+            judge_fn=judge_fn,
+        )
     )
-    store.publish(
-        request.payload["state"],
-        _answer(),
-        battery=QUESTIONS,
-        preset="second",
-        preset_version="1",
-        configured_model="typesafe-ai/jev",
-        transport_identity=request.transport_identity,
-        state_ref="b",
+    assert calls == ["a"]
+    first_result = next(
+        record for record in first_records if isinstance(record, ResultRecord)
     )
-    loaded = store.get(first.cache_key)
+    second_result = next(
+        record for record in second_records if isinstance(record, ResultRecord)
+    )
+    assert first_result.to_dict()["meta"]["cache"] == "miss"
+    assert second_result.to_dict()["meta"]["cache"] == "hit"
+    loaded = next(store.entries("first"))
     assert loaded is not None
     assert [(group["preset"], group["state_refs"]) for group in loaded.provenance] == [
         ("first", ["a"]),
         ("second", ["b"]),
     ]
+    exported = list(store.export_triples("second"))
+    assert len(exported) == 1
+    assert exported[0]["question"]["type"] == "noul"
+    battery = store.batteries.get(
+        "second", "1", battery_hash(QUESTIONS)
+    )
+    assert battery is not None
+    assert battery.effective == _preset("second").data
+
+
+def test_entries_reject_a_copy_at_the_wrong_digest_path(tmp_path: Path) -> None:
+    store = CacheStore(tmp_path)
+    tuple(
+        judge(
+            _preset(),
+            (State("ref", "focus", {"query": "q"}),),
+            formation_report=_report(),
+            cache_store=store,
+            judge_fn=lambda *_args: _answer(),
+        )
+    )
+    original = next((tmp_path / "answers").rglob("*.json"))
+    payload = json.loads(original.read_text())
+    wrong = tmp_path / "answers" / "ff" / "ee" / ("f" * 64)
+    wrong = wrong.with_suffix(".json")
+    wrong.parent.mkdir(parents=True)
+    shutil.copyfile(original, wrong)
+    original.unlink()
+    assert list(store.entries()) == []
+    assert store.get(payload["cache_key"]) is None
 
 
 def test_old_entries_are_invalidated_once(tmp_path: Path) -> None:
@@ -279,3 +318,30 @@ def test_transmitted_bytes_match_canonical_builder(tmp_path: Path, monkeypatch) 
     finally:
         client.close()
     assert seen == [request.request_bytes]
+    transmitted = json.loads(seen[0])
+    derived_key = cache_key(
+        {
+            "cache_schema": CACHE_SCHEMA,
+            "wire_request": transmitted,
+            "transport_identity": request.transport_identity,
+        }
+    )
+    assert derived_key == cache_key(
+        {
+            "cache_schema": CACHE_SCHEMA,
+            "wire_request": request.payload,
+            "transport_identity": request.transport_identity,
+        }
+    )
+    assert derived_key == "sha256:" + hashlib.sha256(
+        json.dumps(
+            {
+                "cache_schema": CACHE_SCHEMA,
+                "wire_request": transmitted,
+                "transport_identity": request.transport_identity,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()

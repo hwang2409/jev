@@ -48,7 +48,6 @@ from .answers import (
 from .cache import (
     CACHE_SCHEMA,
     CacheStore,
-    battery_hash,
     cache_key,
     v3_context_keys,
 )
@@ -1021,7 +1020,6 @@ def _judge_core(
         loaded_preset.schema if loaded_preset.schema in {SCHEMA_V2, SCHEMA_V3} else None
     )
     runtime_questions = loaded_preset.questions
-    runtime_chunking = dict(loaded_preset.chunking)
 
     def request_state(state: State) -> State:
         return State(
@@ -1165,12 +1163,17 @@ def _judge_core(
                 if cache_store is not None:
                     cached = cache_store.get(key)
                     if cached is not None:
-                        cache_store.add_provenance(
-                            key,
+                        cache_store.publish(
+                            request.payload["state"],
+                            cached.response,
+                            battery=runtime_questions,
                             preset=runtime_name,
                             preset_version=runtime_version,
-                            battery_hash=battery_hash(runtime_questions),
+                            configured_model=runtime_model,
+                            transport_identity=request.transport_identity,
                             state_ref=call_state.state_ref,
+                            effective_preset=loaded_preset.data,
+                            usage=cached.response.usage,
                         )
                         nonlocal consistency_cache_hits
                         if consistency is not None:
@@ -1208,11 +1211,7 @@ def _judge_core(
                             configured_model=runtime_model,
                             transport_identity=request.transport_identity,
                             state_ref=call_state.state_ref,
-                            effective_preset={
-                                "chunking": runtime_chunking,
-                                "thresholds": loaded_preset.data["thresholds"],
-                                "output": loaded_preset.data["output"],
-                            },
+                            effective_preset=loaded_preset.data,
                             usage=response.usage,
                         )
                     except (OSError, TypeError, ValueError):

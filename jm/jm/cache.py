@@ -486,7 +486,12 @@ class CacheStore:
                 payload = json.loads(path.read_text(encoding="utf-8"))
                 if not isinstance(payload, Mapping):
                     continue
-                entry = self.get(str(payload["cache_key"]))
+                expected_key = payload.get("cache_key")
+                if not isinstance(expected_key, str) or path != self.path_for(
+                    expected_key
+                ):
+                    continue
+                entry = self.get(expected_key)
                 if entry is None:
                     continue
                 if preset is None or any(
@@ -705,17 +710,13 @@ def _parse_entry(
         raise ValueError("partial cache entry")
     from .client import build_canonical_request
 
-    questions_wire = build_canonical_request(
-        wire_state, battery, model=configured
-    ).payload["questions"]
+    request = build_canonical_request(wire_state, battery, model=configured)
+    if request.transport_identity != dict(transport):
+        raise ValueError("cache entry transport identity does not match request")
     envelope = {
         "cache_schema": CACHE_SCHEMA,
-        "wire_request": {
-            "providerOptions": _PROVIDER_OPTIONS,
-            "state": wire_state,
-            "questions": questions_wire,
-        },
-        "transport_identity": dict(transport),
+        "wire_request": request.payload,
+        "transport_identity": request.transport_identity,
     }
     if cache_key(envelope) != expected_key:
         raise ValueError("cache entry does not match its request")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -7,11 +8,10 @@ from pathlib import Path
 import pytest
 
 from jm.answers import JudgeResponse, NoulAnswer
-from jm.cache import CacheStore, battery_hash
+from jm.cache import CacheStore, battery_hash, canonical_json_bytes
 from jm.calibrate import CalibrationOperationalError, _load_entries, run_calibration
-from jm.client import build_canonical_request
 from jm.presets import resolve_preset
-from jm.runner import State
+from jm.runner import FormationReport, State, judge
 
 
 def _seed(tmp_path: Path, *, preset_name: str = "jgrep") -> tuple[CacheStore, object]:
@@ -23,21 +23,18 @@ def _seed(tmp_path: Path, *, preset_name: str = "jgrep") -> tuple[CacheStore, ob
         {"query": "launch"},
         wire_context_keys=frozenset({"query"}),
     )
-    request = build_canonical_request(state, preset.questions, model=preset.model)
-    store.publish(
-        request.payload["state"],
-        JudgeResponse(
-            {"matches_query": NoulAnswer(0.8)},
-            served_model="baseline",
-            usage={"input_tokens": 10},
-        ),
-        battery=preset.questions,
-        preset=preset.name,
-        preset_version=preset.version,
-        configured_model=preset.model,
-        transport_identity=request.transport_identity,
-        state_ref="case#1",
-        effective_preset={"chunking": preset.chunking},
+    tuple(
+        judge(
+            preset,
+            (state,),
+            formation_report=FormationReport((), ()),
+            cache_store=store,
+            judge_fn=lambda *_args: JudgeResponse(
+                {"matches_query": NoulAnswer(0.8)},
+                served_model="baseline",
+                usage={"input_tokens": 10},
+            ),
+        )
     )
     return store, preset
 
@@ -68,6 +65,57 @@ def test_calibration_uses_stored_wire_state_and_fresh_uid(tmp_path: Path) -> Non
     assert isinstance(seen[0].api_payload["context"]["uid"], str)
     case = json.loads(stdout.getvalue().splitlines()[0])
     assert case["state_refs"] == ["case#1"]
+    entry = _load_entries(preset, store)[0]
+    target = entry.provenance_for(
+        preset.name, preset.version, battery_hash(preset.questions)
+    )
+    assert target is not None
+    expected = "sha256:" + hashlib.sha256(
+        canonical_json_bytes(
+            {
+                "cache_key": entry.cache_key,
+                "wire_state": entry.wire_state,
+                "target_provenance": target,
+            }
+        )
+    ).hexdigest()
+    assert case["calibration_case_id"] == expected
+
+
+def test_calibration_selects_the_matching_version_group(tmp_path: Path) -> None:
+    store, first = _seed(tmp_path)
+    second_data = dict(first.data)
+    second_data["version"] = "2"
+    second = type(first)(second_data, first.path)
+    tuple(
+        judge(
+            second,
+            (State(
+                "case#2",
+                "focus",
+                {"query": "launch"},
+                wire_context_keys=frozenset({"query"}),
+            ),),
+            formation_report=FormationReport((), ()),
+            cache_store=store,
+            judge_fn=lambda *_args: JudgeResponse(
+                {"matches_query": NoulAnswer(0.8)}, served_model="baseline"
+            ),
+        )
+    )
+
+    def candidate(*_args: object) -> JudgeResponse:
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.8)}, served_model="candidate"
+        )
+
+    for preset, state_ref in ((first, "case#1"), (second, "case#2")):
+        stdout = io.StringIO()
+        assert run_calibration(
+            preset, store, candidate, stdout=stdout, stderr=io.StringIO()
+        ) == 0
+        case = json.loads(stdout.getvalue().splitlines()[0])
+        assert case["state_refs"] == [state_ref]
 
 
 def test_calibration_rejects_malformed_v3_entries_before_live_calls(
