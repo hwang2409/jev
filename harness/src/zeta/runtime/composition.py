@@ -3,24 +3,24 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import ExitStack
+from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..config.settings import ResolvedConfig
 from ..core.approval import ApprovalDecision, ApprovalPolicy
 from ..core.hooks import load_hooks_for_provider
 from ..core.project_context import ProjectContext, discover_repo_root
 from ..core.safety import SafetyTier
 from ..core.session import OpenedSession, SessionManager
 from ..core.slash import resolve_session_budget
-from .loop import AgentLoop
-from ..config.settings import ResolvedConfig
+from ..protocol.types import CompletionBackend, StreamEvent
 from ..skills import SkillCatalog
 from ..skills.agent_catalog import AgentCatalog
 from ..tools._shared.user_discovery import ExternalToolDiscovery, apply_external_tools
 from ..tools.registry import ToolRegistry
-from ..protocol.types import CompletionBackend, StreamEvent
+from .loop import AgentLoop
 
 BackendBuilder = Callable[..., tuple[CompletionBackend, str]]
 BackgroundEventSink = Callable[[StreamEvent], None]
@@ -49,6 +49,7 @@ def compose_runtime(
     project_context: ProjectContext,
     backend_builder: BackendBuilder,
     opened: OpenedSession | None = None,
+    cleanup: ExitStack | None = None,
     on_completion_success: Callable[[], None] | None = None,
     on_plan_mode_change: Callable[[bool], None] | None = None,
     max_turns: int | None = None,
@@ -58,7 +59,10 @@ def compose_runtime(
 ) -> RuntimeComposition:
     """Build one session, policy, loop, and tool registry for any frontend."""
 
-    with ExitStack() as cleanup:
+    owns_cleanup = cleanup is None
+    cleanup_stack = cleanup if cleanup is not None else ExitStack()
+    cleanup_context = cleanup_stack if owns_cleanup else nullcontext()
+    with cleanup_context:
         session_model = model if opened is None else model or opened.metadata.model
         backend, selected_model = backend_builder(
             provider,
@@ -82,7 +86,7 @@ def compose_runtime(
                 agent_catalog=agent_catalog,
                 budget_pinned=budget_pinned,
             )
-            cleanup.enter_context(opened.store)
+            cleanup_stack.enter_context(opened.store)
         else:
             effective_budget, budget_pinned = resolve_session_budget(
                 opened.metadata.compaction_budget,
@@ -146,7 +150,7 @@ def compose_runtime(
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
-        cleanup.callback(registry.background_tasks.release_directory)
+        cleanup_stack.callback(registry.background_tasks.release_directory)
         loop = AgentLoop(
             backend,
             opened.store,
@@ -176,7 +180,8 @@ def compose_runtime(
             external_tools=external_tools,
             budget_pinned=budget_pinned,
         )
-        cleanup.pop_all()
+        if owns_cleanup:
+            cleanup_stack.pop_all()
         return composition
 
 

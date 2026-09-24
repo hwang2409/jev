@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,7 +19,14 @@ from ..core.project_context import (
     load_project_context,
     resolve_prompt_argument,
 )
-from ..core.session import SessionError, SessionManager, SessionMetadata, env_home
+from ..core.session import (
+    SessionError,
+    SessionManager,
+    SessionMetadata,
+    SessionPreview,
+    env_home,
+    format_relative_age,
+)
 from ..protocol.types import CompletionBackend
 from ..runtime.backend import build_backend
 from ..runtime.cleanup import close_session
@@ -32,6 +39,8 @@ SettingsLoader = Callable[..., LoadedSettings]
 ContextLoader = Callable[..., ProjectContext]
 BackendBuilder = Callable[..., tuple[CompletionBackend, str]]
 ResumePicker = Callable[[SessionManager], str]
+ResumeRenderer = Callable[[Sequence[SessionPreview]], None]
+RECENT_SESSION_LIMIT = 20
 
 
 @dataclass(slots=True)
@@ -48,6 +57,7 @@ class RuntimeBootstrap:
     resuming: bool
     override_on_resume: bool
     on_model_change: Callable[[str], None]
+    cleanup: ExitStack
 
 
 @dataclass(slots=True)
@@ -57,9 +67,13 @@ class HeadlessApp:
     loop: AgentLoop
     approval_policy: ApprovalPolicy
     ephemeral_root: Path | None
+    cleanup: ExitStack
 
     async def close(self) -> None:
-        await close_session(self.loop)
+        try:
+            await close_session(self.loop)
+        finally:
+            self.cleanup.close()
 
 
 def create_runtime_bootstrap(
@@ -68,6 +82,40 @@ def create_runtime_bootstrap(
     home: Path,
     ephemeral_root: Path | None,
     cleanup: ExitStack | None = None,
+    resume_picker: ResumePicker | None = None,
+    load_settings_fn: SettingsLoader = load_settings,
+    load_project_context_fn: ContextLoader = load_project_context,
+    backend_builder: BackendBuilder = build_backend,
+    persist_plan_mode: bool = False,
+) -> RuntimeBootstrap:
+    """Create one session and retain cleanup until the frontend owns it."""
+
+    owns_cleanup = cleanup is None
+    cleanup_stack = cleanup if cleanup is not None else ExitStack()
+    try:
+        return _create_runtime_bootstrap(
+            args,
+            home=home,
+            ephemeral_root=ephemeral_root,
+            cleanup=cleanup_stack,
+            resume_picker=resume_picker,
+            load_settings_fn=load_settings_fn,
+            load_project_context_fn=load_project_context_fn,
+            backend_builder=backend_builder,
+            persist_plan_mode=persist_plan_mode,
+        )
+    except BaseException:
+        if owns_cleanup:
+            cleanup_stack.close()
+        raise
+
+
+def _create_runtime_bootstrap(
+    args: argparse.Namespace,
+    *,
+    home: Path,
+    ephemeral_root: Path | None,
+    cleanup: ExitStack,
     resume_picker: ResumePicker | None = None,
     load_settings_fn: SettingsLoader = load_settings,
     load_project_context_fn: ContextLoader = load_project_context,
@@ -123,8 +171,7 @@ def create_runtime_bootstrap(
             if resume_id is not None
             else manager.open(manager.find_most_recent(cwd=Path.cwd()).session_id)
         )
-        if cleanup is not None:
-            cleanup.enter_context(opened.store)
+        cleanup.enter_context(opened.store)
         metadata = opened.metadata
         skill_catalog = _session_skill_catalog(metadata, home, manager)
         agent_catalog = _session_agent_catalog(metadata, home, manager)
@@ -229,6 +276,7 @@ def create_runtime_bootstrap(
         project_context=project_context,
         backend_builder=backend_builder,
         opened=opened,
+        cleanup=cleanup,
         on_completion_success=completion_success,
         on_plan_mode_change=plan_mode_callback,
         max_turns=getattr(args, "max_turns", None),
@@ -237,8 +285,7 @@ def create_runtime_bootstrap(
     )
     if opened is None:
         opened = composition.opened
-        if cleanup is not None:
-            cleanup.enter_context(opened.store)
+        cleanup.enter_context(opened.store)
     metadata = opened.metadata
     return RuntimeBootstrap(
         composition=composition,
@@ -251,20 +298,45 @@ def create_runtime_bootstrap(
         resuming=resuming,
         override_on_resume=override_on_resume,
         on_model_change=model_changed,
+        cleanup=cleanup,
     )
 
 
 def _pick_resume_session(manager: SessionManager) -> str:
-    previews = manager.list_session_previews(limit=20)
+    return pick_resume_session(manager)
+
+
+def pick_resume_session(
+    manager: SessionManager,
+    *,
+    render: ResumeRenderer | None = None,
+    prompt: str = "select a session: ",
+) -> str:
+    previews = manager.list_session_previews(limit=RECENT_SESSION_LIMIT)
     if not previews:
         raise SessionError("no prior zeta session found")
+    if render is None:
+        print("recent zeta sessions:")
+        for index, preview in enumerate(previews, start=1):
+            print(format_picker_row(index, preview))
+    else:
+        render(previews)
     try:
-        selected = int(input("select a session: ").strip())
+        selected = int(input(prompt).strip())
         if not 1 <= selected <= len(previews):
             raise ValueError("selection out of range")
         return previews[selected - 1].session_id
     except (EOFError, ValueError, IndexError) as exc:
         raise SessionError("invalid resume session selection") from exc
+
+
+def format_picker_row(index: int, preview: SessionPreview) -> str:
+    """Render one picker row with age, id, optional name, and preview."""
+
+    age = format_relative_age(preview.updated_at).rjust(8)
+    label = f" [{preview.name}]" if preview.name else ""
+    text = preview.preview or "(no user message)"
+    return f"{index}. {age}  {preview.session_id[:8]}{label}  {text}"
 
 
 def _session_skill_catalog(
@@ -320,6 +392,7 @@ def create_headless_app(args: argparse.Namespace) -> HeadlessApp:
         if bool(getattr(args, "no_session", False))
         else None
     )
+    runtime = None
     try:
         runtime = create_runtime_bootstrap(
             args,
@@ -330,8 +403,11 @@ def create_headless_app(args: argparse.Namespace) -> HeadlessApp:
             runtime.composition.loop,
             runtime.composition.policy,
             ephemeral_root,
+            runtime.cleanup,
         )
     except BaseException:
+        if runtime is not None:
+            runtime.cleanup.close()
         if ephemeral_root is not None:
             import shutil
 
@@ -340,8 +416,11 @@ def create_headless_app(args: argparse.Namespace) -> HeadlessApp:
 
 
 __all__ = [
+    "RECENT_SESSION_LIMIT",
     "HeadlessApp",
     "RuntimeBootstrap",
     "create_headless_app",
     "create_runtime_bootstrap",
+    "format_picker_row",
+    "pick_resume_session",
 ]

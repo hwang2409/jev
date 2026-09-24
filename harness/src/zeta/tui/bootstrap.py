@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Sequence
 from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -12,27 +13,19 @@ from ..core.session import (
     SessionManager,
     SessionPreview,
     env_home,
-    format_relative_age,
 )
-from ..runtime.bootstrap import create_runtime_bootstrap
+from ..runtime.bootstrap import (
+    RECENT_SESSION_LIMIT,
+    create_runtime_bootstrap,
+    format_picker_row,
+    pick_resume_session,
+)
 from . import theme as _theme
 from .key_bindings import KeybindingError, resolve_keybindings
 from .layout import content_width, resume_picker_line
 
 if TYPE_CHECKING:
     from .app import TUIApp
-
-RECENT_SESSION_LIMIT = 20
-
-
-def format_picker_row(index: int, preview: SessionPreview) -> str:
-    """Render one picker row with age, id, optional name, and preview."""
-
-    age = format_relative_age(preview.updated_at).rjust(8)
-    label = f" [{preview.name}]" if preview.name else ""
-    text = preview.preview or "(no user message)"
-    return f"{index}. {age}  {preview.session_id[:8]}{label}  {text}"
-
 
 def create_app(args: argparse.Namespace) -> TUIApp:
     home = env_home()
@@ -132,21 +125,18 @@ def _create_app_with_root(
 
 
 def _pick_resume_session(manager: SessionManager, app: object) -> str:
-    previews = manager.list_session_previews(limit=RECENT_SESSION_LIMIT)
-    if not previews:
-        raise SessionError("no prior zeta session found")
     width = content_width(app.get_terminal_size(fallback=(80, 24)).columns)
-    print(resume_picker_line("recent zeta sessions:", width))
-    for index, preview in enumerate(previews, start=1):
-        print(resume_picker_line(format_picker_row(index, preview), width))
-    try:
-        choice = input(resume_picker_line("select a session:", width - 1) + " ").strip()
-        selected = int(choice)
-        if not 1 <= selected <= len(previews):
-            raise ValueError("selection out of range")
-        return previews[selected - 1].session_id
-    except (EOFError, ValueError) as exc:
-        raise SessionError("invalid resume session selection") from exc
+
+    def render(previews: Sequence[SessionPreview]) -> None:
+        print(resume_picker_line("recent zeta sessions:", width))
+        for index, preview in enumerate(previews, start=1):
+            print(resume_picker_line(format_picker_row(index, preview), width))
+
+    return pick_resume_session(
+        manager,
+        render=render,
+        prompt=resume_picker_line("select a session:", width - 1) + " ",
+    )
 
 
 def _apply_startup_theme(name: str | None, home: Path) -> tuple[str, ...]:

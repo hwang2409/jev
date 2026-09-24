@@ -678,6 +678,37 @@ def test_headless_resume_rejects_project_provider_mismatch(
     assert "--force-provider" in captured.err
 
 
+def test_headless_resume_picker_prints_session_previews(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from zeta.runtime.bootstrap import create_headless_app
+
+    monkeypatch.chdir(tmp_path)
+    parser = build_parser()
+    first = parser.parse_args(["--provider", "fake", "-p", "first prompt"])
+    assert run_headless(first, first.prompt) == 0
+    capsys.readouterr()
+
+    manager = SessionManager(env_home())
+    session = manager.list_sessions()[0]
+    opened = manager.open(session.session_id)
+    manager.record_name(opened.metadata, name="planning")
+    opened.store.close()
+    monkeypatch.setattr("builtins.input", lambda _prompt: "1")
+
+    args = parser.parse_args(["--provider", "fake", "--resume"])
+    app = create_headless_app(args)
+    try:
+        output = capsys.readouterr().out
+        assert "recent zeta sessions:" in output
+        assert "[planning]" in output
+        assert "first prompt" in output
+    finally:
+        asyncio.run(app.close())
+
+
 def test_headless_legacy_resume_migrates_skill_index_and_wraps_errors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
