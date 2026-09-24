@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from ._transport import _resolve_gateway_key as resolve_gateway_key
-from .answers import DiagnosticRecord, NoulAnswer, ResultRecord, ScoreAnswer
+from .answers import CoverageRecord, ErrorDetail, ErrorRecord, RecordMeta
 from .cache import CacheStore
 from .calibrate import (
     CalibrationTolerances,
@@ -19,8 +19,9 @@ from .calibrate import (
     tolerances_for_preset,
 )
 from .chunkers import chunk_file, chunk_input
-from .client import JevClient
+from .client import make_judge
 from .presets import (
+    SCHEMA_V2,
     Preset,
     PresetError,
     PresetNotFoundError,
@@ -30,7 +31,15 @@ from .presets import (
     resolve_preset,
     validate_preset,
 )
-from .runner import Runner, State, StateLimits, StateRejection
+from .runner import (
+    InputError,
+    ResultFilter,
+    State,
+    StateLimits,
+    StateRejection,
+    _run_pipeline,
+    emit,
+)
 
 
 class _ArgumentParser(argparse.ArgumentParser):
@@ -246,11 +255,10 @@ def _calibration_command(
     resolved_tolerances = CalibrationTolerances(**values)
     store = CacheStore(args.cache_dir) if args.cache_dir is not None else cache_store
     active_store = store or CacheStore()
-    client = None
+    close_judge = None
     active_judge = judge_fn
     if active_judge is None:
-        client = JevClient()
-        active_judge = client
+        active_judge, close_judge = make_judge()
     try:
         return run_calibration(
             preset,
@@ -261,8 +269,8 @@ def _calibration_command(
             tolerances=resolved_tolerances,
         )
     finally:
-        if client is not None:
-            client.close()
+        if close_judge is not None:
+            close_judge()
 
 
 def _judgment_command(
@@ -335,43 +343,96 @@ def _judgment_command(
         predicate=predicate,
     )
 
-    if judge_fn is None:
-        client = JevClient()
-        active_judge = client
-    else:
-        client = None
-        active_judge = judge_fn
-
+    effective_preset = _with_chunker(effective_preset, by)
+    result_filter = _result_filter(args.filter, effective_preset)
     try:
-        runner = Runner(active_judge)
-        result_filter = _result_filter(args.filter, effective_preset)
-        run_kwargs: dict[str, object] = {
-            "preset": effective_preset,
-            "chunker": by,
-            "stdout": stdout,
-            "stderr": stderr,
-            "output_format": args.format
+        outcome = _run_pipeline(
+            effective_preset,
+            states,
+            rejections=rejections,
+            max_chunks=effective_preset.chunking.get("max_chunks"),
+            prefilter=prefilter,
+            include_prefilter_warning=args.command == "jgrep",
+            cache_store=cache_store or CacheStore(),
+            concurrency=args.concurrency,
+            judge_fn=judge_fn,
+            consistency=args.consistency,
+            consistency_sigma=args.consistency_sigma,
+            output_format=args.format
             or effective_preset.data["output"]["default_format"],
-            "result_filter": result_filter,
-            "rejections": rejections,
-            "cache_store": cache_store or CacheStore(),
-            "concurrency": args.concurrency,
-            "prefilter": prefilter,
-            "prefilter_warning": args.command == "jgrep",
-            "consistency": args.consistency,
-            "consistency_sigma": args.consistency_sigma,
-        }
-        if args.command == "gate":
-            run_kwargs["policy"] = args.policy
-            run_kwargs["require_states"] = args.require_states
-        result = runner.run(states, **run_kwargs)
-        if result.broken_pipe:
-            return 0
-        _emit_diagnostics(result.records, stderr)
-        return result.exit_code
-    finally:
-        if client is not None:
-            client.close()
+            jsonl_stream=stdout,
+            pretty_stream=stderr,
+            result_filter=result_filter,
+            pretty_template=effective_preset.data["output"]["pretty_template"],
+            policy=args.policy if args.command == "gate" else None,
+            require_states=getattr(args, "require_states", 1),
+        )
+    except InputError as exc:
+        return _emit_input_error(
+            effective_preset,
+            by,
+            str(exc),
+            output_format=args.format
+            or effective_preset.data["output"]["default_format"],
+            stdout=stdout,
+            stderr=stderr,
+        )
+    if outcome.emitted.broken_pipe:
+        return 0
+    if outcome.gate_result is not None:
+        return outcome.gate_result.exit_code
+    if (
+        outcome.emitted.coverage is not None
+        and outcome.emitted.coverage.coverage == "partial"
+    ):
+        return 2
+    return 0
+
+
+def _emit_input_error(
+    preset: Preset,
+    chunker: str,
+    message: str,
+    *,
+    output_format: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    meta = RecordMeta(
+        preset.name,
+        preset.version,
+        preset.model,
+        chunker,
+        "not_applicable",
+        preset_schema=preset.schema if preset.schema == SCHEMA_V2 else None,
+    )
+    records = (
+        ErrorRecord(
+            None,
+            ErrorDetail("input_error", message),
+            meta,
+            source_ref="stdin:byte=0,line=1",
+        ),
+        CoverageRecord(
+            coverage="partial",
+            coverage_counts={
+                "discovered": 0,
+                "judged": 0,
+                "emitted": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            coverage_reasons=("input_error",),
+            meta=meta,
+        ),
+    )
+    emitted = emit(
+        records,
+        format=output_format,  # type: ignore[arg-type]
+        jsonl_stream=stdout,
+        pretty_stream=stderr,
+    )
+    return 0 if emitted.broken_pipe else 2
 
 
 def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> None:
@@ -387,19 +448,6 @@ def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> N
         raise _UsageError("--consistency requires at least one Noul question")
 
 
-def _emit_diagnostics(records: tuple[object, ...], stderr: TextIO) -> None:
-    for record in records:
-        if not isinstance(record, DiagnosticRecord):
-            continue
-        diagnostic = record.diagnostic
-        stderr.write(
-            "jm: diagnostic: "
-            f"code={diagnostic.code} severity={diagnostic.severity} "
-            f"{diagnostic.message}\n"
-        )
-    stderr.flush()
-
-
 def resolve_preset_or_path(identifier: str) -> Preset:
     path = Path(identifier).expanduser()
     if path.exists() or "/" in identifier:
@@ -413,6 +461,16 @@ def _with_max_chunks(preset: Preset, max_chunks: int | None) -> Preset:
     data = copy.deepcopy(dict(preset.data))
     chunking = dict(data["chunking"])
     chunking["max_chunks"] = max_chunks
+    data["chunking"] = chunking
+    return Preset(validate_preset(data), preset.path)
+
+
+def _with_chunker(preset: Preset, chunker: str) -> Preset:
+    if chunker == preset.default_chunker:
+        return preset
+    data = copy.deepcopy(dict(preset.data))
+    chunking = dict(data["chunking"])
+    chunking["by"] = chunker
     data["chunking"] = chunking
     return Preset(validate_preset(data), preset.path)
 
@@ -503,7 +561,7 @@ def _validate_preset_parameters(
 
 def _result_filter(
     requested: str | None, preset: Preset
-) -> Callable[[ResultRecord], bool] | None:
+) -> ResultFilter | None:
     if requested is None:
         return None
     thresholds = preset.data["thresholds"]
@@ -514,17 +572,14 @@ def _result_filter(
         raise _UsageError("--filter=keep requires a keep_at_least threshold")
     minimum = threshold["keep_at_least"]
 
-    def keep(record: ResultRecord) -> bool:
-        answer = record.answers[question_id]
-        if isinstance(answer, NoulAnswer):
-            value = answer.noul
-        elif isinstance(answer, ScoreAnswer):
-            value = answer.score
-        else:
-            raise _UsageError("--filter=keep does not support choice answers")
-        return value >= minimum
-
-    return keep
+    if not isinstance(minimum, (int, float)) or isinstance(minimum, bool):
+        raise _UsageError("--filter=keep requires a numeric threshold")
+    return ResultFilter(
+        kind="keep",
+        question_id=question_id,
+        operator=">=",
+        threshold=minimum,
+    )
 
 
 def _preset_command(args: argparse.Namespace, stdout: TextIO) -> int:

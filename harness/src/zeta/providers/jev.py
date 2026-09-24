@@ -6,7 +6,15 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from jm.client import JevClient, JevError, JevResponse
+from jm.client import (
+    CacheStore,
+    FormationReport,
+    JevError,  # noqa: F401
+    JevResponse,  # noqa: F401
+    State,
+    judge_async,
+    runtime_preset,
+)
 
 from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 
@@ -157,7 +165,6 @@ _SEARCH_RESULT_SCORE_CRITERIA = [
     "The result is not relevant to the user goal.",
     "The result is relevant to the user goal.",
 ]
-
 
 def _bounded_search_results(items: list[dict[str, str]]) -> list[dict[str, str]]:
     fields = (
@@ -942,25 +949,74 @@ async def auto_route(
 async def _evaluate(
     body: dict[str, Any], *, gate: str | None = None
 ) -> dict[str, Any]:
-    client = JevClient()
-    try:
-        response = await client.evaluate_async(
-            body["state"], body["questions"]
+    questions = body["questions"]
+    preset = runtime_preset(questions)
+    state = State(
+        "harness",
+        json.dumps(body["state"], ensure_ascii=False, sort_keys=True),
+    )
+
+    records = [
+        record
+        async for record in judge_async(
+            preset,
+            (state,),
+            formation_report=FormationReport(),
+            cache_store=CacheStore(),
         )
-    except JevError as exc:
+    ]
+    coverage = next(
+        (
+            record
+            for record in records
+            if record.to_dict()["record_type"] == "coverage"
+        ),
+        None,
+    )
+    if coverage is None:
+        raise JevRouterError("Jev judgment did not produce terminal coverage", gate=gate)
+    result = next(
+        (record for record in records if record.to_dict()["record_type"] == "result"),
+        None,
+    )
+    if result is None:
+        error = next(
+            (record for record in records if record.to_dict()["record_type"] == "error"),
+            None,
+        )
+        error_message = (
+            error.to_dict()["error"]["message"] if error is not None else "Jev judgment failed"
+        )
+        if error_message == "malformed answer" or error is None:
+            question_ids = set(questions)
+            if "element_id" in question_ids:
+                error_message = "invalid Jev browser choice response"
+            elif "page_loaded_and_stable" in question_ids:
+                error_message = "invalid Jev browser page-state response"
+            elif any(question_id.startswith("result-") for question_id in question_ids):
+                error_message = "invalid Jev search result score response"
+        elif any(question_id.startswith("result-") for question_id in questions):
+            error_message = "invalid Jev search result score response"
+        error_detail = error.to_dict()["error"] if error is not None else {}
+        detail = str(error_detail) if error is not None else error_message
         raise JevRouterError(
-            str(exc), status_code=exc.http_status, gate=gate
-        ) from exc
-    finally:
-        close = getattr(client, "aclose", None)
-        if close is not None:
-            await close()
-    if not isinstance(response, JevResponse):
-        raise JevRouterError("Jev client returned an invalid response", gate=gate)
-    data = asdict(response)
-    if data["usage"] is None:
-        data["usage"] = {}
-    return data
+            error_message if error_message != "Jev judgment failed" else detail,
+            status_code=(
+                error_detail.get("http_status")
+                if isinstance(error_detail.get("http_status"), int)
+                else None
+            ),
+            gate=gate,
+        )
+    if coverage.to_dict()["coverage"] != "complete":
+        raise JevRouterError("Jev judgment returned partial coverage", gate=gate)
+    return {
+        "answers": {
+            question_id: asdict(answer)
+            for question_id, answer in result.answers.items()
+        },
+        "usage": dict(result.usage or {}),
+    }
 
 
 def build_memory_relevance_request(

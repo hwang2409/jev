@@ -1054,7 +1054,7 @@ def test_prefilter_rejects_duplicate_state_references_before_judging(
     assert "duplicate state reference" in stderr.getvalue()
 
 
-def test_repeated_record_identity_is_fatal_before_cache_or_judging(
+def test_repeated_record_identity_emits_error_and_partial_coverage(
     tmp_path: Path,
 ) -> None:
     class CountingCacheStore(CacheStore):
@@ -1090,8 +1090,24 @@ def test_repeated_record_identity_is_fatal_before_cache_or_judging(
     assert code == 2
     assert calls == []
     assert cache.lookups == 0
-    assert stdout.getvalue() == ""
-    assert "duplicate record identity 'same'" in stderr.getvalue()
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [record["record_type"] for record in records] == ["error", "coverage"]
+    assert records[0]["error"] == {
+        "kind": "input_error",
+        "message": "duplicate state reference 'same'",
+        "http_status": None,
+        "attempts": 0,
+    }
+    assert records[1]["coverage"] == "partial"
+    assert records[1]["coverage_counts"] == {
+        "discovered": 0,
+        "judged": 0,
+        "emitted": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert records[1]["coverage_reasons"] == ["input_error"]
+    assert "duplicate state reference 'same'" in stderr.getvalue()
 
 
 def test_prefilter_ignores_unlisted_context_data(tmp_path: Path) -> None:
@@ -1198,7 +1214,7 @@ def test_stdin_invalid_utf8_matches_file_input(tmp_path: Path) -> None:
     assert stdin_states[0].focus == file_states[0].focus == "ok\ufffd"
 
 
-def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) -> None:
+def test_concurrency_bounds_requests_and_emits_completion_order(tmp_path: Path) -> None:
     lock = threading.Lock()
     active = 0
     max_active = 0
@@ -1208,7 +1224,7 @@ def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) 
         with lock:
             active += 1
             max_active = max(max_active, active)
-        time.sleep(0.02)
+        time.sleep(0.05 if state.state_ref == "stdin#L1" else 0.01)
         with lock:
             active -= 1
         return JudgeResponse({"matches_query": NoulAnswer(0.9)})
@@ -1222,12 +1238,13 @@ def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) 
 
     assert code == 0
     assert max_active == 2
-    assert [record["state_ref"] for record in records[:-1]] == [
+    assert records[0]["state_ref"] == "stdin#L2"
+    assert {record["state_ref"] for record in records[:-1]} == {
         "stdin#L1",
         "stdin#L2",
         "stdin#L3",
         "stdin#L4",
-    ]
+    }
 
 
 def test_cli_routes_concurrency_diagnostics_to_stderr(tmp_path: Path) -> None:
