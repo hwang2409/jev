@@ -953,12 +953,12 @@ async def test_jev_triage_injection_probe_runs_after_context_assembly(
         store.append_message(user("current objective"))
         assembler = ContextAssembler(
             store,
-            token_budget=10,
+            token_budget=20,
             retained_tail=1,
             token_counter=compact_count,
             backend=FakeBackend([]),
         )
-        return assembler, await assembler.assemble()
+        return assembler, await assembler.assemble(force=True)
 
     Client.requests = []
     benign_assembler, benign_messages = await assemble(
