@@ -53,9 +53,10 @@ QUESTIONS = {
 
 
 @pytest.fixture(autouse=True)
-def clear_local_gateway_keys(monkeypatch) -> None:
-    for name in ("VERCEL_AI_GATEWAY", "VERCEL_JEV_KEY"):
+def force_local_gateway_key(monkeypatch) -> None:
+    for name in ("VERCEL_AI_GATEWAY", "AI_GATEWAY_API_KEY", "VERCEL_JEV_KEY"):
         monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
 
 
 def _complete_payload() -> dict[str, object]:
