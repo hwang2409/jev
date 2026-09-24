@@ -109,6 +109,12 @@ class _AbortSignal(Protocol):
     async def wait(self) -> None: ...
 
 
+class DelegatedApprovalStore(Protocol):
+    def approval_states(self) -> dict[str, tuple[ToolCall, str | None]]: ...
+
+    def resolve_approval(self, request_id: str, decision: str) -> bool: ...
+
+
 class ApprovalPolicy:
     """Choose, persist, and resolve decisions for tool calls."""
 
@@ -129,7 +135,7 @@ class ApprovalPolicy:
         self._notices: list[str] = []
         self._store = store
         self._delegated: dict[
-            tuple[str, str], tuple[ApprovalRequest, ConversationStore]
+            tuple[str, str], tuple[ApprovalRequest, DelegatedApprovalStore]
         ] = {}
         self._ephemeral: dict[str, tuple[ApprovalRequest, str | None]] = {}
 
@@ -275,7 +281,7 @@ class ApprovalPolicy:
     def register_delegated(
         self,
         request: ApprovalRequest,
-        store: ConversationStore,
+        store: DelegatedApprovalStore,
         *,
         child_instance_id: str | None = None,
     ) -> None:

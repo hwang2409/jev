@@ -108,6 +108,7 @@ class ChildApprovalPolicy:
         self.child_store = child_store
         self.description = description
         self.child_instance_id = child_instance_id
+        self._ephemeral: dict[str, tuple[ApprovalRequest, str | None]] = {}
 
     def bind_store(self, store: ConversationStore) -> None:
         del store
@@ -124,6 +125,31 @@ class ChildApprovalPolicy:
             store,
             child_instance_id=child_instance_id,
         )
+
+    def approval_states(self) -> dict[str, tuple[ToolCall, str | None]]:
+        states = self.child_store.approval_states()
+        states.update(
+            {
+                request_id: (request.tool_call, decision)
+                for request_id, (request, decision) in self._ephemeral.items()
+            }
+        )
+        return states
+
+    def resolve_approval(self, request_id: str, decision: str) -> bool:
+        ephemeral = self._ephemeral.get(request_id)
+        if ephemeral is not None:
+            if ephemeral[1] is not None:
+                return False
+            if decision not in {
+                ApprovalDecision.ALLOW.value,
+                ApprovalDecision.DENY.value,
+                "abort",
+            }:
+                raise ValueError(f"invalid approval resolution: {decision}")
+            self._ephemeral[request_id] = (ephemeral[0], decision)
+            return True
+        return self.child_store.resolve_approval(request_id, decision)
 
     def cleanup_delegated(self, child_instance_id: str) -> None:
         self.parent.cleanup_delegated(child_instance_id)
@@ -143,7 +169,7 @@ class ChildApprovalPolicy:
         return self.parent.decide(tool_name, arguments)
 
     def prepare(self, tool_call: ToolCall) -> Any:
-        state = self.child_store.approval_states().get(tool_call.id)
+        state = self.approval_states().get(tool_call.id)
         if state is not None:
             if state[0] != tool_call:
                 raise ValueError(f"approval request tool call mismatch: {tool_call.id}")
@@ -169,13 +195,15 @@ class ChildApprovalPolicy:
         force_ask: bool = False,
         label: str | None = None,
     ) -> ApprovalDecision | None:
-        state = self.child_store.approval_states().get(tool_call.id)
+        state = self.approval_states().get(tool_call.id)
         if state is not None:
             if state[0] != tool_call:
                 raise ValueError(f"approval request tool call mismatch: {tool_call.id}")
             if state[1] == ApprovalDecision.ALLOW.value:
+                self._ephemeral.pop(tool_call.id, None)
                 return ApprovalDecision.ALLOW
             if state[1] == ApprovalDecision.DENY.value:
+                self._ephemeral.pop(tool_call.id, None)
                 return ApprovalDecision.DENY
         else:
             decision = (
@@ -201,38 +229,47 @@ class ChildApprovalPolicy:
             tool_call,
             label=request_label,
         )
+        ephemeral_request = tool_call.id in self._ephemeral or (
+            not persist_request and state is None
+        )
+        if ephemeral_request:
+            self._ephemeral[tool_call.id] = (request, None)
         self.parent.register_delegated(
             request,
-            self.child_store,
+            self if ephemeral_request else self.child_store,
             child_instance_id=self.child_instance_id,
         )
-        while True:
-            state = self.child_store.approval_states().get(tool_call.id)
-            if state is not None and state[1] is not None:
-                return _approval_decision(state[1])
-            if abort_signal.is_set():
-                return self.abort_or_winner(tool_call.id)
-            abort_task = asyncio.create_task(abort_signal.wait())
-            poll_task = asyncio.create_task(asyncio.sleep(0.05))
-            try:
-                done, pending = await asyncio.wait(
-                    {abort_task, poll_task},
-                    return_when=asyncio.FIRST_COMPLETED,
-                )
-            except asyncio.CancelledError:
-                abort_task.cancel()
-                poll_task.cancel()
-                await asyncio.gather(abort_task, poll_task, return_exceptions=True)
-                raise
-            for task in pending:
-                task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
-            if abort_task in done:
-                return self.abort_or_winner(tool_call.id)
+        try:
+            while True:
+                state = self.approval_states().get(tool_call.id)
+                if state is not None and state[1] is not None:
+                    return _approval_decision(state[1])
+                if abort_signal.is_set():
+                    return self.abort_or_winner(tool_call.id)
+                abort_task = asyncio.create_task(abort_signal.wait())
+                poll_task = asyncio.create_task(asyncio.sleep(0.05))
+                try:
+                    done, pending = await asyncio.wait(
+                        {abort_task, poll_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                except asyncio.CancelledError:
+                    abort_task.cancel()
+                    poll_task.cancel()
+                    await asyncio.gather(abort_task, poll_task, return_exceptions=True)
+                    raise
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if abort_task in done:
+                    return self.abort_or_winner(tool_call.id)
+        finally:
+            if ephemeral_request:
+                self._ephemeral.pop(tool_call.id, None)
 
     def abort_or_winner(self, request_id: str) -> ApprovalDecision | None:
-        self.child_store.resolve_approval(request_id, "abort")
-        state = self.child_store.approval_states().get(request_id)
+        self.resolve_approval(request_id, "abort")
+        state = self.approval_states().get(request_id)
         return _approval_decision(state[1] if state is not None else None)
 
     def cleanup(self) -> None:
