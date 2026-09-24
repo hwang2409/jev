@@ -111,6 +111,7 @@ NEEDS_TOOL_GATE = 0.35
 # TODO: calibrate this Noul threshold with needs-tool data.
 MEMORY_RELEVANCE_GATE = 0.6
 """Memory candidate relevance cutoff; calibrate with injection data."""
+# TODO: calibrate this Noul threshold with memory relevance data.
 MEMORY_INJECTION_TOP_K = 2
 MEMORY_INJECTION_EXCERPT_CHARS = 600
 MEMORY_INJECTION_TOTAL_CHARS = 1500

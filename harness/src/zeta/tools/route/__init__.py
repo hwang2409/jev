@@ -19,10 +19,8 @@ class RouteArguments(TypedDict):
     step: str
 
 
-# TODO: calibrate this Choice threshold with route confidence data.
-
 LOW_CLARITY_NUDGE = 0.3
-"""Noul cutoff; thresholds do not transfer (Jev jaggedness section 8)."""
+"""Noul cutoff for requesting a clearer route step."""
 # TODO: calibrate this Noul threshold with step-clarity data.
 
 _BOUNDARIES: dict[str, tuple[str, list[str]]] = {
