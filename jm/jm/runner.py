@@ -1079,26 +1079,29 @@ def _judge_core(
     diagnostics = list(formation_report.diagnostics)
     if runtime_schema == SCHEMA_V3:
         available = _V3_CONTEXT_KEYS[runtime_chunker]
-        if available is not None:
-            declared = set(loaded_preset.declared_parameters)
-            for question_id, question in runtime_questions.items():
-                for field in question["instructions"]["state_fields"]:
-                    if not field.startswith("context."):
-                        continue
-                    key = field.removeprefix("context.")
-                    if key in declared or key in available:
-                        continue
-                    diagnostics.append(
-                        Diagnostic(
-                            "warning",
-                            "state_field_unavailable",
-                            f"question '{question_id}' references unavailable field "
-                            f"'{field}' for chunker '{runtime_chunker}'",
-                            path=(
-                                f"questions.{question_id}.instructions.state_fields"
-                            ),
-                        )
+        if available is None:
+            available = frozenset(
+                key for state in validated_states for key in state.context
+            )
+        declared = set(loaded_preset.declared_parameters)
+        for question_id, question in runtime_questions.items():
+            for field in question["instructions"]["state_fields"]:
+                if not field.startswith("context."):
+                    continue
+                key = field.removeprefix("context.")
+                if key in declared or key in available:
+                    continue
+                diagnostics.append(
+                    Diagnostic(
+                        "warning",
+                        "state_field_unavailable",
+                        f"question '{question_id}' references unavailable field "
+                        f"'{field}' for chunker '{runtime_chunker}'",
+                        path=(
+                            f"questions.{question_id}.instructions.state_fields"
+                        ),
                     )
+                )
     effective_concurrency = min(concurrency, 8)
     if concurrency > 8:
         diagnostics.append(

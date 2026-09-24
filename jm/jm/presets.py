@@ -160,7 +160,7 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     if schema == SCHEMA_V2:
         allowed_fields |= {"prefilter"}
     elif schema == SCHEMA_V3:
-        allowed_fields |= {"parameters"}
+        allowed_fields |= {"parameters", "prefilter"}
     _reject_unknown(root, allowed_fields, "preset")
     _require_fields(root, _REQUIRED_FIELDS, "preset")
 
@@ -241,9 +241,9 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         _validate_question(question, question_id, schema=schema)
 
     if "prefilter" in root:
-        if schema != SCHEMA_V2:
+        if schema not in {SCHEMA_V2, SCHEMA_V3}:
             raise PresetValidationError(
-                f"prefilter requires schema {SCHEMA_V2!r}"
+                f"prefilter requires schema {SCHEMA_V2!r} or {SCHEMA_V3!r}"
             )
         _validate_prefilter(root["prefilter"], questions)
 

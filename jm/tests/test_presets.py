@@ -129,6 +129,29 @@ def test_v1_rejects_prefilter_and_v2_validates_prefilter_fields() -> None:
     with pytest.raises(PresetValidationError, match="state_fields"):
         validate_preset(data)
 
+
+def test_v2_prefilter_migrates_to_v3_state_preset() -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    data["schema"] = "jm.preset/v2"
+    data["prefilter"] = {
+        "ranker": "bm25",
+        "top": 1,
+        "query_source": "literal",
+        "query": "needle",
+        "fields": ["focus"],
+    }
+
+    data["schema"] = "jm.preset/v3"
+    data["chunking"] = {"by": "state", "limits": data["chunking"]["limits"]}
+    data["compatible_chunkers"] = ["state"]
+    data["parameters"] = {"declared": ["query"]}
+
+    validated = validate_preset(data)
+
+    assert validated["schema"] == "jm.preset/v3"
+    assert validated["prefilter"]["query"] == "needle"
+
+
 @pytest.mark.parametrize(
     "change, message",
     [

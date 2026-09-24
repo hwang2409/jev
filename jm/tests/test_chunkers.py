@@ -221,6 +221,24 @@ def test_invalid_stdin_bytes_use_replacement_characters() -> None:
     assert decode_stdin(b"ok\xff\n") == "ok\ufffd\n"
 
 
+def test_state_jsonl_rejects_invalid_utf8_without_replacement_text() -> None:
+    rejections = []
+    result = chunk_input(
+        "state",
+        b'{"state_ref":"first","focus":"ok","context":{}}\n'
+        b'{"state_ref":"bad","focus":"bad\xff","context":{}}\n'
+        b'{"state_ref":"last","focus":"ok","context":{}}\n',
+    )
+
+    assert [state.state_ref for state in result.formed] == ["first", "last"]
+    rejections = result.rejections
+    assert len(rejections) == 1
+    assert rejections[0].reason == "input_error"
+    assert "not valid UTF-8" in rejections[0].message
+    assert "\ufffd" not in rejections[0].message
+    assert all("\ufffd" not in state.focus for state in result.formed)
+
+
 def test_string_limits_use_utf8_bytes() -> None:
     limits = StateLimits(focus_bytes=1)
     with pytest.raises(StateLimitError):

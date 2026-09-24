@@ -33,6 +33,30 @@ class BrokenPipeStream:
         return None
 
 
+class BinaryStdin:
+    def __init__(self, value: bytes) -> None:
+        self.buffer = io.BytesIO(value)
+
+
+def _write_v3_state_preset(
+    tmp_path: Path,
+    *,
+    state_fields: list[str],
+    prefilter: dict[str, object] | None = None,
+) -> Path:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["schema"] = "jm.preset/v3"
+    data["chunking"] = {"by": "state", "limits": data["chunking"]["limits"]}
+    data["compatible_chunkers"] = ["state"]
+    data["parameters"] = {"declared": ["query"]}
+    data["questions"]["matches_query"]["instructions"]["state_fields"] = state_fields
+    if prefilter is not None:
+        data["prefilter"] = prefilter
+    path = tmp_path / "v3-preset.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
 def _invoke(
     argv: list[str],
     *,
@@ -69,6 +93,129 @@ def test_sigpipe_returns_quietly_without_a_traceback(tmp_path: Path) -> None:
 
     assert code == 0
     assert "traceback" not in stderr.getvalue().lower()
+
+
+def test_state_input_rejects_invalid_utf8_and_keeps_valid_lines(tmp_path: Path) -> None:
+    preset = _write_v3_state_preset(tmp_path, state_fields=["focus"])
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        ["run", "--preset", str(preset), "--by", "state"],
+        stdin=BinaryStdin(
+            b'{"state_ref":"first","focus":"ok","context":{}}\n'
+            b'{"state_ref":"bad","focus":"bad\xff","context":{}}\n'
+            b'{"state_ref":"last","focus":"ok","context":{}}\n'
+        ),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert code == 2
+    assert {record.get("state_ref") for record in records} >= {"first", "last"}
+    assert any(
+        record.get("error", {}).get("kind") == "input_error"
+        for record in records
+    )
+    assert records[-1]["coverage"] == "partial"
+    assert records[-1]["coverage_counts"] == {
+        "discovered": 2,
+        "judged": 2,
+        "emitted": 2,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert "\ufffd" not in stdout.getvalue()
+    assert "\ufffd" not in stderr.getvalue()
+
+
+def test_v3_raw_state_unavailable_field_emits_warning_and_continues(
+    tmp_path: Path,
+) -> None:
+    preset = _write_v3_state_preset(
+        tmp_path,
+        state_fields=["focus", "context.mystery"],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        ["run", "--preset", str(preset), "--by", "state", "--param", "query=needle"],
+        stdin=io.StringIO(
+            '{"state_ref":"case-1","focus":"ok","context":{}}\n'
+        ),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert code == 0
+    assert "code=state_field_unavailable" in stderr.getvalue()
+    assert "context.mystery" in stderr.getvalue()
+    assert records[-1]["coverage"] == "complete"
+
+
+def test_v2_prefilter_migration_to_v3_state_preset_runs(tmp_path: Path) -> None:
+    preset = _write_v3_state_preset(
+        tmp_path,
+        state_fields=["focus", "context.query"],
+        prefilter={
+            "ranker": "bm25",
+            "top": 1,
+            "query_source": "literal",
+            "query": "needle",
+            "fields": ["focus"],
+        },
+    )
+    stdout = io.StringIO()
+    code = main(
+        ["run", "--preset", str(preset), "--by", "state", "--param", "query=needle"],
+        stdin=io.StringIO(
+            '{"state_ref":"case-1","focus":"needle","context":{}}\n'
+        ),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+    assert records[-1]["coverage_counts"]["judged"] == 1
+
+
+def test_duplicate_raw_state_rejection_does_not_read_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preset = _write_v3_state_preset(tmp_path, state_fields=["focus"])
+    store = CacheStore(tmp_path / "cache")
+    reads = 0
+    original_get = store.get
+
+    def counted_get(*args, **kwargs):
+        nonlocal reads
+        reads += 1
+        return original_get(*args, **kwargs)
+
+    monkeypatch.setattr(store, "get", counted_get)
+    code = main(
+        ["run", "--preset", str(preset), "--by", "state"],
+        stdin=io.StringIO(
+            '{"state_ref":"same","focus":"ok","context":{}}\n'
+            '{"state_ref":"same","focus":"ok","context":{}}\n'
+        ),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+        judge_fn=_judge,
+        cache_store=store,
+    )
+
+    assert code == 2
+    assert reads == 0
 
 
 def test_sigpipe_gate_returns_zero_without_late_stderr(tmp_path: Path) -> None:

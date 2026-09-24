@@ -501,7 +501,16 @@ def _validate_preimage(preimage: Mapping[str, Any], schema: str) -> None:
         raise ValueError("cache preimage has an invalid preset_schema")
 
     chunking = preimage["chunking"]
-    if not isinstance(chunking, Mapping) or frozenset(chunking) not in _CHUNKING_SHAPES:
+    is_v3 = preimage.get("preset_schema") == "jm.preset/v3"
+    valid_chunking_shapes = (
+        (*_CHUNKING_SHAPES, frozenset({"by", "limits"}))
+        if is_v3
+        else _CHUNKING_SHAPES
+    )
+    if (
+        not isinstance(chunking, Mapping)
+        or frozenset(chunking) not in valid_chunking_shapes
+    ):
         raise ValueError("cache preimage has invalid chunking")
     if not isinstance(chunking["by"], str) or not chunking["by"]:
         raise ValueError("cache preimage has invalid chunking.by")
@@ -535,7 +544,9 @@ def _validate_preimage(preimage: Mapping[str, Any], schema: str) -> None:
     ):
         raise ValueError("cache preimage has an invalid state")
     state_ref = state["context"].get("state_ref")
-    if not isinstance(state_ref, str) or not state_ref:
+    if (
+        not is_v3 or state_ref is not None
+    ) and (not isinstance(state_ref, str) or not state_ref):
         raise ValueError("cache preimage has an invalid state reference")
 
 

@@ -106,12 +106,16 @@ def _line_units(text: str) -> list[str]:
     return text.splitlines()
 
 
-def _jsonl_lines(value: str | bytes) -> Iterable[tuple[int, int, str]]:
+def _jsonl_lines(value: str | bytes) -> Iterable[tuple[int, int, str | None]]:
     offset = 0
     if isinstance(value, bytes):
         lines = value.splitlines(keepends=True)
         for line_number, raw_line in enumerate(lines, start=1):
-            yield line_number, offset, decode_stdin(raw_line)
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError:
+                line = None
+            yield line_number, offset, line
             offset += len(raw_line)
         return
 
@@ -468,9 +472,16 @@ def chunk_files(
         )
     states: list[State] = []
     for line_number, byte_offset, line in _jsonl_lines(records):
+        source_ref = f"stdin:byte={byte_offset},line={line_number}"
+        if line is None:
+            _input_error(
+                _rejections,
+                f"file JSONL line {line_number} is not valid UTF-8",
+                source_ref,
+            )
+            continue
         if not line.strip():
             continue
-        source_ref = f"stdin:byte={byte_offset},line={line_number}"
         try:
             record = json.loads(line)
         except json.JSONDecodeError as exc:
@@ -522,9 +533,16 @@ def chunk_record(
     else:
         values = []
         for line_number, byte_offset, line in _jsonl_lines(records):
+            source_ref = f"stdin:byte={byte_offset},line={line_number}"
+            if line is None:
+                _input_error(
+                    _rejections,
+                    f"record JSONL line {line_number} is not valid UTF-8",
+                    source_ref,
+                )
+                continue
             if not line.strip():
                 continue
-            source_ref = f"stdin:byte={byte_offset},line={line_number}"
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:
@@ -605,9 +623,16 @@ def chunk_state(
         values.append(("stdin:byte=0,line=1", states))
     else:
         for line_number, byte_offset, line in _jsonl_lines(states):
+            source_ref = f"stdin:byte={byte_offset},line={line_number}"
+            if line is None:
+                _input_error(
+                    _rejections,
+                    f"state JSONL line {line_number} is not valid UTF-8",
+                    source_ref,
+                )
+                continue
             if not line.strip():
                 continue
-            source_ref = f"stdin:byte={byte_offset},line={line_number}"
             try:
                 value = json.loads(line)
             except json.JSONDecodeError as exc:

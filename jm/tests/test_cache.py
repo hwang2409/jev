@@ -31,6 +31,14 @@ QUESTIONS = {
     },
 }
 
+V3_QUESTIONS = {
+    "matches_query": {
+        "type": "noul",
+        "instructions": {"state_fields": ["focus", "context.query"]},
+        "criteria": {"true": {"what": "direct evidence"}},
+    }
+}
+
 
 def _preimage() -> dict[str, object]:
     return build_cache_preimage(
@@ -246,6 +254,88 @@ def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
     assert loaded is not None
     assert loaded.response.answers == response.answers
     assert loaded.response.served_model == "unknown"
+
+
+def test_v3_cache_round_trip_uses_projected_state_identity(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+    chunking = {
+        "by": "state",
+        "limits": {
+            "focus_bytes": 16_384,
+            "context_field_bytes": 4_096,
+            "state_bytes": 32_768,
+        },
+    }
+
+    first = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking=chunking,
+        questions=V3_QUESTIONS,
+        state=State("first", "focus", {"query": "same", "ignored": "one"}),
+        limits=StateLimits(),
+    )
+    equivalent = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking=chunking,
+        questions=V3_QUESTIONS,
+        state=State("second", "focus", {"query": "same", "ignored": "two"}),
+        limits=StateLimits(),
+    )
+    response = JudgeResponse({"matches_query": NoulAnswer(0.93)})
+    entry = store.publish(first, response)
+
+    assert cache_key(first) == cache_key(equivalent)
+    assert store.get(cache_key(equivalent), V3_QUESTIONS) == entry
+
+    changed_parameter = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking=chunking,
+        questions=V3_QUESTIONS,
+        state=State("third", "focus", {"query": "changed"}),
+        limits=StateLimits(),
+    )
+    assert store.get(cache_key(changed_parameter), V3_QUESTIONS) is None
+
+    named_ref_questions = {
+        "matches_query": {
+            **V3_QUESTIONS["matches_query"],
+            "instructions": {
+                "state_fields": ["focus", "context.state_ref"]
+            },
+        }
+    }
+    named_ref_first = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking=chunking,
+        questions=named_ref_questions,
+        state=State("first", "focus", {"query": "same"}),
+        limits=StateLimits(),
+    )
+    named_ref_second = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking=chunking,
+        questions=named_ref_questions,
+        state=State("second", "focus", {"query": "same"}),
+        limits=StateLimits(),
+    )
+    store.publish(named_ref_first, response)
+    assert cache_key(named_ref_first) != cache_key(named_ref_second)
+    assert store.get(cache_key(named_ref_second), named_ref_questions) is None
 
 
 def test_publish_refuses_silently_missing_answers(tmp_path) -> None:
