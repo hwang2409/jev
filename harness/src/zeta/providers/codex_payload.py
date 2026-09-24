@@ -17,6 +17,7 @@ from ..protocol.types import (
     ImageContent,
     Message,
     MessageRole,
+    RoutingSchemaContent,
     TextContent,
     ThinkingContent,
     ToolImageBlock,
@@ -44,7 +45,7 @@ def _image_input_block(image: ToolImageBlock) -> dict[str, Any] | None:
 def _wire_text(blocks: Sequence[ContentBlock], *, output: bool) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in blocks:
-        if isinstance(block, TextContent):
+        if isinstance(block, (TextContent, RoutingSchemaContent)):
             result.append({"type": "output_text" if output else "input_text", "text": block.text})
         elif isinstance(block, ImageContent):
             if output:
@@ -110,7 +111,9 @@ def build_responses_payload(
     for message in messages:
         if message.role is MessageRole.SYSTEM:
             instructions.extend(
-                block.text for block in message.content if isinstance(block, TextContent)
+                block.text
+                for block in message.content
+                if isinstance(block, (TextContent, RoutingSchemaContent))
             )
         elif message.role is MessageRole.TOOL_RESULT:
             if message.tool_result is None:
@@ -159,7 +162,7 @@ def build_responses_payload(
                                 "text": block.text,
                             }
                             for block in message.content[1:]
-                            if isinstance(block, TextContent)
+                            if isinstance(block, (TextContent, RoutingSchemaContent))
                         ],
                     }
                 )
