@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import shutil
+from copy import deepcopy
 from pathlib import Path
 
 import httpx
+import yaml
 
 from jm._transport import _GatewayTransport
 from jm.answers import JudgeResponse, NoulAnswer, ResultRecord
 from jm.cache import CACHE_SCHEMA, CacheStore, battery_hash, cache_key
+from jm.cli import main
 from jm.client import JevClient, build_canonical_request
-from jm.presets import SCHEMA_V3, Preset
+from jm.presets import SCHEMA_V3, Preset, resolve_preset
 from jm.runner import FormationReport, State, judge
 
 QUESTIONS = {
@@ -53,6 +57,66 @@ def _report() -> FormationReport:
 
 def _answer(*_args: object) -> JudgeResponse:
     return JudgeResponse({"match": NoulAnswer(0.9)})
+
+
+def _main_answer(*_args: object) -> JudgeResponse:
+    return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+
+def _write_main_preset(
+    tmp_path: Path,
+    *,
+    filename: str,
+    model: str = "typesafe-ai/jev",
+    by: str = "state",
+    state_fields: tuple[str, ...] = ("focus",),
+    limits: dict[str, int] | None = None,
+) -> Path:
+    data = deepcopy(resolve_preset("jgrep").data)
+    data["schema"] = SCHEMA_V3
+    data["name"] = "v4-main-test"
+    data["model"] = model
+    data["parameters"] = {"declared": []}
+    data["chunking"] = {
+        "by": by,
+        "limits": limits
+        or {
+            "focus_bytes": 16_384,
+            "context_field_bytes": 4_096,
+            "state_bytes": 32_768,
+        },
+    }
+    data["compatible_chunkers"] = [by]
+    data["questions"]["matches_query"]["instructions"]["state_fields"] = list(
+        state_fields
+    )
+    path = tmp_path / filename
+    path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _run_main(
+    argv: list[str],
+    input_text: str,
+    store: CacheStore,
+    judge_fn: object,
+) -> tuple[int, list[dict[str, object]], str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        argv,
+        stdin=io.StringIO(input_text),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=judge_fn,
+        cache_store=store,
+    )
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    return code, records, stderr.getvalue()
+
+
+def _result_records(records: list[dict[str, object]]) -> list[dict[str, object]]:
+    return [record for record in records if record["record_type"] == "result"]
 
 
 def test_position_and_unnamed_context_do_not_change_key(tmp_path: Path) -> None:
@@ -209,6 +273,262 @@ def test_limits_do_not_change_key_when_wire_state_is_unchanged(tmp_path: Path) -
         )
     assert calls == ["small-ref"]
     assert len(list(store.entries())) == 1
+
+
+def test_inserting_a_line_or_paragraph_preserves_unchanged_cache_hits(
+    tmp_path: Path,
+) -> None:
+    for chunker, first_input, second_input in (
+        ("line", "unchanged\n", "inserted\nunchanged\n"),
+        ("para", "unchanged\n", "inserted\n\nunchanged\n"),
+    ):
+        store = CacheStore(tmp_path / chunker)
+        calls: list[str] = []
+
+        def judge_fn(state: State, *_args: object) -> JudgeResponse:
+            calls.append(state.focus)
+            return _main_answer()
+
+        first = _run_main(
+            ["jgrep", "--query", "unchanged", "--by", chunker],
+            first_input,
+            store,
+            judge_fn,
+        )
+        second = _run_main(
+            ["jgrep", "--query", "unchanged", "--by", chunker],
+            second_input,
+            store,
+            judge_fn,
+        )
+
+        assert first[0] == second[0] == 0
+        assert first[2] == second[2] == ""
+        assert calls == ["unchanged", "inserted"]
+        assert [record["meta"]["cache"] for record in _result_records(second[1])] == [
+            "miss",
+            "hit",
+        ]
+        assert second[1][-1]["coverage_counts"] == {
+            "discovered": 2,
+            "judged": 2,
+            "emitted": 2,
+            "skipped": 0,
+            "failed": 0,
+        }
+
+
+def test_limits_only_change_keys_when_the_formed_wire_state_changes(
+    tmp_path: Path,
+) -> None:
+    store = CacheStore(tmp_path / "cache")
+    calls: list[str] = []
+
+    def judge_fn(state: State, *_args: object) -> JudgeResponse:
+        calls.append(state.focus)
+        return _main_answer()
+
+    unchanged_limits = {
+        "focus_bytes": 100,
+        "context_field_bytes": 1_000,
+        "state_bytes": 1_000,
+    }
+    split_limits = {
+        "focus_bytes": 3,
+        "context_field_bytes": 1_000,
+        "state_bytes": 1_000,
+    }
+    runs = (
+        ("large.yml", unchanged_limits, ["miss"]),
+        (
+            "larger.yml",
+            {
+                "focus_bytes": 200,
+                "context_field_bytes": 2_000,
+                "state_bytes": 2_000,
+            },
+            ["hit"],
+        ),
+        ("split.yml", split_limits, ["miss", "miss"]),
+        ("large-again.yml", unchanged_limits, ["hit"]),
+    )
+    input_text = "abcdef\n"
+
+    for filename, limits, expected_cache in runs:
+        preset = _write_main_preset(
+            tmp_path,
+            filename=filename,
+            by="line",
+            limits=limits,
+        )
+        result = _run_main(
+            [
+                "run",
+                "--preset",
+                str(preset),
+                "--by",
+                "line",
+                "--concurrency",
+                "1",
+            ],
+            input_text,
+            store,
+            judge_fn,
+        )
+        assert result[0] == 0
+        assert result[2] == ""
+        assert [record["meta"]["cache"] for record in _result_records(result[1])] == (
+            expected_cache
+        )
+
+    assert calls == ["abcdef", "abc", "def"]
+
+
+def test_line_defaults_are_key_material_when_questions_name_them(
+    tmp_path: Path,
+) -> None:
+    preset = _write_main_preset(
+        tmp_path,
+        filename="line-context.yml",
+        by="line",
+        state_fields=("focus", "context.line", "context.surrounding"),
+    )
+    store = CacheStore(tmp_path / "cache")
+    calls: list[tuple[str, int]] = []
+
+    def judge_fn(state: State, *_args: object) -> JudgeResponse:
+        calls.append((state.focus, state.context["line"]))
+        return _main_answer()
+
+    first = _run_main(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "line",
+            "--concurrency",
+            "1",
+        ],
+        "same\n",
+        store,
+        judge_fn,
+    )
+    second = _run_main(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "line",
+            "--concurrency",
+            "1",
+        ],
+        "inserted\nsame\n",
+        store,
+        judge_fn,
+    )
+
+    assert first[0] == second[0] == 0
+    assert first[2] == second[2] == ""
+    assert calls == [("same", 1), ("inserted", 1), ("same", 2)]
+    assert [record["meta"]["cache"] for record in _result_records(second[1])] == [
+        "miss",
+        "miss",
+    ]
+
+
+def test_different_models_do_not_cross_hit_through_main(tmp_path: Path) -> None:
+    model_a = _write_main_preset(
+        tmp_path,
+        filename="model-a.yml",
+        model="model-a",
+    )
+    model_b = _write_main_preset(
+        tmp_path,
+        filename="model-b.yml",
+        model="model-b",
+    )
+    store = CacheStore(tmp_path / "cache")
+    calls: list[str] = []
+    input_text = '{"state_ref":"same","focus":"value","context":{}}\n'
+
+    def judge_fn(_state: State, _questions: object, model: str) -> JudgeResponse:
+        calls.append(model)
+        return _main_answer()
+
+    results = [
+        _run_main(
+            ["run", "--preset", str(preset), "--by", "state"],
+            input_text,
+            store,
+            judge_fn,
+        )
+        for preset in (model_a, model_b, model_a)
+    ]
+
+    assert [result[0] for result in results] == [0, 0, 0]
+    assert [result[2] for result in results] == ["", "", ""]
+    assert [
+        _result_records(result[1])[0]["meta"]["cache"] for result in results
+    ] == ["miss", "miss", "hit"]
+    assert calls == ["model-a", "model-b"]
+
+
+def test_mixed_cache_results_report_exact_coverage_counts(tmp_path: Path) -> None:
+    preset = _write_main_preset(tmp_path, filename="mixed.yml")
+    store = CacheStore(tmp_path / "cache")
+    calls: list[str] = []
+
+    def judge_fn(state: State, *_args: object) -> JudgeResponse:
+        calls.append(state.focus)
+        return _main_answer()
+
+    first = _run_main(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "state",
+            "--concurrency",
+            "1",
+        ],
+        '{"state_ref":"first","focus":"alpha","context":{}}\n'
+        '{"state_ref":"second","focus":"beta","context":{}}\n',
+        store,
+        judge_fn,
+    )
+    second = _run_main(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "state",
+            "--concurrency",
+            "1",
+        ],
+        '{"state_ref":"renamed","focus":"beta","context":{}}\n'
+        '{"state_ref":"new","focus":"gamma","context":{}}\n',
+        store,
+        judge_fn,
+    )
+
+    assert first[0] == second[0] == 0
+    assert first[2] == second[2] == ""
+    assert calls == ["alpha", "beta", "gamma"]
+    assert [record["meta"]["cache"] for record in _result_records(second[1])] == [
+        "hit",
+        "miss",
+    ]
+    assert second[1][-1]["coverage_counts"] == {
+        "discovered": 2,
+        "judged": 2,
+        "emitted": 2,
+        "skipped": 0,
+        "failed": 0,
+    }
 
 
 def test_cross_preset_hit_appends_provenance(tmp_path: Path) -> None:
