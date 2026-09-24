@@ -75,3 +75,68 @@ Model `jev-1.13.0`. Zero API errors across ~440 calls.
 3. Cost scales linearly with catalog size (criteria tokens dominate);
    ~900 input tokens per route at 120 tools.
 4. Phase 3 (attach the router to a real agent loop) is justified by the data.
+
+# Phase 2 crossover extension — 2026-09-24
+
+This run extends the deterministic catalog generator to 180 and 250 tools.
+It compares flat Choice with a category Choice followed by a within-category
+Choice. It uses 20 fixed cases from `evalset_curve.jsonl` at each size. The
+full artifact is `results/phase2-20260924-crossover.json`.
+
+The router uses `jm.client` through the Vercel AI Gateway. Calls were paced at
+2.1 seconds, below the free-tier request rate. The run made 367 planned calls.
+
+## Accuracy and cost
+
+| Size | Flat top-1/top-3 | Flat input tokens | Flat p50 ms | Flat route errors | Hierarchical top-1/top-3 | Hierarchical input tokens | Hierarchical p50 ms | Hierarchical route errors |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 15 | 1.00 / 1.00 | 750 | 194 | 0 | 1.00 / 1.00 | 877 | 400 | 0 |
+| 30 | 1.00 / 1.00 | 1,106 | 196 | 0 | 1.00 / 1.00 | 919 | 373 | 0 |
+| 60 | 1.00 / 1.00 | 1,789 | 189 | 0 | 1.00 / 1.00 | 988 | 366 | 0 |
+| 120 | 0.95 / 0.95 | 3,158 | 241 | 1 | 1.00 / 1.00 | 1,114 | 362 | 0 |
+| 180 | 0.70 / 0.70 | 4,672 | 1,030 | 6 | 1.00 / 1.00 | 1,348 | 400 | 0 |
+| 250 | 0.45 / 0.45 | 6,438 | 436 | 11 | 1.00 / 1.00 | 1,442 | 402 | 0 |
+
+Flat routing used one call per route. Hierarchical routing used two calls per
+route. Hierarchical input cost grows slowly because each tool Choice sees at
+most 25 tools. Its p50 latency is about twice flat latency at small sizes,
+then becomes lower than flat latency once flat requests start failing.
+
+## Errors and confidence
+
+Flat transport 503 responses increased with catalog size: 0, 0, 0, 13, 28,
+and 38 observed attempts at sizes 15 through 250. Final route error rates were
+0%, 0%, 0%, 5%, 30%, and 55%. Hierarchical routing had zero final route errors;
+it saw one retryable 503 attempt at size 180 and recovered it.
+
+There were no incorrect successful routes in this focused run. Therefore, the
+run cannot add a new wrong-route calibration sample. The confidence rescue
+rule recovered all successful misses, but it cannot recover a failed API call.
+The result records this distinction as `rescued_misses` and
+`unrescued_misses`. Each size also records confidence bins and Brier score.
+Hierarchical confidence stayed between 0.925 and 0.932 on correct routes; its
+three low-confidence cases at each size were all present in top-3.
+
+## Choice option limit
+
+| Options | Result |
+|---:|---|
+| 250-255 | accepted when the request reached the service; some 503 retries occurred |
+| 256 | rejected with `JevError`, `http_status=400`, `attempts=1`, and message `request failed with HTTP status 400` |
+
+The empirical gateway limit is 255 Choice options. The 503 responses near the
+limit are transient service failures, not the option-count validation shape.
+
+## Verdict
+
+Use flat routing through 120 tools when one-call latency and simple operation
+matter. At 180 tools, hierarchy is already the better default: flat routing
+had 30% route errors in this run, while hierarchy stayed at 100% accuracy with
+no final errors. At 250 tools, hierarchy is required for reliable operation:
+flat routing had 55% route errors and 6.4k input tokens per successful route.
+
+The hard API ceiling is 255 options. Arc-3 should group page elements into
+categories and route within the selected category. Keep each category at 25
+tools or fewer where possible, and apply the confidence-below-0.8 top-3
+fallback to successful low-confidence routes. Do not treat that fallback as a
+recovery path for gateway errors.

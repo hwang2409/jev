@@ -42,8 +42,8 @@ def test_curve_passes_the_matching_subset_to_route():
 
     data = run_curve([case("curve-1", "files_read_document")], fake_route)
 
-    assert seen_sizes == [15, 30, 60, 120]
-    assert list(data) == [15, 30, 60, 120]
+    assert seen_sizes == [15, 30, 60, 120, 180, 250]
+    assert list(data) == [15, 30, 60, 120, 180, 250]
 
 
 def test_confidence_bin_edges_are_left_inclusive():

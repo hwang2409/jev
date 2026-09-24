@@ -34,11 +34,17 @@ def evaluate(cases: list[dict], catalog=None, route_fn=route) -> list[dict]:
                 needs_tool=routed.needs_tool,
                 step_clarity=routed.step_clarity,
                 usage=routed.usage,
+                calls=getattr(routed, "calls", 1),
             )
+            for field in ("latency_ms", "category", "category_confidence"):
+                value = getattr(routed, field, None)
+                if value is not None:
+                    row[field] = value
             if catalog is not None:
                 row["chosen_probability"] = routed.probabilities[routed.tool]
         except Exception as exc:  # noqa: BLE001 - eval must survive bad calls
             row["error"] = str(exc)
+            row["http_status"] = getattr(exc, "http_status", None)
         results.append(row)
     return results
 
