@@ -19,7 +19,14 @@ from ..providers import jev
 
 SAFE_MAX = 1.0
 SAFETY_CONFIDENCE = 0.8
-NOUL_THRESHOLD = 0.5
+"""Minimum call confidence for Jev safety gating."""
+# TODO: calibrate this confidence threshold with safety judgment data.
+SAFETY_OUTSIDE_CWD_THRESHOLD = 0.5
+"""Maximum outside-cwd probability for an allowed command."""
+# TODO: calibrate this Noul threshold with path-boundary data.
+SAFETY_IRREVERSIBLE_THRESHOLD = 0.5
+"""Maximum irreversible probability for an allowed command."""
+# TODO: calibrate this Noul threshold with reversibility data.
 SHELL_TOOLS = frozenset({"bash", "exec", "run_background"})
 _logger = logging.getLogger(__name__)
 
@@ -1170,8 +1177,8 @@ class SafetyTier:
         safe = (
             result.score <= SAFE_MAX
             and result.call_confidence >= SAFETY_CONFIDENCE
-            and result.touches_outside_cwd < NOUL_THRESHOLD
-            and result.plausibly_irreversible < NOUL_THRESHOLD
+            and result.touches_outside_cwd < SAFETY_OUTSIDE_CWD_THRESHOLD
+            and result.plausibly_irreversible < SAFETY_IRREVERSIBLE_THRESHOLD
         )
         return SafetyOutcome(
             "allow" if safe else ("deny" if self.headless else "ask"),
@@ -1236,9 +1243,9 @@ class SafetyTier:
 def _triggering_judgment(result: jev.SafetyScoreResult) -> str:
     if result.call_confidence < SAFETY_CONFIDENCE:
         return "low_confidence"
-    if result.touches_outside_cwd >= NOUL_THRESHOLD:
+    if result.touches_outside_cwd >= SAFETY_OUTSIDE_CWD_THRESHOLD:
         return "touches paths outside cwd"
-    if result.plausibly_irreversible >= NOUL_THRESHOLD:
+    if result.plausibly_irreversible >= SAFETY_IRREVERSIBLE_THRESHOLD:
         return "plausibly irreversible"
     if result.score > SAFE_MAX:
         return "score_exceeds"
@@ -1265,8 +1272,9 @@ def _skip_reason(outcome: SafetyOutcome) -> str | None:
 
 
 __all__ = [
-    "NOUL_THRESHOLD",
     "SAFETY_CONFIDENCE",
+    "SAFETY_IRREVERSIBLE_THRESHOLD",
+    "SAFETY_OUTSIDE_CWD_THRESHOLD",
     "SAFE_MAX",
     "SHELL_TOOLS",
     "BrowserRiskEvidence",
