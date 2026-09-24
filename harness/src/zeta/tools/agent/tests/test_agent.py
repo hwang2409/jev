@@ -1629,6 +1629,105 @@ async def test_child_approval_cleanup_removes_pending_requests(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
+async def test_child_approval_force_ask_overrides_allow_rule(tmp_path: Path) -> None:
+    parent_store = ConversationStore(tmp_path / "sessions", session_id="parent")
+    policy = ApprovalPolicy(store=parent_store, always_allow={"bash"})
+    child_store = ConversationStore(tmp_path / "children", session_id="child")
+    child_policy = ChildApprovalPolicy(policy, child_store, "child", "child-1")
+    signal = AbortGenerationRegistry().new_generation()
+    task = asyncio.create_task(
+        child_policy.authorize(
+            ToolCall("forced", "bash", {"cmd": "echo forced"}),
+            signal,
+            force_ask=True,
+        )
+    )
+    await asyncio.sleep(0)
+    try:
+        assert not task.done()
+        pending = policy.pending_requests()
+        assert len(pending) == 1
+        assert pending[0].tool_call.id == "forced"
+        assert policy.deny(pending[0].key)
+        assert await task is ApprovalDecision.DENY
+    finally:
+        if not task.done():
+            signal.abort()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+async def test_child_approval_preserves_explicit_label(tmp_path: Path) -> None:
+    parent_store = ConversationStore(tmp_path / "sessions", session_id="parent")
+    policy = ApprovalPolicy(store=parent_store)
+    child_store = ConversationStore(tmp_path / "children", session_id="child")
+    child_policy = ChildApprovalPolicy(policy, child_store, "child", "child-1")
+    signal = AbortGenerationRegistry().new_generation()
+    task = asyncio.create_task(
+        child_policy.authorize(
+            ToolCall("labeled", "bash", {"cmd": "echo labeled"}),
+            signal,
+            label="keep this label",
+        )
+    )
+    await asyncio.sleep(0)
+    try:
+        assert not task.done()
+        pending = policy.pending_requests()
+        assert len(pending) == 1
+        assert pending[0].label == "keep this label"
+        assert policy.approve(pending[0].key)
+        assert await task is ApprovalDecision.ALLOW
+    finally:
+        if not task.done():
+            signal.abort()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "expected"),
+    [
+        ("approve", ApprovalDecision.ALLOW),
+        ("deny", ApprovalDecision.DENY),
+        ("abort", None),
+    ],
+)
+async def test_child_ephemeral_approval_resolves_without_persistence(
+    tmp_path: Path, action: str, expected: ApprovalDecision | None
+) -> None:
+    parent_store = ConversationStore(tmp_path / "sessions", session_id="parent")
+    policy = ApprovalPolicy(store=parent_store)
+    child_store = ConversationStore(tmp_path / "children", session_id="child")
+    child_policy = ChildApprovalPolicy(policy, child_store, "child", "child-1")
+    signal = AbortGenerationRegistry().new_generation()
+    task = asyncio.create_task(
+        child_policy.authorize(
+            ToolCall("ephemeral", "bash", {"cmd": "echo ephemeral"}),
+            signal,
+            persist_request=False,
+        )
+    )
+    await asyncio.sleep(0)
+    try:
+        assert not task.done()
+        pending = policy.pending_requests()
+        assert len(pending) == 1
+        request = pending[0]
+        assert request.key == ("child-1", "ephemeral")
+        assert child_store.approval_states() == {}
+        assert getattr(policy, action)(request.key)
+        assert await task is expected
+        assert child_store.approval_states() == {}
+        assert child_policy.approval_states() == {}
+        assert policy.pending_requests() == []
+    finally:
+        if not task.done():
+            signal.abort()
+        await asyncio.wait_for(task, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_child_policy_inherits_scoped_rules_and_delegates_prompts(
     tmp_path: Path,
 ) -> None:
