@@ -240,10 +240,28 @@ def _validate_preset(
     by = _string(chunking["by"], "chunking.by")
     if by not in CHUNKERS:
         raise PresetValidationError(f"chunking.by must be one of {sorted(CHUNKERS)}")
+    if "compatible_chunkers" not in root:
+        root["compatible_chunkers"] = [by]
+    compatible = _string_list(root["compatible_chunkers"], "compatible_chunkers")
+    if not compatible:
+        raise PresetValidationError("compatible_chunkers must not be empty")
+    if len(set(compatible)) != len(compatible):
+        raise PresetValidationError("compatible_chunkers must not contain duplicates")
+    unknown_chunkers = set(compatible) - CHUNKERS
+    if unknown_chunkers:
+        raise PresetValidationError(
+            f"compatible_chunkers contains unknown values: {sorted(unknown_chunkers)}"
+        )
+    if by not in compatible:
+        raise PresetValidationError("chunking.by must be in compatible_chunkers")
     allowed_settings = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[by]
-    if by == "para" and chunking.get("context_lines") == 0:
+    if by == "para" and "line" in compatible:
         allowed_settings |= {"context_lines"}
     _reject_unknown(chunking, allowed_settings, "chunking")
+    if schema != SCHEMA_V3 and "state" in compatible:
+        raise PresetValidationError(
+            f"state chunking requires schema {SCHEMA_V3!r}"
+        )
     validated_settings = CHUNKER_SETTINGS[by] | {"max_chunks"}
     if "context_lines" in allowed_settings:
         validated_settings |= {"context_lines"}
@@ -264,25 +282,6 @@ def _validate_preset(
     )
     for field_name, value in limits.items():
         _positive_integer(value, f"chunking.limits.{field_name}")
-
-    if "compatible_chunkers" not in root:
-        root["compatible_chunkers"] = [by]
-    compatible = _string_list(root["compatible_chunkers"], "compatible_chunkers")
-    if not compatible:
-        raise PresetValidationError("compatible_chunkers must not be empty")
-    if len(set(compatible)) != len(compatible):
-        raise PresetValidationError("compatible_chunkers must not contain duplicates")
-    unknown_chunkers = set(compatible) - CHUNKERS
-    if unknown_chunkers:
-        raise PresetValidationError(
-            f"compatible_chunkers contains unknown values: {sorted(unknown_chunkers)}"
-        )
-    if by not in compatible:
-        raise PresetValidationError("chunking.by must be in compatible_chunkers")
-    if schema != SCHEMA_V3 and "state" in compatible:
-        raise PresetValidationError(
-            f"state chunking requires schema {SCHEMA_V3!r}"
-        )
 
     questions = _mapping(root["questions"], "questions")
     if not questions:

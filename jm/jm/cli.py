@@ -315,6 +315,8 @@ def _calibration_command(
     cache_store: CacheStore | None,
 ) -> int:
     preset = resolve_preset_or_path(args.preset)
+    for diagnostic in preset.diagnostics:
+        _emit_diagnostic(diagnostic, stderr)
     tolerances = tolerances_for_preset(preset)
     overrides = {
         "threshold_margin": args.threshold_margin,
@@ -582,7 +584,7 @@ def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> N
 
 def resolve_preset_or_path(identifier: str) -> Preset:
     path = Path(identifier).expanduser()
-    if path.exists() or "/" in identifier:
+    if path.is_absolute() or path.parent != Path(".") or identifier.startswith("./"):
         return load_preset(path)
     return resolve_preset(identifier)
 
