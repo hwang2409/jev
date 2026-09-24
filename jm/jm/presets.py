@@ -15,7 +15,8 @@ from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
 
 SCHEMA = "jm.preset/v1"
 SCHEMA_V2 = "jm.preset/v2"
-CHUNKERS = frozenset({"line", "para", "hunk", "file", "record"})
+SCHEMA_V3 = "jm.preset/v3"
+CHUNKERS = frozenset({"line", "para", "hunk", "file", "record", "state"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 RESERVED_QUESTION_IDS = frozenset({"any", "all", "not"})
 _QUESTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -34,6 +35,8 @@ _REQUIRED_FIELDS = frozenset(
     }
 )
 _OPTIONAL_FIELDS = frozenset({"description", "calibration"})
+_PARAMETER_FIELDS = frozenset({"declared"})
+_PARAMETER_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
 _PREFILTER_FIELDS = frozenset(
     {"ranker", "top", "query_source", "fields", "query"}
 )
@@ -130,6 +133,14 @@ class Preset:
         return value if isinstance(value, Mapping) else None
 
     @property
+    def declared_parameters(self) -> tuple[str, ...]:
+        value = self.data.get("parameters")
+        if not isinstance(value, Mapping):
+            return ()
+        declared = value.get("declared")
+        return tuple(declared) if isinstance(declared, Sequence) else ()
+
+    @property
     def compatible_chunkers(self) -> tuple[str, ...]:
         return tuple(self.data["compatible_chunkers"])
 
@@ -148,12 +159,14 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     allowed_fields = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
     if schema == SCHEMA_V2:
         allowed_fields |= {"prefilter"}
+    elif schema == SCHEMA_V3:
+        allowed_fields |= {"parameters", "prefilter"}
     _reject_unknown(root, allowed_fields, "preset")
     _require_fields(root, _REQUIRED_FIELDS, "preset")
 
-    if root["schema"] not in {SCHEMA, SCHEMA_V2}:
+    if root["schema"] not in {SCHEMA, SCHEMA_V2, SCHEMA_V3}:
         raise PresetValidationError(
-            f"schema must be {SCHEMA!r} or {SCHEMA_V2!r}"
+            f"schema must be {SCHEMA!r}, {SCHEMA_V2!r}, or {SCHEMA_V3!r}"
         )
     _string(root["name"], "name")
     _string(root["version"], "version")
@@ -162,6 +175,12 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         _string(root["description"], "description")
     if "calibration" in root:
         _validate_calibration(root["calibration"])
+    if schema == SCHEMA_V3:
+        _validate_parameters(root.get("parameters"))
+    elif "parameters" in root:
+        raise PresetValidationError(
+            f"parameters requires schema {SCHEMA_V3!r}"
+        )
 
     chunking = _mapping(root["chunking"], "chunking")
     _reject_unknown(
@@ -202,6 +221,10 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
     if by not in compatible:
         raise PresetValidationError("chunking.by must be in compatible_chunkers")
+    if schema != SCHEMA_V3 and "state" in compatible:
+        raise PresetValidationError(
+            f"state chunking requires schema {SCHEMA_V3!r}"
+        )
 
     questions = _mapping(root["questions"], "questions")
     if not questions:
@@ -215,12 +238,12 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             raise PresetValidationError(
                 f"question ID {question_id!r} is reserved for policy keywords"
             )
-        _validate_question(question, question_id)
+        _validate_question(question, question_id, schema=schema)
 
     if "prefilter" in root:
-        if schema != SCHEMA_V2:
+        if schema not in {SCHEMA_V2, SCHEMA_V3}:
             raise PresetValidationError(
-                f"prefilter requires schema {SCHEMA_V2!r}"
+                f"prefilter requires schema {SCHEMA_V2!r} or {SCHEMA_V3!r}"
             )
         _validate_prefilter(root["prefilter"], questions)
 
@@ -459,8 +482,7 @@ def resolve_prefilter(
     top: int | None = None,
     fields: str | None = None,
     query: str | None = None,
-    invocation_query: str | None = None,
-    invocation_predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve preset and explicit prefilter values."""
     supplied = any(value is not None for value in (ranker, top, fields, query))
@@ -543,20 +565,22 @@ def resolve_prefilter(
         if not isinstance(resolved_query, str) or not resolved_query.strip():
             raise PresetUsageError("--prefilter-query is required")
     elif query_source == "context.query":
-        if not isinstance(invocation_query, str) or not invocation_query.strip():
+        parameter_query = (parameters or {}).get("query")
+        if not isinstance(parameter_query, str) or not parameter_query.strip():
             raise PresetUsageError(
                 "prefilter query_source context.query requires --query"
             )
-        resolved_query = invocation_query
+        resolved_query = parameter_query
     elif query_source == "context.predicate":
+        parameter_predicate = (parameters or {}).get("predicate")
         if (
-            not isinstance(invocation_predicate, str)
-            or not invocation_predicate.strip()
+            not isinstance(parameter_predicate, str)
+            or not parameter_predicate.strip()
         ):
             raise PresetUsageError(
                 "prefilter query_source context.predicate requires --predicate"
             )
-        resolved_query = invocation_predicate
+        resolved_query = parameter_predicate
     elif query_source == "literal":
         if not isinstance(resolved_query, str) or not resolved_query.strip():
             raise PresetUsageError("literal prefilter query must not be empty")
@@ -628,6 +652,20 @@ def _string_list(value: Any, field_name: str) -> list[str]:
     return result
 
 
+def _validate_parameters(value: Any) -> None:
+    parameters = _mapping(value, "parameters")
+    _reject_unknown(parameters, _PARAMETER_FIELDS, "parameters")
+    _require_fields(parameters, {"declared"}, "parameters")
+    declared = _string_list(parameters["declared"], "parameters.declared")
+    if len(set(declared)) != len(declared):
+        raise PresetValidationError("parameters.declared must not contain duplicates")
+    invalid = [name for name in declared if not _PARAMETER_NAME.fullmatch(name)]
+    if invalid:
+        raise PresetValidationError(
+            "parameters.declared contains invalid names: " f"{invalid!r}"
+        )
+
+
 def _positive_integer(value: Any, field_name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise PresetValidationError(f"{field_name} must be a positive integer")
@@ -638,7 +676,9 @@ def _nonnegative_integer(value: Any, field_name: str) -> None:
         raise PresetValidationError(f"{field_name} must be a non-negative integer")
 
 
-def _validate_question(value: Any, question_id: str) -> None:
+def _validate_question(
+    value: Any, question_id: str, *, schema: str = SCHEMA
+) -> None:
     question = _mapping(value, f"questions.{question_id}")
     _reject_unknown(
         question,
@@ -691,16 +731,32 @@ def _validate_question(value: Any, question_id: str) -> None:
             "to context.uid"
         )
     _string(instructions["focus"], f"questions.{question_id}.instructions.focus")
-    _validate_criteria(question["criteria"], question_type, question_id)
+    _validate_criteria(
+        question["criteria"],
+        question_type,
+        question_id,
+        allow_three_score_levels=schema == SCHEMA_V3,
+    )
 
 
-def _validate_criteria(value: Any, question_type: str, question_id: str) -> None:
+def _validate_criteria(
+    value: Any,
+    question_type: str,
+    question_id: str,
+    *,
+    allow_three_score_levels: bool = False,
+) -> None:
     field_name = f"questions.{question_id}.criteria"
     if question_type == "score":
         if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
             raise PresetValidationError(f"{field_name} must be a list for score")
-        if len(value) != 4:
-            raise PresetValidationError(f"{field_name} must have four score levels")
+        valid_lengths = {3, 4} if allow_three_score_levels else {4}
+        if len(value) not in valid_lengths:
+            raise PresetValidationError(
+                f"{field_name} must have "
+                f"{'three or four' if allow_three_score_levels else 'four'} "
+                "score levels"
+            )
         for index, criterion in enumerate(value):
             _validate_criterion(criterion, f"{field_name}[{index}]")
         return
