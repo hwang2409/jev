@@ -223,6 +223,29 @@ def test_canonical_records_preserve_each_typed_answer_shape() -> None:
     }
 
 
+def test_legacy_answer_json_keeps_null_confidence_field() -> None:
+    assert answers_to_dict(
+        {
+            "kind": ChoiceAnswer("yes", {"yes": 1.0}),
+            "risk": ScoreAnswer(1.0, probabilities={"1": 1.0}),
+        }
+    ) == {
+        "kind": {
+            "type": "choice",
+            "choice": "yes",
+            "probabilities": {"yes": 1.0},
+            "confidence": None,
+        },
+        "risk": {
+            "type": "score",
+            "score": 1.0,
+            "legend": {},
+            "probabilities": {"1": 1.0},
+            "confidence": None,
+        },
+    }
+
+
 def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
     meta = RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "miss")
     partial = PartialResultRecord(

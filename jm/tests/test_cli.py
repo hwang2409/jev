@@ -13,7 +13,7 @@ import httpx
 import pytest
 import yaml
 
-from jm.answers import JudgeResponse, NoulAnswer
+from jm.answers import ErrorResponse, JudgeResponse, NoulAnswer, ScoreAnswer
 from jm.api import GatewayClient
 from jm.cache import CacheStore
 from jm.cli import main
@@ -58,6 +58,27 @@ def _write_v3_state_preset(
     if prefilter is not None:
         data["prefilter"] = prefilter
     path = tmp_path / "v3-preset.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    return path
+
+
+def _write_v3_score_preset(tmp_path: Path) -> Path:
+    data = yaml.safe_load(
+        (ROOT / "jm" / "presets" / "diff-risk-heat.yml").read_text()
+    )
+    data["schema"] = "jm.preset/v3"
+    data["chunking"] = {
+        "by": "state",
+        "limits": data["chunking"]["limits"],
+    }
+    data["compatible_chunkers"] = ["state"]
+    data["parameters"] = {"declared": []}
+    data["questions"] = {"change_scope": data["questions"]["change_scope"]}
+    data["questions"]["change_scope"]["instructions"]["state_fields"] = [
+        "focus"
+    ]
+    data["thresholds"] = {"change_scope": {"type": "score", "fail_at_least": 2}}
+    path = tmp_path / "score-preset.yml"
     path.write_text(yaml.safe_dump(data), encoding="utf-8")
     return path
 
@@ -347,6 +368,153 @@ def test_compatible_by_override_and_filter_keep(tmp_path: Path) -> None:
     assert [record["record_type"] for record in records] == ["result", "coverage"]
     assert records[0]["meta"]["chunker"] == "line"
     assert stderr == "stdin#L1\t0.9\n"
+
+
+def test_policy_filter_reuses_typed_gate_grammar(tmp_path: Path) -> None:
+    code, records, stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--filter",
+            "policy",
+            "--filter-policy",
+            "any(matches_query.noul >= 0.75)",
+        ],
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+    assert code == 0
+    assert [record["record_type"] for record in records] == ["result", "coverage"]
+    assert stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("filter_args", "probabilities"),
+    [
+        (["--filter", "policy", "--filter-policy", "any(change_scope.score >= 2)"], {}),
+        (
+            ["--filter", "policy", "--filter-policy", "any(change_scope.score >= 2)"],
+            {"2.5": 1.0},
+        ),
+    ],
+)
+def test_score_filter_malformed_answers_are_operational_errors(
+    tmp_path: Path,
+    filter_args: list[str],
+    probabilities: dict[str, float],
+) -> None:
+    preset = _write_v3_score_preset(tmp_path)
+
+    def judge(*_args: object) -> JudgeResponse:
+        return JudgeResponse(
+            {"change_scope": ScoreAnswer(2.0, probabilities=probabilities)}
+        )
+
+    code, records, stderr = _invoke(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "state",
+            *filter_args,
+        ],
+        input_text='{"state_ref":"case-1","focus":"diff","context":{}}\n',
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert [record["record_type"] for record in records] == ["error", "coverage"]
+    assert records[0]["error"]["kind"] == "malformed_answer"
+    assert records[1]["coverage"] == "partial"
+    assert records[1]["coverage_counts"] == {
+        "discovered": 1,
+        "judged": 1,
+        "emitted": 1,
+        "skipped": 0,
+        "failed": 1,
+    }
+    assert records[1]["coverage_reasons"] == ["malformed_answer"]
+    assert "score answer requires" not in stderr
+
+
+@pytest.mark.parametrize(
+    ("scores", "expected_refs"),
+    [
+        ([0.9, 0.8, 0.2], ["stdin#L1", "stdin#L2"]),
+        ([0.2, 0.3], []),
+    ],
+)
+def test_policy_filter_handles_multiple_matches_and_no_matches(
+    tmp_path: Path,
+    scores: list[float],
+    expected_refs: list[str],
+) -> None:
+    def judge(state: State, *_args: object) -> JudgeResponse:
+        index = int(state.state_ref.rsplit("L", 1)[1]) - 1
+        return JudgeResponse({"matches_query": NoulAnswer(scores[index])})
+
+    code, records, _stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--by",
+            "line",
+            "--filter",
+            "policy",
+            "--filter-policy",
+            "any(matches_query.noul >= 0.75)",
+        ],
+        input_text="one\ntwo\nthree\n" if len(scores) == 3 else "one\ntwo\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 0
+    assert sorted(
+        record["state_ref"]
+        for record in records
+        if record["record_type"] == "result"
+    ) == sorted(expected_refs)
+    assert records[-1]["record_type"] == "coverage"
+    assert records[-1]["coverage"] == "complete"
+
+
+def test_policy_filter_keeps_mixed_error_records_visible(tmp_path: Path) -> None:
+    def judge(state: State, *_args: object) -> JudgeResponse | ErrorResponse:
+        if state.state_ref.endswith("L2"):
+            return ErrorResponse("temporary failure")
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    code, records, _stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--by",
+            "line",
+            "--filter",
+            "policy",
+            "--filter-policy",
+            "any(matches_query.noul >= 0.75)",
+        ],
+        input_text="one\ntwo\n",
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 2
+    assert {record["record_type"] for record in records} == {
+        "result",
+        "error",
+        "coverage",
+    }
+    error = next(record for record in records if record["record_type"] == "error")
+    assert error["error"]["kind"] == "api_error"
+    assert records[-1]["coverage"] == "partial"
 
 
 def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
@@ -1554,6 +1722,35 @@ def test_gate_uses_require_states_and_jsonl_stdout() -> None:
     assert records[-1]["record_type"] == "coverage"
     assert all(isinstance(record, dict) for record in records)
     assert stderr == ""
+
+
+def test_empty_hunk_gate_has_zero_complete_coverage_and_vacuous_truth() -> None:
+    code, records, stderr = _invoke(
+        [
+            "gate",
+            "--preset",
+            "diff-risk-heat",
+            "--by",
+            "hunk",
+            "--policy",
+            "any(change_scope.score >= 2)",
+            "--require-states",
+            "0",
+        ],
+        input_text="",
+        judge_fn=_judge,
+    )
+
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+    assert records[-1]["coverage_counts"] == {
+        "discovered": 0,
+        "judged": 0,
+        "emitted": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert stderr == "jm: no hunks found\n"
 
 
 def test_preset_and_cache_commands_have_non_judgment_stdout(tmp_path: Path) -> None:

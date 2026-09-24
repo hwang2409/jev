@@ -25,6 +25,7 @@ from jm.api import (
     MAX_WAIT_SECONDS,
     GatewayClient,
 )
+from jm.cache import CacheStore
 from jm.gates import PolicySyntaxError
 from jm.presets import (
     Preset,
@@ -35,11 +36,13 @@ from jm.presets import (
 )
 from jm.runner import (
     FakeJudge,
+    ResultFilter,
     Runner,
     State,
     StateAdmission,
     StateLimits,
     StateRejection,
+    _run_pipeline,
     admit_states,
     bm25_rank,
     tokenize,
@@ -213,6 +216,41 @@ def test_runner_records_gateway_served_model() -> None:
 
     assert result.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
     assert result.records[0].to_dict()["meta"]["served_model"] == "jev-1.13.0"
+
+
+@pytest.mark.parametrize("probabilities", [{}, {"2.5": 1.0}])
+def test_keep_filter_malformed_score_answers_emit_errors_and_coverage(
+    tmp_path: Path, probabilities: dict[str, float]
+) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    outcome = _run_pipeline(
+        resolve_preset("diff-risk-heat"),
+        [State("hunk#1", "diff", {"file": "x", "surrounding": ""})],
+        cache_store=CacheStore(tmp_path / "cache"),
+        judge_fn=lambda *_args: JudgeResponse(
+            {"change_scope": ScoreAnswer(2.0, probabilities=probabilities)}
+        ),
+        output_format="jsonl",
+        jsonl_stream=stdout,
+        pretty_stream=stderr,
+        result_filter=ResultFilter(
+            kind="keep",
+            question_id="change_scope",
+            operator=">=",
+            threshold=2,
+            expression=None,
+        ),
+        empty_input_error=False,
+    )
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert [record["record_type"] for record in records] == ["error", "coverage"]
+    assert records[0]["error"]["kind"] == "malformed_answer"
+    assert records[-1]["coverage"] == "partial"
+    assert records[-1]["coverage_reasons"] == ["malformed_answer"]
+    assert outcome.emitted.coverage is not None
+    assert outcome.emitted.coverage.coverage == "partial"
 
 
 def test_default_concurrency_is_four() -> None:
@@ -506,7 +544,9 @@ def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
             {
                 "match": NoulAnswer(next(values)),
                 "kind": ChoiceAnswer(next(kinds)),
-                "risk": ScoreAnswer(next(risks)),
+                "risk": ScoreAnswer(
+                    next(risks), probabilities={str(len(uids)): 1.0}
+                ),
             },
             usage={"input_tokens": 10, "output_tokens": 2},
         )
