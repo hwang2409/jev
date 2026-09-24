@@ -128,8 +128,8 @@ clean. Real Arc-3 data needs a separate category ambiguity evaluation.
 
 ## Transport and Choice limit
 
-Flat 503 attempts by size were 2, 3, 2, 9, 28, and 47. Hierarchical 503
-attempts were 3, 7, 1, 0, 2, and 1. Retries stayed inside the global throttle.
+Flat 503 attempts by size were 0, 2, 2, 9, 28, and 47. Hierarchical 503
+attempts were 0, 0, 1, 0, 2, and 1. Retries stayed inside the global throttle.
 Final route errors count only requests that exhausted their retry budget.
 
 | Options | Corrected run result |
