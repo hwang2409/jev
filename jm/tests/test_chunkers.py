@@ -420,7 +420,7 @@ def test_hunk_invalid_utf8_is_not_repaired_or_judged() -> None:
     )
 
     assert result.rejections[0].reason == "input_error"
-    assert "byte=40" in result.rejections[0].source_ref
+    assert result.rejections[0].source_ref == "stdin:byte=37,line=5"
     assert "\ufffd" not in "".join(state.focus for state in result.formed)
 
 
@@ -444,8 +444,39 @@ def test_invalid_hunk_body_is_an_input_error_and_does_not_swallow_next_hunk() ->
 
     assert [state.context["file"] for state in result.formed] == ["one.py", "two.py"]
     assert result.rejections[0].reason == "input_error"
-    assert result.rejections[0].source_ref == "stdin:line=5"
+    assert result.rejections[0].source_ref == "stdin:byte=47,line=5"
     assert result.discovered == result.judged == 2
+
+
+def test_excess_body_line_does_not_swallow_the_next_raw_file_headers() -> None:
+    diff = (
+        "--- a/one.py\n+++ b/one.py\n@@ -1,2 +1,1 @@\n-old\n+new\n"
+        "+excess\n--- a/two.py\n+++ b/two.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert [state.context["file"] for state in result.formed] == [
+        "one.py",
+        "two.py",
+    ]
+    assert result.rejections[0].reason == "input_error"
+    assert result.rejections[0].source_ref == "stdin:byte=52,line=6"
+
+
+def test_raw_file_headers_after_completed_counts_are_reprocessed() -> None:
+    diff = (
+        "--- a/one.py\n+++ b/one.py\n@@ -1 +1 @@\n-old\n+new\n"
+        "--- a/two.py\n+++ b/two.py\n@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert [state.context["file"] for state in result.formed] == [
+        "one.py",
+        "two.py",
+    ]
 
 
 def test_wrong_hunk_counts_reject_a_following_file_header() -> None:

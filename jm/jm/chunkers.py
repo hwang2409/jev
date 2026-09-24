@@ -438,25 +438,31 @@ _NO_NEWLINE_MARKER = r"\ No newline at end of file"
 def _strict_hunk_lines(
     diff: str | bytes,
     rejections: list[StateRejection] | None,
-) -> Iterable[tuple[int, str | None]]:
+) -> Iterable[tuple[int, int, str | None]]:
     if isinstance(diff, str):
-        yield from enumerate(diff.splitlines(), start=1)
+        offset = 0
+        for line_number, raw_line in enumerate(
+            diff.splitlines(keepends=True), start=1
+        ):
+            line = raw_line.rstrip("\r\n")
+            yield line_number, offset, line
+            offset += len(raw_line.encode("utf-8"))
         return
 
     offset = 0
     for line_number, raw_line in enumerate(diff.splitlines(keepends=True), start=1):
         try:
             line = raw_line.decode("utf-8")
-        except UnicodeDecodeError as exc:
+        except UnicodeDecodeError:
             _input_error(
                 rejections,
                 f"hunk input line {line_number} is not valid UTF-8",
-                f"stdin:byte={offset + exc.start},line={line_number}",
+                f"stdin:byte={offset},line={line_number}",
             )
             line = None
         else:
             line = line.rstrip("\r\n")
-        yield line_number, line
+        yield line_number, offset, line
         offset += len(raw_line)
 
 
@@ -477,6 +483,9 @@ def chunk_hunk(
     new_remaining = 0
     no_newline_seen = False
     last_line_number = 0
+    input_byte_length = (
+        len(diff.encode("utf-8")) if isinstance(diff, str) else len(diff)
+    )
 
     def finish_hunk() -> None:
         nonlocal current_header, current_body, old_remaining, new_remaining
@@ -487,29 +496,43 @@ def chunk_hunk(
         old_remaining = 0
         new_remaining = 0
 
-    for line_number, line in _strict_hunk_lines(diff, _rejections):
+    for line_number, byte_offset, line in _strict_hunk_lines(diff, _rejections):
         last_line_number = line_number
         if line is None:
             finish_hunk()
             no_newline_seen = False
             continue
         if current_header is not None:
-            if old_remaining or new_remaining:
+            if old_remaining > 0 or new_remaining > 0:
                 if not line.startswith((" ", "+", "-")) and line != _NO_NEWLINE_MARKER:
                     _input_error(
                         _rejections,
                         "invalid unified diff hunk body line",
-                        f"stdin:line={line_number}",
+                        f"stdin:byte={byte_offset},line={line_number}",
                     )
                     finish_hunk()
-                else:
+                elif line == _NO_NEWLINE_MARKER:
                     current_body.append(line)
-                    if line != _NO_NEWLINE_MARKER:
+                    no_newline_seen = True
+                    continue
+                else:
+                    excess = (
+                        line.startswith((" ", "-")) and old_remaining == 0
+                    ) or (line.startswith((" ", "+")) and new_remaining == 0)
+                    if excess:
+                        _input_error(
+                            _rejections,
+                            "extra unified diff hunk body line",
+                            f"stdin:byte={byte_offset},line={line_number}",
+                        )
+                        finish_hunk()
+                    else:
+                        current_body.append(line)
                         if line.startswith((" ", "-")):
                             old_remaining -= 1
                         if line.startswith((" ", "+")):
                             new_remaining -= 1
-                    continue
+                        continue
             elif line == _NO_NEWLINE_MARKER and not no_newline_seen:
                 current_body.append(line)
                 no_newline_seen = True
@@ -518,7 +541,7 @@ def chunk_hunk(
                 _input_error(
                     _rejections,
                     "extra unified diff hunk body line",
-                    f"stdin:line={line_number}",
+                    f"stdin:byte={byte_offset},line={line_number}",
                 )
                 finish_hunk()
             else:
@@ -539,11 +562,11 @@ def chunk_hunk(
             new_remaining = int(match.group(4) or "1")
             no_newline_seen = False
     if current_header is not None:
-        if old_remaining or new_remaining:
+        if old_remaining > 0 or new_remaining > 0:
             _input_error(
                 _rejections,
                 "unified diff hunk body ended before the declared counts",
-                f"stdin:line={last_line_number + 1}",
+                f"stdin:byte={input_byte_length},line={last_line_number + 1}",
             )
         finish_hunk()
 
