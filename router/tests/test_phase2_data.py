@@ -36,7 +36,7 @@ SCHEMA = {
 
 
 def load_evalset(name):
-    lines = Path(name).read_text().strip().splitlines()
+    lines = (Path(__file__).parents[1] / name).read_text().strip().splitlines()
     return [json.loads(line) for line in lines]
 
 
