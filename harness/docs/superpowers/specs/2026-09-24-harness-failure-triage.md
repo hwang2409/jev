@@ -57,7 +57,7 @@ This is a dependent check for the child approval lane. Do not patch the assertio
 
 | node | observed error | root cause | verdict | minimal fix shape |
 | --- | --- | --- | --- | --- |
-| harness/tests/test_import_boundaries.py::test_import_boundaries | seven forbidden imports are reported | the test has fixed architectural buckets. Current source still imports provider code from core and tools, and runtime/headless.py imports zeta.tui.app | needs a product decision | either move shared/runtime code behind framework-neutral modules, or add narrowly justified exceptions with owner, reason, and a removal test |
+| harness/tests/test_import_boundaries.py::test_import_boundaries | seven forbidden imports are reported | the test has fixed architectural buckets. Current source still imports provider code from core and tools, and runtime/headless.py imports zeta.tui.app | decoupling required | move shared/runtime code behind framework-neutral modules and remove every forbidden import; any policy change belongs in a separate proposal |
 
 The exact observed violations are:
 
@@ -69,7 +69,7 @@ The exact observed violations are:
     tools/browser/__init__.py:18: zeta.providers
     tools/browser/gates.py:8: zeta.providers
 
-The addendum calls out four post-reorganization violations. The most direct example is runtime/headless.py:82. The scanner currently reports seven, so the fix lane must first separate the four stage-4 relocation cases from the older provider imports. The decision is whether headless must be decoupled from tui, or whether these imports become explicit exceptions.
+The addendum calls out four post-reorganization violations. The most direct example is runtime/headless.py:82. The scanner currently reports seven, so the fix lane must first separate the four stage-4 relocation cases from the older provider imports. Headless must be decoupled from tui, and every forbidden import must be removed. Any policy change belongs in a separate proposal, not this ladder.
 
 ### attachments: 3 failures
 
