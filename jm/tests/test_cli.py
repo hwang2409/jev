@@ -43,6 +43,18 @@ class BinaryStdin:
         self.buffer = io.BytesIO(value)
 
 
+class ResultEventStream(io.StringIO):
+    def __init__(self) -> None:
+        super().__init__()
+        self.result_written = threading.Event()
+
+    def write(self, value: str) -> int:
+        written = super().write(value)
+        if '"record_type":"result"' in value:
+            self.result_written.set()
+        return written
+
+
 def _write_v3_state_preset(
     tmp_path: Path,
     *,
@@ -333,7 +345,10 @@ def _filter_judge(*_args) -> JudgeResponse:
     return JudgeResponse({"satisfies_predicate": NoulAnswer(0.9)})
 
 
-def test_jfilter_input_emission_preserves_original_json_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("filter_args", [[], ["--filter", "keep"]])
+def test_jfilter_input_emission_defaults_to_matching_records(
+    tmp_path: Path, filter_args: list[str]
+) -> None:
     raw = (
         b'{"id":"one",  "value":"\\u0061", "nested": {"b": 2, "a": 1}}\n'
         b'{"id":"two", "value":"other"}\n'
@@ -341,20 +356,220 @@ def test_jfilter_input_emission_preserves_original_json_bytes(tmp_path: Path) ->
     stdout = io.StringIO()
     stderr = io.StringIO()
 
+    def judge(state: State, *_args: object) -> JudgeResponse:
+        score = 0.9 if state.state_ref == "one" else 0.1
+        return JudgeResponse({"satisfies_predicate": NoulAnswer(score)})
+
     code = main(
-        ["jfilter", "--predicate", "needle", "--emit=input"],
+        ["jfilter", "--predicate", "needle", "--emit=input", *filter_args],
         stdin=BinaryStdin(raw),
         stdout=stdout,
         stderr=stderr,
-        judge_fn=_filter_judge,
+        judge_fn=judge,
         cache_store=CacheStore(tmp_path),
     )
 
     assert code == 0
-    assert set(stdout.getvalue().splitlines()) == set(raw.decode().splitlines())
+    assert stdout.getvalue() == raw.splitlines(keepends=True)[0].decode()
     assert [
         json.loads(line)["record_type"] for line in stderr.getvalue().splitlines()
     ] == ["coverage"]
+
+
+@pytest.mark.parametrize("by", ["record", "file"])
+@pytest.mark.parametrize("emit_args", [[], ["--emit=input"]])
+def test_jfilter_output_modes_keep_judgment_behavior(
+    tmp_path: Path, by: str, emit_args: list[str]
+) -> None:
+    input_text = (
+        '{"id":"one","path":"src/one.txt","content":"match"}\n'
+        '{"id":"two","path":"src/two.txt","content":"other"}\n'
+    )
+    calls: list[str] = []
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    def judge(state: State, *_args: object) -> JudgeResponse:
+        calls.append(state.state_ref)
+        score = 0.9 if "match" in state.focus else 0.1
+        return JudgeResponse({"satisfies_predicate": NoulAnswer(score)})
+
+    code = main(
+        [
+            "jfilter",
+            "--predicate",
+            "needle",
+            "--by",
+            by,
+            *emit_args,
+        ],
+        stdin=io.StringIO(input_text),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / f"{by}-{len(emit_args)}"),
+    )
+
+    assert code == 0
+    expected_calls = (
+        {"one", "two"}
+        if by == "record"
+        else {"src/one.txt", "src/two.txt"}
+    )
+    assert set(calls) == expected_calls
+    streams = [stdout, stderr] if emit_args else [stdout]
+    coverage_lines = [
+        json.loads(line)
+        for stream in streams
+        for line in stream.getvalue().splitlines()
+        if line.startswith("{") and '"record_type":"coverage"' in line
+    ]
+    assert coverage_lines[0]["coverage_counts"] == {
+        "discovered": 2,
+        "emitted": 2,
+        "failed": 0,
+        "judged": 2,
+        "skipped": 0,
+    }
+
+
+def test_jfilter_input_emission_rejects_output_path(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jfilter",
+            "--predicate",
+            "needle",
+            "--emit=input",
+            "--output",
+            str(tmp_path / "results.jsonl"),
+        ],
+        stdin=io.StringIO('{"id":"one"}\n'),
+        stdout=io.StringIO(),
+        stderr=stderr,
+        judge_fn=_filter_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 64
+    assert "--emit=input cannot be combined with --output" in stderr.getvalue()
+
+
+def test_jfilter_input_emission_maps_partial_results_to_errors(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    def judge(*_args: object) -> JudgeResponse:
+        return JudgeResponse({}, ("satisfies_predicate",))
+
+    code = main(
+        ["jfilter", "--predicate", "needle", "--emit=input"],
+        stdin=io.StringIO('{"id":"one"}\n'),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    records = [json.loads(line) for line in stderr.getvalue().splitlines()]
+    assert code == 2
+    assert stdout.getvalue() == ""
+    assert [record["record_type"] for record in records] == ["error", "coverage"]
+    assert records[0]["error"]["kind"] == "partial_answer"
+    assert records[1]["coverage"] == "partial"
+
+
+@pytest.mark.parametrize("release_ref", ["stdin#L1", "stdin#L2", "stdin#L3"])
+def test_judgment_output_streams_before_all_calls_finish(
+    tmp_path: Path, release_ref: str
+) -> None:
+    started = {ref: threading.Event() for ref in ("stdin#L1", "stdin#L2", "stdin#L3")}
+    release = {ref: threading.Event() for ref in started}
+    stdout = ResultEventStream()
+    stderr = io.StringIO()
+    result: list[int] = []
+
+    def judge(state: State, *_args: object) -> JudgeResponse:
+        started[state.state_ref].set()
+        release[state.state_ref].wait(timeout=3)
+        return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+    def run() -> None:
+        result.append(
+            main(
+                ["jgrep", "--query", "launch", "--by", "line"],
+                stdin=io.StringIO("one\ntwo\nthree\n"),
+                stdout=stdout,
+                stderr=stderr,
+                judge_fn=judge,
+                cache_store=CacheStore(tmp_path),
+            )
+        )
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert all(event.wait(timeout=1) for event in started.values())
+        release[release_ref].set()
+        assert stdout.result_written.wait(timeout=0.4)
+    finally:
+        for event in release.values():
+            event.set()
+        thread.join(timeout=2)
+
+    assert not thread.is_alive()
+    assert result == [0]
+
+
+def test_judgment_output_streams_through_real_head_subprocess() -> None:
+    script = """
+import sys
+import threading
+
+from jm.answers import JudgeResponse, NoulAnswer
+from jm.cli import main
+
+release = threading.Event()
+
+def judge(state, *_args):
+    if state.state_ref == "stdin#L2":
+        release.wait(timeout=30)
+    return JudgeResponse({"matches_query": NoulAnswer(0.9)})
+
+raise SystemExit(main(
+    ["jgrep", "--query", "launch", "--by", "line"],
+    stdin=sys.stdin,
+    stdout=sys.stdout,
+    stderr=sys.stderr,
+    judge_fn=judge,
+))
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", script],
+        cwd=ROOT,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert process.stdin is not None
+        assert process.stdout is not None
+        process.stdin.write("one\ntwo\n")
+        process.stdin.close()
+        first_line = subprocess.run(
+            ["head", "-1"],
+            stdin=process.stdout,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=2,
+        )
+        assert json.loads(first_line.stdout)["record_type"] == "result"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+        process.wait(timeout=2)
 
 
 def test_jfilter_file_input_emission_uses_normalized_paths(tmp_path: Path) -> None:
@@ -879,6 +1094,25 @@ def test_jgrep_consistency_repeats_and_reports_cost(tmp_path: Path) -> None:
     assert "live calls: 2" in stderr
 
 
+def test_consistency_metrics_sum_live_latency(tmp_path: Path) -> None:
+    def judge(*_args: object) -> JudgeResponse:
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)},
+            usage={"input_tokens": 4, "output_tokens": 2},
+            latency_ms=7,
+        )
+
+    code, records, _stderr = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2", "--metrics"],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert records[0]["meta"]["latency_ms"] == 14
+    assert records[-1]["latency_ms_total"] == 14
+
+
 def test_main_serializes_consistency_retries(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     attempts_by_state: dict[str, int] = {}
@@ -952,6 +1186,7 @@ def test_main_reports_mixed_consistency_cache_counts(
     import jm.runner as runner_module
 
     uids = iter(("first", "second"))
+    response_calls = 0
 
     def repeat_state(state):
         context = dict(state.context)
@@ -960,23 +1195,54 @@ def test_main_reports_mixed_consistency_cache_counts(
 
     monkeypatch.setattr(runner_module, "_repeat_state", repeat_state)
     store = CacheStore(tmp_path / "cache")
+    def judge(*_args: object) -> JudgeResponse:
+        nonlocal response_calls
+        response_calls += 1
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)},
+            usage={"input_tokens": 4, "output_tokens": 2},
+            latency_ms=7,
+        )
+
     first = _invoke(
         ["jgrep", "--query", "launch", "--consistency", "2"],
-        judge_fn=_judge,
+        judge_fn=judge,
         cache_store=store,
     )
     assert first[0] == 0
 
     uids = iter(("first", "third"))
     second = _invoke(
-        ["jgrep", "--query", "launch", "--consistency", "2"],
-        judge_fn=_judge,
+        ["jgrep", "--query", "launch", "--consistency", "2", "--metrics"],
+        judge_fn=judge,
         cache_store=store,
     )
 
     assert second[0] == 0
     assert "cache hits: 1" in second[2]
     assert "live calls: 1" in second[2]
+    assert response_calls == 3
+    assert second[1][0]["meta"]["usage"] == {
+        "input_tokens": 8,
+        "output_tokens": 4,
+    }
+    assert second[1][0]["meta"]["latency_ms"] == 7
+    assert second[1][-1]["usage_totals"] == {
+        "input_tokens": 8,
+        "output_tokens": 4,
+    }
+    assert second[1][-1]["latency_ms_total"] == 7
+
+    uids = iter(("first", "second"))
+    cached = _invoke(
+        ["jgrep", "--query", "launch", "--consistency", "2", "--metrics"],
+        judge_fn=judge,
+        cache_store=store,
+    )
+    assert cached[0] == 0
+    assert response_calls == 3
+    assert cached[1][0]["meta"]["latency_ms"] == 0
+    assert cached[1][-1]["latency_ms_total"] == 0
 
 
 def test_gate_consistency_is_indeterminate_on_an_interval_edge(

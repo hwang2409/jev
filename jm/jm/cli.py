@@ -325,15 +325,8 @@ def _judgment_command(
     preset_name = getattr(args, "short_preset", None) or args.preset
     preset = resolve_preset_or_path(preset_name)
     _validate_consistency_options(args, preset)
-    if (
-        args.emit == "input"
-        and args.command == "jfilter"
-        and args.by == "file"
-        and "file" not in preset.compatible_chunkers
-    ):
-        data = copy.deepcopy(dict(preset.data))
-        data["compatible_chunkers"] = [*preset.compatible_chunkers, "file"]
-        preset = Preset(validate_preset(data), preset.path)
+    if args.emit == "input" and args.output is not None:
+        raise _UsageError("--emit=input cannot be combined with --output")
     by = resolve_chunker(preset, args.by)
     if args.emit == "input" and (
         args.command != "jfilter" or by not in {"record", "file"}
@@ -421,7 +414,7 @@ def _judgment_command(
 
     effective_preset = _with_chunker(effective_preset, by)
     result_filter = _result_filter(
-        args.filter,
+        "keep" if args.emit == "input" and args.filter is None else args.filter,
         args.filter_policy or inline_filter_policy,
         effective_preset,
     )

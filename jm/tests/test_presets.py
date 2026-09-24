@@ -35,7 +35,7 @@ BUILTINS = ("jgrep", "jfilter", "diff-risk-heat")
 def test_builtins_have_expected_metadata_and_batteries() -> None:
     expected = {
         "jgrep": ("para", ("line", "para", "file"), 1, {"noul"}),
-        "jfilter": ("record", ("record",), 1, {"noul"}),
+        "jfilter": ("record", ("record", "file"), 1, {"noul"}),
         "diff-risk-heat": ("hunk", ("hunk",), 9, {"noul", "score"}),
     }
     for name in BUILTINS:

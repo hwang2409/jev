@@ -15,6 +15,7 @@ ErrorKind = Literal[
     "input_error",
     "prefiltered",
     "heading_only",
+    "partial_answer",
 ]
 CoverageStatus = Literal["complete", "partial"]
 CoverageReason = Literal[
@@ -222,6 +223,7 @@ class ErrorDetail:
             "input_error",
             "prefiltered",
             "heading_only",
+            "partial_answer",
         }:
             raise ValueError(f"unknown error kind: {self.kind}")
         if self.attempts < 0:
@@ -316,7 +318,7 @@ class ErrorRecord:
     source_ref: str | None = None
 
     def __post_init__(self) -> None:
-        if self.error.kind in {"api_error", "malformed_answer"}:
+        if self.error.kind in {"api_error", "malformed_answer", "partial_answer"}:
             if self.state_ref is None or self.source_ref is not None:
                 raise ValueError("judgment errors require only a state reference")
         elif self.error.kind == "input_error":

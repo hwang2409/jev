@@ -1627,6 +1627,15 @@ def _emit_core(
                             + "\n"
                         )
                 else:
+                    if emit_mode == "input" and isinstance(record, PartialResultRecord):
+                        record = ErrorRecord(
+                            record.state_ref,
+                            ErrorDetail(
+                                "partial_answer",
+                                "incomplete judgment cannot be emitted as input",
+                            ),
+                            record.meta,
+                        )
                     record_sink = (
                         pretty_stream
                         if emit_mode == "input"
@@ -2090,12 +2099,20 @@ def _aggregate_responses(
             },
         )
     usage: dict[str, int | float] = {}
+    latency_ms = 0
+    has_latency = False
     for response in responses:
         _add_usage(usage, response.usage)
+        if isinstance(response.latency_ms, (int, float)) and not isinstance(
+            response.latency_ms, bool
+        ):
+            latency_ms += response.latency_ms
+            has_latency = True
     return JudgeResponse(
         answers=answers,
         served_model=first.served_model,
         usage=usage or None,
+        latency_ms=latency_ms if has_latency else None,
     )
 
 
