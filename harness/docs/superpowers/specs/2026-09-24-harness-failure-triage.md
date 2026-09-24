@@ -247,15 +247,29 @@ Files: harness/src/zeta/runtime/loop.py and direct loop, router, attachment, sla
 
 Verify with the module-limit node and focused tests for loop activation, router persistence, attachments, slash status, and steering.
 
-#### lane 6d: split crowded test directories
+#### lane 6d: reduce the core file count
 
-Scope: move tests from core, tui, and tools/agent/tests into narrower packages without changing production imports.
+Scope: reduce the number of files directly under harness/src/zeta/core/ from 18 to at most 17 without changing production behavior or imports.
 
-Files: harness/src/zeta/core/, harness/src/zeta/tui/, and harness/src/zeta/tools/agent/tests/.
+Files: harness/src/zeta/core/.
 
-Verify with the module-limit node, import-boundary node, and each moved test file from its new path.
+Verify with harness/tests/test_module_limits.py::test_module_limits, harness/tests/test_import_boundaries.py::test_import_boundaries, harness/tests/test_store.py, harness/tests/test_safety.py, and harness/tests/test_context.py.
 
-The tests leave module-limit test placement open. Decide whether test files move or a narrow, documented test-only exception is safer after each sub-lane proves its import and state behavior.
+#### lane 6e: reduce the tui file count
+
+Scope: reduce the number of files directly under harness/src/zeta/tui/ from 18 to at most 17 without changing production behavior or imports.
+
+Files: harness/src/zeta/tui/.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits, harness/tests/test_import_boundaries.py::test_import_boundaries, harness/tests/test_tui.py, harness/tests/test_transcript_paint.py, harness/tests/test_theme_and_keys.py, and harness/tests/test_todo_tui.py.
+
+#### lane 6f: split the agent test module
+
+Scope: split harness/src/zeta/tools/agent/tests/test_agent.py into narrower test modules by behavior, reducing it from 3256 lines without changing test coverage or production imports.
+
+Files: harness/src/zeta/tools/agent/tests/test_agent.py and the new test modules beside it.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits and every resulting test module under harness/src/zeta/tools/agent/tests/.
 
 ### lane 7: make router fixture paths cwd-independent
 
@@ -269,7 +283,7 @@ Verify both files from the repository root and from router/.
 
 ### lane 8: import-boundary policy after stage 4
 
-Scope: isolate the four post-reorganization violations, then address the remaining provider imports if the policy requires it.
+Scope: decouple every forbidden import reported by the boundary test, including runtime -> tui, after stage 4.
 
 Files: harness/tests/test_import_boundaries.py, harness/src/zeta/runtime/headless.py, core provider seams, and browser/route tool modules.
 
@@ -277,7 +291,7 @@ Risk: high. Import direction is a system-wide architecture constraint.
 
 Verify the exact import-boundary node and fresh-process imports for headless, core, route, and browser code.
 
-Henry decision: decouple the imports, or codify narrow exceptions with a written owner and removal condition. This lane may depend on lane 3.
+The test policy in harness/tests/test_import_boundaries.py:10-18,135-142 already forbids runtime -> tui. Decoupling is required for that case. The other reported imports are also forbidden by the test's buckets; no exception decision is open in this ladder. Any policy change belongs in a separate proposal, not this ladder. This lane may depend on lane 3.
 
 ### appendix lane: realistic-eval calibration
 
@@ -299,4 +313,4 @@ The following commands were run during this triage.
 4. `uv run --project harness --frozen pytest -q --tb=short harness/tests/test_server.py -k 'approval'`. Outcome: 1 failed, 10 passed, 189 deselected.
 5. `uv run --project harness --frozen pytest -q --tb=short --maxfail=1 harness/tests/test_headless.py::test_print_mode_runs_session_hook_inside_async_activation`. Outcome: 1 failed in 10.38 seconds because the embedded subprocess exceeded its 10-second timeout. The failure is in the auto-route path before the fake backend.
 6. `timeout 120s uv run --project harness --frozen pytest -q --tb=short harness/tests/test_headless.py::test_headless_hard_denies_argument_scoped_ask_rules`. Outcome: passed in 53.91 seconds. This was the only run of the required nondeterministic probe; it is known nondeterministic, not reproduced this run.
-7. `uv run --project router --frozen pytest -q --tb=short router/tests`. Outcome from the repository root: 6 failed, 48 passed. The same suite from router/ produced 54 passes because of cwd-dependent paths.
+7. `uv run --project router --frozen pytest -q --tb=short router/tests/test_evalset.py router/tests/test_phase2_data.py`. Outcome from the repository root: 6 failed, 4 passed. These are the two affected files; the same files from router/ pass because of cwd-dependent paths.
