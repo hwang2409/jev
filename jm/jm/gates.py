@@ -188,6 +188,10 @@ def evaluate_gate(
         return GateResult(
             2, False, True, judged, required_states, "indeterminate consistency"
         )
+    except ValueError:
+        return GateResult(
+            2, False, True, judged, required_states, "indeterminate answer"
+        )
     return GateResult(1 if failed else 0, failed, False, judged, required_states)
 
 

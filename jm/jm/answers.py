@@ -60,19 +60,26 @@ type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer
 def score_argmax(answer: ScoreAnswer) -> int | float:
     """Return the highest level among the most likely score levels."""
     if not answer.probabilities:
-        value = float(answer.score)
-        return int(value) if value.is_integer() else value
+        raise ValueError("score answer requires a non-empty probability map")
 
-    def level_order(key: str) -> tuple[int | float, str]:
+    levels: dict[str, int] = {}
+    for key, probability in answer.probabilities.items():
+        if not isinstance(key, str):
+            raise ValueError("score probability keys must be strings")
         try:
             value = float(key)
-        except ValueError:
-            return float("-inf"), key
-        return value, key
-
-    if any(not level_order(key)[0].is_integer() for key in answer.probabilities):
-        value = float(answer.score)
-        return int(value) if value.is_integer() else value
+        except (TypeError, ValueError) as exc:
+            raise ValueError("score probability keys must be integers") from exc
+        if not math.isfinite(value) or not value.is_integer():
+            raise ValueError("score probability keys must be integers")
+        if (
+            isinstance(probability, bool)
+            or not isinstance(probability, (int, float))
+            or not math.isfinite(float(probability))
+            or probability < 0
+        ):
+            raise ValueError("score probabilities must be finite and non-negative")
+        levels[key] = int(value)
 
     best_probability = max(answer.probabilities.values())
     candidates = [
@@ -80,9 +87,8 @@ def score_argmax(answer: ScoreAnswer) -> int | float:
         for key, probability in answer.probabilities.items()
         if probability == best_probability
     ]
-    selected = max(candidates, key=level_order)
-    value = level_order(selected)[0]
-    return int(value) if value.is_integer() else value
+    selected = max(candidates, key=lambda key: levels[key])
+    return levels[selected]
 
 
 @dataclass(frozen=True, slots=True)
@@ -414,9 +420,8 @@ def answer_to_dict(answer: Answer) -> dict[str, Any]:
             "type": "choice",
             "choice": answer.choice,
             "probabilities": dict(answer.probabilities),
+            "confidence": answer.confidence,
         }
-        if answer.confidence is not None:
-            result["confidence"] = answer.confidence
         return result
     if isinstance(answer, ScoreAnswer):
         result = {
@@ -424,9 +429,8 @@ def answer_to_dict(answer: Answer) -> dict[str, Any]:
             "score": answer.score,
             "legend": dict(answer.legend),
             "probabilities": dict(answer.probabilities),
+            "confidence": answer.confidence,
         }
-        if answer.confidence is not None:
-            result["confidence"] = answer.confidence
         return result
     raise TypeError(f"unsupported answer type: {type(answer).__name__}")
 

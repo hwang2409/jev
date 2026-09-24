@@ -5,7 +5,6 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, TextIO
@@ -13,6 +12,7 @@ from typing import Any, TextIO
 from .answers import (
     Answer,
     ChoiceAnswer,
+    DiagnosticRecord,
     ErrorResponse,
     JudgeResponse,
     NoulAnswer,
@@ -23,7 +23,7 @@ from .answers import (
 )
 from .cache import CacheEntry, CacheStore, battery_hash, canonical_json_bytes
 from .presets import Preset
-from .runner import State, _repeat_state
+from .runner import SharedScheduler, State, _repeat_state
 
 CALIBRATION_SCHEMA = "jm.calibration/v3"
 
@@ -76,7 +76,6 @@ def run_calibration(
         or concurrency <= 0
     ):
         raise CalibrationOperationalError("concurrency must be a positive integer")
-    effective_concurrency = min(concurrency, 8)
     try:
         entries = _load_entries(preset, cache_store)
         states = tuple(_state_for_entry(entry, preset) for entry in entries)
@@ -122,114 +121,129 @@ def run_calibration(
     operational_error: str | None = None
     completed_cases = 0
     comparison_count = 0
-    candidate_jobs = {}
-    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
-        for case_index, state in enumerate(states):
-            for repeat_index in range(resolved.repeats):
-                candidate_jobs[(case_index, repeat_index)] = executor.submit(
-                    _candidate_call,
-                    judge_fn,
-                    _repeat_state(state),
-                    preset,
-                )
+    scheduler = SharedScheduler(concurrency, observer_target=judge_fn)
+    for diagnostic in scheduler.take_diagnostics():
+        _write_scheduler_diagnostic(diagnostic, errors)
+    candidate_tasks = [
+        lambda state=_repeat_state(state): _candidate_call(judge_fn, state, preset)
+        for state in states
+        for _ in range(resolved.repeats)
+    ]
+    candidate_results: dict[
+        int, tuple[JudgeResponse | ErrorResponse | None, str | None]
+    ] = {}
+    for task_index, result in scheduler.run(
+        candidate_tasks, status_code=_candidate_status
+    ):
+        if isinstance(result, BaseException):
+            candidate_results[task_index] = (
+                None,
+                f"live calibration call failed: {result}",
+            )
+        else:
+            candidate_results[task_index] = result
+        for diagnostic in scheduler.take_diagnostics():
+            _write_scheduler_diagnostic(diagnostic, errors)
 
-        for case_index, (entry, _state) in enumerate(zip(entries, states)):
-            candidates: list[JudgeResponse] = []
-            for repeat_index in range(resolved.repeats):
-                response, error = candidate_jobs[(case_index, repeat_index)].result()
-                if error is not None:
-                    operational_error = error
-                    break
-                assert response is not None
-                candidates.append(response)
-            if operational_error is not None:
+    for diagnostic in scheduler.take_diagnostics():
+        _write_scheduler_diagnostic(diagnostic, errors)
+
+    for case_index, (entry, _state) in enumerate(zip(entries, states)):
+        candidates: list[JudgeResponse] = []
+        for repeat_index in range(resolved.repeats):
+            task_index = case_index * resolved.repeats + repeat_index
+            response, error = candidate_results[task_index]
+            if error is not None:
+                operational_error = error
                 break
+            assert response is not None
+            candidates.append(response)
+        if operational_error is not None:
+            break
 
-            comparisons: list[dict[str, Any]] = []
-            case_metrics: list[dict[str, float | bool]] = []
-            target_group = _target_provenance(entry, preset)
-            for question_id, question in preset.questions.items():
-                try:
-                    baseline_answer = entry.response.answers[question_id]
-                    candidate_answers = [
-                        response.answers[question_id] for response in candidates
-                    ]
-                    comparison, metrics = _comparison_record(
-                        entry,
-                        question_id,
-                        question,
-                        preset.data["thresholds"].get(question_id),
-                        baseline_answer,
-                        candidates,
-                        candidate_answers,
-                        resolved,
-                        target_group,
-                    )
-                except (KeyError, TypeError, ValueError) as exc:
-                    operational_error = f"malformed calibration answer: {exc}"
-                    break
-                comparisons.append(comparison)
-                case_metrics.append(metrics)
-            if operational_error is not None:
-                break
-
-            completed_cases += 1
-            case_boundary_noise = any(
-                bool(metrics["boundary_noise"]) for metrics in case_metrics
-            )
-            case_far_side_noise = any(
-                bool(metrics["far_side_noise"]) for metrics in case_metrics
-            )
-            boundary_noise_cases += int(case_boundary_noise)
-            far_side_noise_cases += int(case_far_side_noise)
-            case_choice_flip = any(
-                bool(metrics["choice_flip"]) for metrics in case_metrics
-            )
-            case_threshold_crossing = any(
-                bool(metrics["threshold_crossing"]) for metrics in case_metrics
-            )
-            baseline_model = entry.served_model
-            candidate_models = [_served_model(response) for response in candidates]
-            if isinstance(entry.usage, Mapping):
-                baseline_usages.append(entry.usage)
-            candidate_usages.extend(
-                response.usage for response in candidates if response.usage is not None
-            )
-            model_baseline.update([baseline_model])
-            model_candidate.update(candidate_models)
-            stable_drift += int(
-                any(metrics["stable_drift"] for metrics in case_metrics)
-            )
-            choice_flips += int(case_choice_flip)
-            threshold_crossings += int(case_threshold_crossing)
-            comparison_count += len(comparisons)
-            for metrics in case_metrics:
-                max_probability_delta = max(
-                    max_probability_delta, float(metrics["probability_delta"])
+        comparisons: list[dict[str, Any]] = []
+        case_metrics: list[dict[str, float | bool]] = []
+        target_group = _target_provenance(entry, preset)
+        for question_id, question in preset.questions.items():
+            try:
+                baseline_answer = entry.response.answers[question_id]
+                candidate_answers = [
+                    response.answers[question_id] for response in candidates
+                ]
+                comparison, metrics = _comparison_record(
+                    entry,
+                    question_id,
+                    question,
+                    preset.data["thresholds"].get(question_id),
+                    baseline_answer,
+                    candidates,
+                    candidate_answers,
+                    resolved,
+                    target_group,
                 )
-                max_score_delta = max(max_score_delta, float(metrics["score_delta"]))
-                max_noul_delta = max(max_noul_delta, float(metrics["noul_delta"]))
+            except (KeyError, TypeError, ValueError) as exc:
+                operational_error = f"malformed calibration answer: {exc}"
+                break
+            comparisons.append(comparison)
+            case_metrics.append(metrics)
+        if operational_error is not None:
+            break
 
-            record = {
-                "record_type": "calibration_comparison",
-                "calibration_version": CALIBRATION_SCHEMA,
-                "calibration_case_id": _calibration_case_id(entry, target_group),
-                "cache_entry": {
-                    "cache_key": entry.cache_key,
-                    "provenance": [dict(target_group)],
-                },
-                "comparisons": comparisons,
-                "provenance": {
-                    "baseline_model": baseline_model,
-                    "candidate_models": candidate_models,
-                },
-                "state_ref": target_group["state_refs"][0],
-                "state_refs": list(target_group["state_refs"]),
-                "boundary_noise": case_boundary_noise,
-                "far_side_noise": case_far_side_noise,
-                "within_tolerance": None if case_boundary_noise else True,
-            }
-            _write_json(record, output)
+        completed_cases += 1
+        case_boundary_noise = any(
+            bool(metrics["boundary_noise"]) for metrics in case_metrics
+        )
+        case_far_side_noise = any(
+            bool(metrics["far_side_noise"]) for metrics in case_metrics
+        )
+        boundary_noise_cases += int(case_boundary_noise)
+        far_side_noise_cases += int(case_far_side_noise)
+        case_choice_flip = any(
+            bool(metrics["choice_flip"]) for metrics in case_metrics
+        )
+        case_threshold_crossing = any(
+            bool(metrics["threshold_crossing"]) for metrics in case_metrics
+        )
+        baseline_model = entry.served_model
+        candidate_models = [_served_model(response) for response in candidates]
+        if isinstance(entry.usage, Mapping):
+            baseline_usages.append(entry.usage)
+        candidate_usages.extend(
+            response.usage for response in candidates if response.usage is not None
+        )
+        model_baseline.update([baseline_model])
+        model_candidate.update(candidate_models)
+        stable_drift += int(any(metrics["stable_drift"] for metrics in case_metrics))
+        choice_flips += int(case_choice_flip)
+        threshold_crossings += int(case_threshold_crossing)
+        comparison_count += len(comparisons)
+        for metrics in case_metrics:
+            max_probability_delta = max(
+                max_probability_delta, float(metrics["probability_delta"])
+            )
+            max_score_delta = max(max_score_delta, float(metrics["score_delta"]))
+            max_noul_delta = max(max_noul_delta, float(metrics["noul_delta"]))
+
+        record = {
+            "record_type": "calibration_comparison",
+            "calibration_version": CALIBRATION_SCHEMA,
+            "calibration_case_id": _calibration_case_id(entry, target_group),
+            "cache_entry": {
+                "cache_key": entry.cache_key,
+                "provenance": [dict(target_group)],
+            },
+            "comparisons": comparisons,
+            "provenance": {
+                "baseline_model": baseline_model,
+                "candidate_models": candidate_models,
+            },
+            "state_ref": target_group["state_refs"][0],
+            "state_refs": list(target_group["state_refs"]),
+            "boundary_noise": case_boundary_noise,
+            "far_side_noise": case_far_side_noise,
+            "within_tolerance": None if case_boundary_noise else True,
+        }
+        _write_json(record, output)
 
     summary = _summary(
         preset,
@@ -280,18 +294,35 @@ calibrate = run_calibration
 
 def _candidate_call(
     judge_fn: Judge, state: State, preset: Preset
-) -> tuple[JudgeResponse | None, str | None]:
+) -> tuple[JudgeResponse | ErrorResponse | None, str | None]:
     try:
         response = judge_fn(state, preset.questions, preset.model)
     except Exception as exc:
         return None, f"live calibration call failed: {exc}"
     if isinstance(response, ErrorResponse):
-        return None, f"live calibration call failed: {response.error}"
+        return response, f"live calibration call failed: {response.error}"
     if not isinstance(response, JudgeResponse):
         return None, "live calibration returned an invalid response"
     if not response.complete or set(response.answers) != set(preset.questions):
         return None, "live calibration returned an incomplete response"
     return response, None
+
+
+def _candidate_status(
+    result: tuple[JudgeResponse | ErrorResponse | None, str | None],
+) -> int:
+    response, _error = result
+    if isinstance(response, ErrorResponse) and response.http_status is not None:
+        return response.http_status
+    return 200
+
+
+def _write_scheduler_diagnostic(diagnostic: DiagnosticRecord, errors: TextIO) -> None:
+    item = diagnostic.diagnostic
+    errors.write(
+        "jm calibrate: diagnostic: "
+        f"code={item.code} severity={item.severity} {item.message}\n"
+    )
 
 
 def tolerances_for_preset(preset: Preset) -> CalibrationTolerances:
@@ -472,9 +503,7 @@ def _comparison_record(
             {
                 "baseline_argmax": score_argmax(baseline),
                 "candidate_argmax": _one_or_many(candidate_argmax),
-                "argmax_crossing": any(
-                    value != score_argmax(baseline) for value in candidate_argmax
-                ),
+                "argmax_crossing": any(item["crossing"] for item in thresholds),
             }
         )
     metrics: dict[str, float | bool] = {

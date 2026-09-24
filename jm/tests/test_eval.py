@@ -61,7 +61,7 @@ class EvalJudge:
                 answers[question_id] = ScoreAnswer(
                     score,
                     {"0": "low", "1": "moderate", "2": "high", "3": "critical"},
-                    {"1.5": 0.5, "2.5": 0.5},
+                    {"2" if score > 2 else "1": 1.0},
                     0.0,
                 )
             else:

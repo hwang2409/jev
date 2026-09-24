@@ -162,6 +162,131 @@ class ConfigurationError(ValueError):
     exit_code = 64
 
 
+class SharedScheduler:
+    """Run bounded calls with the shared 503 backoff policy."""
+
+    def __init__(self, concurrency: int, *, observer_target: object | None = None):
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or concurrency <= 0
+        ):
+            raise ConfigurationError("concurrency must be a positive integer")
+        self.effective_concurrency = min(concurrency, 8)
+        self._observer_target = observer_target
+        self._lock = Lock()
+        self._current_concurrency = self.effective_concurrency
+        self._consecutive_503 = 0
+        self._last_503_at: float | None = None
+        self._diagnostics: list[DiagnosticRecord] = []
+        if concurrency > 8:
+            self._diagnostics.append(
+                DiagnosticRecord(
+                    Diagnostic(
+                        "warning",
+                        "concurrency_capped",
+                        f"requested={concurrency} "
+                        f"effective={self.effective_concurrency} cap=8",
+                    )
+                )
+            )
+
+    def observe_response(self, status_code: int) -> None:
+        with self._lock:
+            now = _time.monotonic()
+            if status_code == 503:
+                if self._consecutive_503 == 0:
+                    self._last_503_at = now
+                self._consecutive_503 += 1
+                if self._consecutive_503 >= 2:
+                    reduced = max(1, self._current_concurrency // 2)
+                    if reduced < self._current_concurrency:
+                        self._current_concurrency = reduced
+                        self._diagnostics.append(
+                            DiagnosticRecord(
+                                Diagnostic(
+                                    "warning",
+                                    "concurrency_backoff",
+                                    "status=503 consecutive=2 "
+                                    f"effective={self._current_concurrency}",
+                                )
+                            )
+                        )
+                    self._consecutive_503 = 0
+                return
+            if (
+                self._last_503_at is not None
+                and self._current_concurrency < self.effective_concurrency
+                and now - self._last_503_at >= 60.0
+            ):
+                self._current_concurrency += 1
+                self._diagnostics.append(
+                    DiagnosticRecord(
+                        Diagnostic(
+                            "info",
+                            "concurrency_restored",
+                            "clean_seconds=60 "
+                            f"effective={self._current_concurrency}",
+                        )
+                    )
+                )
+                self._last_503_at = now
+
+    def take_diagnostics(self) -> tuple[DiagnosticRecord, ...]:
+        with self._lock:
+            records = tuple(self._diagnostics)
+            del self._diagnostics[:]
+            return records
+
+    def run(
+        self,
+        tasks: Sequence[Callable[[], Any]],
+        *,
+        status_code: Callable[[Any], int] | None = None,
+    ) -> Iterator[tuple[int, Any]]:
+        task_values = tuple(tasks)
+        if not task_values:
+            return
+        set_response_observer = getattr(
+            self._observer_target, "set_response_observer", None
+        )
+        uses_response_observer = callable(set_response_observer)
+        if uses_response_observer:
+            set_response_observer(self.observe_response)
+        executor = ThreadPoolExecutor(max_workers=self.effective_concurrency)
+        futures: dict[Any, int] = {}
+        next_task = 0
+
+        def submit_available() -> None:
+            nonlocal next_task
+            with self._lock:
+                limit = self._current_concurrency
+            while next_task < len(task_values) and len(futures) < limit:
+                index = next_task
+                next_task += 1
+                futures[executor.submit(task_values[index])] = index
+
+        try:
+            submit_available()
+            while futures:
+                future = next(as_completed(tuple(futures)))
+                index = futures.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    result = exc
+                if not uses_response_observer and status_code is not None:
+                    self.observe_response(status_code(result))
+                yield index, result
+                submit_available()
+            if not uses_response_observer:
+                self.observe_response(200)
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
+            if uses_response_observer:
+                set_response_observer(None)
+
+
 class InputError(ValueError):
     """Input data cannot be judged safely."""
 
@@ -1077,15 +1202,7 @@ def _judge_core(
                         path=(f"questions.{question_id}.instructions.state_fields"),
                     )
                 )
-    effective_concurrency = min(concurrency, 8)
-    if concurrency > 8:
-        diagnostics.append(
-            Diagnostic(
-                "warning",
-                "concurrency_capped",
-                f"requested={concurrency} effective={effective_concurrency} cap=8",
-            )
-        )
+    scheduler = SharedScheduler(concurrency, observer_target=observer_target)
 
     state_records: list[CanonicalRecord] = []
     formation_records = _formation_records(formation_report.events, base_meta)
@@ -1096,60 +1213,8 @@ def _judge_core(
     consistency_cache_hits = 0
     consistency_live_calls = 0
     consistency_stats_lock = Lock()
-    concurrency_lock = Lock()
-    current_concurrency = effective_concurrency
-    consecutive_503 = 0
-    last_503_at: float | None = None
-    concurrency_diagnostics: list[DiagnosticRecord] = []
     cache_locks: dict[str, Lock] = {}
     cache_locks_guard = Lock()
-
-    def observe_response(status_code: int) -> None:
-        nonlocal consecutive_503, current_concurrency, last_503_at
-        with concurrency_lock:
-            now = _time.monotonic()
-            if status_code == 503:
-                if consecutive_503 == 0:
-                    last_503_at = now
-                consecutive_503 += 1
-                if consecutive_503 >= 2:
-                    reduced = max(1, current_concurrency // 2)
-                    if reduced < current_concurrency:
-                        current_concurrency = reduced
-                        concurrency_diagnostics.append(
-                            DiagnosticRecord(
-                                Diagnostic(
-                                    "warning",
-                                    "concurrency_backoff",
-                                    "status=503 consecutive=2 "
-                                    f"effective={current_concurrency}",
-                                )
-                            )
-                        )
-                    consecutive_503 = 0
-                return
-            if (
-                last_503_at is not None
-                and current_concurrency < effective_concurrency
-                and now - last_503_at >= 60.0
-            ):
-                current_concurrency += 1
-                concurrency_diagnostics.append(
-                    DiagnosticRecord(
-                        Diagnostic(
-                            "info",
-                            "concurrency_restored",
-                            f"clean_seconds=60 effective={current_concurrency}",
-                        )
-                    )
-                )
-                last_503_at = now
-
-    def take_concurrency_diagnostics() -> tuple[DiagnosticRecord, ...]:
-        with concurrency_lock:
-            records = tuple(concurrency_diagnostics)
-            del concurrency_diagnostics[:]
-            return records
 
     def records_for_state(
         state: State,
@@ -1283,67 +1348,37 @@ def _judge_core(
     try:
         for diagnostic in diagnostics:
             yield DiagnosticRecord(diagnostic)
+        for diagnostic in scheduler.take_diagnostics():
+            yield diagnostic
 
-        set_response_observer = getattr(observer_target, "set_response_observer", None)
-        uses_response_observer = callable(set_response_observer)
-        if uses_response_observer:
-            set_response_observer(observe_response)
-        executor: ThreadPoolExecutor | None = None
-        try:
-            if state_values:
-                executor = ThreadPoolExecutor(max_workers=effective_concurrency)
-                futures: dict[Any, State] = {}
-                next_state = 0
+        def record_status(record: CanonicalRecord | BaseException) -> int:
+            if isinstance(record, ErrorRecord) and record.error.http_status is not None:
+                return record.error.http_status
+            return 200
 
-                def submit_available() -> None:
-                    nonlocal next_state
-                    with concurrency_lock:
-                        limit = current_concurrency
-                    while next_state < len(state_values) and len(futures) < limit:
-                        state = state_values[next_state]
-                        next_state += 1
-                        futures[executor.submit(records_for_state, state)] = state
-
-                submit_available()
-                while futures:
-                    future = next(as_completed(tuple(futures)))
-                    state = futures.pop(future)
-                    try:
-                        record = future.result()
-                    except Exception:
-                        record = _response_record(
-                            state.state_ref,
-                            ErrorResponse("request failed"),
-                            replace(base_meta, cache="not_applicable"),
-                        )
-                    state_records.append(record)
-                    if isinstance(record, (ErrorRecord, PartialResultRecord)):
-                        failed += 1
-                    if isinstance(record, ErrorRecord):
-                        reasons.add(record.error.kind)
-                    elif isinstance(record, PartialResultRecord):
-                        reasons.add("partial_answer")
-                    if not uses_response_observer:
-                        status_code = (
-                            record.error.http_status
-                            if isinstance(record, ErrorRecord)
-                            and record.error.http_status is not None
-                            else 200
-                        )
-                        observe_response(status_code)
-                    for diagnostic in take_concurrency_diagnostics():
-                        yield diagnostic
-                    yield record
-                    submit_available()
-                if not uses_response_observer:
-                    observe_response(200)
-                    for diagnostic in take_concurrency_diagnostics():
-                        yield diagnostic
-        finally:
-            if executor is not None:
-                executor.shutdown(wait=False, cancel_futures=True)
-            if uses_response_observer:
-                set_response_observer(None)
+        tasks = [lambda state=state: records_for_state(state) for state in state_values]
+        for state_index, result in scheduler.run(tasks, status_code=record_status):
+            state = state_values[state_index]
+            if isinstance(result, BaseException):
+                record = _response_record(
+                    state.state_ref,
+                    ErrorResponse("request failed"),
+                    replace(base_meta, cache="not_applicable"),
+                )
+            else:
+                record = result
+            state_records.append(record)
+            if isinstance(record, (ErrorRecord, PartialResultRecord)):
+                failed += 1
+            if isinstance(record, ErrorRecord):
+                reasons.add(record.error.kind)
+            elif isinstance(record, PartialResultRecord):
+                reasons.add("partial_answer")
+            for diagnostic in scheduler.take_diagnostics():
+                yield diagnostic
+            yield record
+        for diagnostic in scheduler.take_diagnostics():
+            yield diagnostic
 
         yield from formation_records
         if consistency is not None:

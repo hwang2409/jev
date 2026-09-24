@@ -3,13 +3,28 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import threading
+import time
 from pathlib import Path
 
 import pytest
 
-from jm.answers import JudgeResponse, NoulAnswer
-from jm.cache import CacheStore, battery_hash, canonical_json_bytes
-from jm.calibrate import CalibrationOperationalError, _load_entries, run_calibration
+from jm.answers import (
+    ChoiceAnswer,
+    ErrorResponse,
+    JudgeResponse,
+    NoulAnswer,
+    ScoreAnswer,
+)
+from jm.cache import CacheEntry, CacheStore, battery_hash, canonical_json_bytes
+from jm.calibrate import (
+    CalibrationOperationalError,
+    CalibrationTolerances,
+    _comparison_record,
+    _load_entries,
+    _repeat_classification,
+    run_calibration,
+)
 from jm.presets import resolve_preset
 from jm.runner import FormationReport, State, judge
 
@@ -165,3 +180,130 @@ def test_calibration_v3_output_is_deterministic_across_pool_sizes(
     assert comparison["calibration_version"] == "jm.calibration/v3"
     assert summary["qualified_cases"] == 1
     assert summary["comparison_count"] == 1
+
+
+def test_calibration_reuses_capped_scheduler_and_503_backoff(tmp_path: Path) -> None:
+    preset = resolve_preset("jgrep")
+    store = CacheStore(tmp_path / "cache")
+    states = [
+        State(
+            f"case#{index}",
+            f"focus-{index}",
+            {"query": "launch"},
+            wire_context_keys=frozenset({"query"}),
+        )
+        for index in range(8)
+    ]
+    tuple(
+        judge(
+            preset,
+            states,
+            formation_report=FormationReport(),
+            cache_store=store,
+            judge_fn=lambda *_args: JudgeResponse(
+                {"matches_query": NoulAnswer(0.8)}, served_model="baseline"
+            ),
+        )
+    )
+    lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def candidate(state: State, *_args: object) -> JudgeResponse | ErrorResponse:
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        if int(state.state_ref.rsplit("#", 1)[1]) < 4:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.8)}, served_model="candidate"
+        )
+
+    stderr = io.StringIO()
+    assert (
+        run_calibration(
+            preset,
+            store,
+            candidate,
+            stdout=io.StringIO(),
+            stderr=stderr,
+            concurrency=12,
+        )
+        == 2
+    )
+    assert maximum <= 8
+    assert "code=concurrency_capped" in stderr.getvalue()
+    assert "code=concurrency_backoff" in stderr.getvalue()
+
+
+def test_calibration_argmax_crossing_is_threshold_side_change() -> None:
+    baseline = ScoreAnswer(1.99, probabilities={"1": 1.0})
+    entry = CacheEntry(
+        "key",
+        {"focus": "focus", "context": {"state_ref": "hunk#1"}},
+        "battery",
+        {},
+        ({"state_refs": ["hunk#1"]},),
+        "model",
+        "model",
+        None,
+        "now",
+        JudgeResponse({"risk": baseline}, served_model="baseline"),
+    )
+    question = {"type": "score"}
+    threshold = {"fail_at_least": 2}
+    same_side, _ = _comparison_record(
+        entry,
+        "risk",
+        question,
+        threshold,
+        baseline,
+        [JudgeResponse({"risk": ScoreAnswer(2.01, probabilities={"1": 1.0})})],
+        [ScoreAnswer(2.01, probabilities={"1": 1.0})],
+        CalibrationTolerances(),
+        {"state_refs": ["hunk#1"]},
+    )
+    crossed, _ = _comparison_record(
+        entry,
+        "risk",
+        question,
+        threshold,
+        baseline,
+        [JudgeResponse({"risk": ScoreAnswer(2.01, probabilities={"2": 1.0})})],
+        [ScoreAnswer(2.01, probabilities={"2": 1.0})],
+        CalibrationTolerances(),
+        {"state_refs": ["hunk#1"]},
+    )
+    assert same_side["argmax_crossing"] is False
+    assert crossed["argmax_crossing"] is True
+    assert crossed["score_delta"] == 0.02
+
+
+def test_calibration_noise_split_covers_choice_score_and_noul() -> None:
+    choice = _repeat_classification(
+        "choice", ChoiceAnswer("a"), [ChoiceAnswer("b"), ChoiceAnswer("c")], 0.05, []
+    )
+    score = _repeat_classification(
+        "score",
+        ScoreAnswer(1.0, probabilities={"1": 1.0}),
+        [
+            ScoreAnswer(3.0, probabilities={"3": 1.0}),
+            ScoreAnswer(3.0, probabilities={"3": 1.0}),
+        ],
+        0.05,
+        [],
+    )
+    noul = _repeat_classification(
+        "noul",
+        NoulAnswer(0.2),
+        [NoulAnswer(0.8), NoulAnswer(0.9)],
+        0.05,
+        [{"target": 0.75, "near_threshold": False}],
+    )
+    assert choice == (False, False, True)
+    assert score == (True, False, True)
+    assert noul == (False, False, True)

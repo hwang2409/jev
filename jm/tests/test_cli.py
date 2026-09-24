@@ -349,6 +349,25 @@ def test_compatible_by_override_and_filter_keep(tmp_path: Path) -> None:
     assert stderr == "stdin#L1\t0.9\n"
 
 
+def test_policy_filter_reuses_typed_gate_grammar(tmp_path: Path) -> None:
+    code, records, stderr = _invoke(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--filter",
+            "policy",
+            "--filter-policy",
+            "any(matches_query.noul >= 0.75)",
+        ],
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+    assert code == 0
+    assert [record["record_type"] for record in records] == ["result", "coverage"]
+    assert stderr == ""
+
+
 def test_real_client_checks_api_key_before_reading_stdin(monkeypatch) -> None:
     class BlockingStdin:
         def read(self):

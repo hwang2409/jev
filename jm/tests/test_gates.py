@@ -203,7 +203,7 @@ def test_typed_thresholds_and_choice_equality_evaluate_without_formatting() -> N
     )
     score_record = ResultRecord(
         "hunk#1",
-        {"change_scope": ScoreAnswer(2.0)},
+        {"change_scope": ScoreAnswer(2.0, probabilities={"2": 1.0})},
         RecordMeta("diff-risk-heat", "1", "typesafe-ai/jev", "hunk", "miss"),
     )
     assert evaluate_policy(score_policy, [score_record]) is True
@@ -231,6 +231,35 @@ def test_score_gate_uses_high_tie_breaking_argmax_not_expected_score() -> None:
 
     assert evaluate_gate(policy, [argmax_record]).exit_code == 1
     assert evaluate_gate(policy, [tie_record]).exit_code == 1
+
+
+@pytest.mark.parametrize(
+    ("answer", "expected_exit"),
+    [
+        (ScoreAnswer(1.99), 2),
+        (ScoreAnswer(2.01, probabilities={"1.5": 1.0}), 2),
+        (ScoreAnswer(2.01, probabilities={"1": 1.0, "2": 0.0}), 0),
+    ],
+)
+def test_score_gate_rejects_missing_or_noninteger_probability_levels(
+    answer: ScoreAnswer, expected_exit: int
+) -> None:
+    policy = compile_policy(
+        "any(change_scope.score >= 2)", resolve_preset("diff-risk-heat")
+    )
+    result = evaluate_gate(
+        policy,
+        [
+            ResultRecord(
+                "hunk#1",
+                {"change_scope": answer},
+                RecordMeta("diff-risk-heat", "1", "typesafe-ai/jev", "hunk", "miss"),
+            )
+        ],
+    )
+    assert result.exit_code == expected_exit
+    if expected_exit == 2:
+        assert result.fail_closed is True
 
 
 @pytest.mark.parametrize(
