@@ -204,6 +204,22 @@ def run_calibration(
         case_threshold_crossing = any(
             bool(metrics["threshold_crossing"]) for metrics in case_metrics
         )
+        case_within_tolerance = _tolerance_verdict(
+            resolved,
+            choice_flips=int(case_choice_flip),
+            max_probability_delta=max(
+                float(metrics["probability_delta"]) for metrics in case_metrics
+            ),
+            max_score_delta=max(
+                float(metrics["score_delta"]) for metrics in case_metrics
+            ),
+            max_noul_delta=max(
+                float(metrics["noul_delta"]) for metrics in case_metrics
+            ),
+            threshold_crossings=int(case_threshold_crossing),
+            stable_drift=int(any(metrics["stable_drift"] for metrics in case_metrics)),
+            boundary_noise=case_boundary_noise,
+        )
         baseline_model = entry.served_model
         candidate_models = [_served_model(response) for response in candidates]
         if isinstance(entry.usage, Mapping):
@@ -241,7 +257,7 @@ def run_calibration(
             "state_refs": list(target_group["state_refs"]),
             "boundary_noise": case_boundary_noise,
             "far_side_noise": case_far_side_noise,
-            "within_tolerance": None if case_boundary_noise else True,
+            "within_tolerance": case_within_tolerance,
         }
         _write_json(record, output)
 
@@ -735,22 +751,17 @@ def _summary(
 ) -> dict[str, Any]:
     mixed_models = len(baseline_models) > 1 or len(candidate_models) > 1
     has_evidence = cases > 0
-    within: bool | None
-    if (
-        not has_evidence
-        or operational_error
-        or mixed_models
-        or boundary_noise_cases
-    ):
-        within = None
-    else:
-        within = (
-            choice_flips <= tolerances.max_choice_flips
-            and max_probability_delta <= tolerances.max_probability_delta
-            and max_score_delta <= tolerances.max_score_delta
-            and max_noul_delta <= tolerances.max_noul_delta
-            and threshold_crossings <= tolerances.max_threshold_crossings
-            and stable_drift == 0
+    within: bool | None = None
+    if has_evidence and not operational_error and not mixed_models:
+        within = _tolerance_verdict(
+            tolerances,
+            choice_flips=choice_flips,
+            max_probability_delta=max_probability_delta,
+            max_score_delta=max_score_delta,
+            max_noul_delta=max_noul_delta,
+            threshold_crossings=threshold_crossings,
+            stable_drift=stable_drift,
+            boundary_noise=bool(boundary_noise_cases),
         )
     summary: dict[str, Any] = {
         "record_type": "calibration_summary",
@@ -780,6 +791,29 @@ def _summary(
     elif cases == 0:
         summary["error"] = "no qualifying cases"
     return summary
+
+
+def _tolerance_verdict(
+    tolerances: CalibrationTolerances,
+    *,
+    choice_flips: int,
+    max_probability_delta: float,
+    max_score_delta: float,
+    max_noul_delta: float,
+    threshold_crossings: int,
+    stable_drift: int,
+    boundary_noise: bool,
+) -> bool | None:
+    if boundary_noise:
+        return None
+    return (
+        choice_flips <= tolerances.max_choice_flips
+        and max_probability_delta <= tolerances.max_probability_delta
+        and max_score_delta <= tolerances.max_score_delta
+        and max_noul_delta <= tolerances.max_noul_delta
+        and threshold_crossings <= tolerances.max_threshold_crossings
+        and stable_drift == 0
+    )
 
 
 def _provenance(summary: Mapping[str, Any]) -> str:

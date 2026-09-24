@@ -179,6 +179,60 @@ def test_calibration_selects_the_matching_version_group(tmp_path: Path) -> None:
     ) is not None
 
 
+def test_calibration_selects_the_matching_version_group_for_one_preset(
+    tmp_path: Path,
+) -> None:
+    store, first = _seed(tmp_path)
+    second_data = dict(first.data)
+    second_data["version"] = "2"
+    second = type(first)(second_data, first.path)
+    tuple(
+        judge(
+            second,
+            (State(
+                "case#2",
+                "focus",
+                {"query": "launch"},
+                wire_context_keys=frozenset({"query"}),
+            ),),
+            formation_report=FormationReport((), ()),
+            cache_store=store,
+            judge_fn=lambda *_args: JudgeResponse(
+                {"matches_query": NoulAnswer(0.8)}, served_model="baseline"
+            ),
+        )
+    )
+
+    entries = _load_entries(second, store)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert [
+        (group["preset"], group["preset_version"], group["state_refs"])
+        for group in entry.provenance
+    ] == [(first.name, "1", ["case#1"]), (second.name, "2", ["case#2"])]
+
+    stdout = io.StringIO()
+    assert run_calibration(
+        second,
+        store,
+        lambda *_args: JudgeResponse(
+            {"matches_query": NoulAnswer(0.8)}, served_model="candidate"
+        ),
+        stdout=stdout,
+        stderr=io.StringIO(),
+    ) == 0
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert records[0]["state_refs"] == ["case#2"]
+    assert records[0]["cache_entry"]["provenance"] == [
+        {
+            "preset": second.name,
+            "preset_version": "2",
+            "battery_hash": battery_hash(second.questions),
+            "state_refs": ["case#2"],
+        }
+    ]
+
+
 def test_calibration_rejects_malformed_v3_entries_before_live_calls(
     tmp_path: Path,
 ) -> None:
@@ -315,6 +369,37 @@ def test_calibration_near_threshold_noise_has_a_null_verdict(tmp_path: Path) -> 
     assert comparison["within_tolerance"] is None
     assert summary["boundary_noise_cases"] == 1
     assert summary["within_tolerance"] is None
+
+
+@pytest.mark.parametrize(
+    ("candidate_noul", "expected_verdict", "expected_exit"),
+    [(0.8, True, 0), (0.9, False, 1)],
+)
+def test_calibration_case_verdict_matches_summary(
+    tmp_path: Path,
+    candidate_noul: float,
+    expected_verdict: bool,
+    expected_exit: int,
+) -> None:
+    store, preset = _seed(tmp_path)
+
+    stdout = io.StringIO()
+    assert (
+        run_calibration(
+            preset,
+            store,
+            lambda *_args: JudgeResponse(
+                {"matches_query": NoulAnswer(candidate_noul)},
+                served_model="baseline",
+            ),
+            stdout=stdout,
+            stderr=io.StringIO(),
+        )
+        == expected_exit
+    )
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert records[0]["within_tolerance"] is expected_verdict
+    assert records[-1]["within_tolerance"] is expected_verdict
 
 
 @pytest.mark.parametrize(
