@@ -5,6 +5,7 @@ import copy
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -22,6 +23,7 @@ from .chunkers import chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
     SCHEMA_V2,
+    SCHEMA_V3,
     Preset,
     PresetError,
     PresetNotFoundError,
@@ -129,7 +131,7 @@ def _add_judgment_options(
 ) -> None:
     parser.add_argument("--input", type=Path, help="read finite input from PATH")
     parser.add_argument(
-        "--by", choices=("line", "para", "hunk", "file", "record")
+        "--by", choices=("line", "para", "hunk", "file", "record", "state")
     )
     parser.add_argument("--state-ref", default="id", help="record identity field")
     parser.add_argument("--max-chunks", type=_nonnegative_int)
@@ -147,6 +149,12 @@ def _add_judgment_options(
     parser.add_argument("--prefilter-top", type=_positive_int)
     parser.add_argument("--prefilter-fields")
     parser.add_argument("--prefilter-query")
+    parser.add_argument(
+        "--param",
+        action="append",
+        default=[],
+        help="supply a declared preset parameter as key=value",
+    )
     if include_query:
         parser.add_argument("--query")
     if include_predicate:
@@ -304,6 +312,13 @@ def _judgment_command(
             raise _UsageError("predicate was supplied more than once")
         predicate = predicate_option
 
+    parameters = _parse_parameters(
+        preset,
+        args.param,
+        query=query,
+        predicate=predicate,
+    )
+
     effective_preset = _with_max_chunks(preset, args.max_chunks)
     prefilter = resolve_prefilter(
         effective_preset,
@@ -325,6 +340,7 @@ def _judgment_command(
         effective_preset,
         query,
         predicate,
+        parameters=parameters,
         allowed_parameters=prefilter_parameters,
     )
     if judge_fn is None and not resolve_gateway_key():
@@ -341,6 +357,7 @@ def _judgment_command(
         effective_preset.chunking,
         query=query,
         predicate=predicate,
+        parameters=parameters,
     )
 
     effective_preset = _with_chunker(effective_preset, by)
@@ -366,12 +383,14 @@ def _judgment_command(
             pretty_template=effective_preset.data["output"]["pretty_template"],
             policy=args.policy if args.command == "gate" else None,
             require_states=getattr(args, "require_states", 1),
+            empty_input_error=by != "state",
         )
     except InputError as exc:
         return _emit_input_error(
             effective_preset,
             by,
             str(exc),
+            source_ref=getattr(exc, "source_ref", None),
             output_format=args.format
             or effective_preset.data["output"]["default_format"],
             stdout=stdout,
@@ -394,6 +413,7 @@ def _emit_input_error(
     chunker: str,
     message: str,
     *,
+    source_ref: str | None = None,
     output_format: str,
     stdout: TextIO,
     stderr: TextIO,
@@ -404,14 +424,16 @@ def _emit_input_error(
         preset.model,
         chunker,
         "not_applicable",
-        preset_schema=preset.schema if preset.schema == SCHEMA_V2 else None,
+        preset_schema=(
+            preset.schema if preset.schema in {SCHEMA_V2, SCHEMA_V3} else None
+        ),
     )
     records = (
         ErrorRecord(
             None,
             ErrorDetail("input_error", message),
             meta,
-            source_ref="stdin:byte=0,line=1",
+            source_ref=source_ref or "stdin:byte=0,line=1",
         ),
         CoverageRecord(
             coverage="partial",
@@ -484,6 +506,7 @@ def _form_states(
     *,
     query: str | None,
     predicate: str | None,
+    parameters: Mapping[str, str] | None = None,
 ) -> tuple[tuple[State, ...], tuple[StateRejection, ...]]:
     rejections: list[StateRejection] = []
     paths = tuple(getattr(args, "paths", ()))
@@ -496,6 +519,7 @@ def _form_states(
                     limits=limits,
                     query=query,
                     predicate=predicate,
+                    parameters=parameters,
                     _rejections=rejections,
                 )
             )
@@ -517,6 +541,7 @@ def _form_states(
     if by in {"line", "para", "file", "record"}:
         chunk_kwargs["query"] = query
         chunk_kwargs["predicate"] = predicate
+    chunk_kwargs["parameters"] = parameters or {}
     result = chunk_input(by, value, **chunk_kwargs)
     return result.formed, result.rejections
 
@@ -531,8 +556,28 @@ def _validate_preset_parameters(
     query: str | None,
     predicate: str | None,
     *,
+    parameters: Mapping[str, str] | None = None,
     allowed_parameters: set[str] | None = None,
 ) -> None:
+    if preset.schema == SCHEMA_V3:
+        declared = set(preset.declared_parameters)
+        values = dict(parameters or {})
+        unknown = sorted(set(values) - declared)
+        if unknown:
+            raise _UsageError(
+                f"unknown parameter '{unknown[0]}' for preset '{preset.name}'"
+            )
+        for question in preset.questions.values():
+            for field in question["instructions"]["state_fields"]:
+                if not field.startswith("context."):
+                    continue
+                parameter = field.removeprefix("context.")
+                if parameter in declared and parameter not in values:
+                    raise _UsageError(
+                        f"missing required parameter '{parameter}' for preset "
+                        f"'{preset.name}'"
+                    )
+        return
     allowed = allowed_parameters or set()
     required: set[str] = set()
     for question in preset.questions.values():
@@ -557,6 +602,38 @@ def _validate_preset_parameters(
             raise _UsageError(
                 f"missing required parameter '{parameter}' for preset '{preset.name}'"
             )
+
+
+def _parse_parameters(
+    preset: Preset,
+    pairs: list[str],
+    *,
+    query: str | None,
+    predicate: str | None,
+) -> dict[str, str]:
+    if preset.schema != SCHEMA_V3 and pairs:
+        raise _UsageError("--param requires a jm.preset/v3 preset")
+    values: dict[str, str] = {}
+    for pair in pairs:
+        if "=" not in pair:
+            raise _UsageError("--param values must use key=value")
+        key, value = pair.split("=", 1)
+        if not re.fullmatch(r"[a-z][a-z0-9_]*", key):
+            raise _UsageError(f"invalid parameter name '{key}'")
+        if key in values:
+            raise _UsageError(f"parameter '{key}' was supplied more than once")
+        values[key] = value
+    aliases = {"query": query, "predicate": predicate}
+    if preset.schema == SCHEMA_V3:
+        for key, value in aliases.items():
+            if value is None:
+                continue
+            if key in values:
+                raise _UsageError(
+                    f"parameter '{key}' conflicts with its --{key} alias"
+                )
+            values[key] = value
+    return values
 
 
 def _result_filter(

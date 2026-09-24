@@ -77,20 +77,32 @@ def build_cache_preimage(
     limits: Mapping[str, int] | Any | None = None,
     cache_schema: str = CACHE_SCHEMA,
     preset_schema: str | None = None,
+    include_uid: bool = False,
 ) -> dict[str, Any]:
     """Build the exact section 6.1 cache-key object."""
     resolved_chunking = _json_value(chunking)
     if not isinstance(resolved_chunking, dict):
         raise TypeError("chunking must be an object")
     if limits is not None:
-        if frozenset((*resolved_chunking, "limits")) not in _CHUNKING_SHAPES:
+        allowed_shapes = _CHUNKING_SHAPES
+        if preset_schema == "jm.preset/v3":
+            allowed_shapes = (*_CHUNKING_SHAPES, frozenset({"by", "limits"}))
+        if frozenset((*resolved_chunking, "limits")) not in allowed_shapes:
             raise ValueError("chunking must contain exactly the resolved fields")
         resolved_chunking["limits"] = _limits_dict(limits)
-    elif frozenset(resolved_chunking) not in _CHUNKING_SHAPES:
+    elif (
+        frozenset(resolved_chunking) not in _CHUNKING_SHAPES
+        and not (
+            preset_schema == "jm.preset/v3"
+            and frozenset(resolved_chunking) == frozenset({"by", "limits"})
+        )
+    ):
         raise ValueError("chunking must contain exactly the resolved fields")
     resolved_chunking["limits"] = _limits_dict(resolved_chunking["limits"])
 
     resolved_state = state.payload if hasattr(state, "payload") else state
+    if preset_schema == "jm.preset/v3":
+        resolved_state = _project_v3_state(resolved_state, questions, include_uid)
     preimage = {
         "cache_schema": cache_schema,
         "model": model,
@@ -105,6 +117,45 @@ def build_cache_preimage(
             raise ValueError("preset_schema must be a non-empty string")
         preimage["preset_schema"] = preset_schema
     return preimage
+
+
+def _project_v3_state(
+    state: Any, questions: Mapping[str, Any], include_uid: bool
+) -> dict[str, Any]:
+    if not isinstance(state, Mapping):
+        raise TypeError("state must be an object")
+    focus = state.get("focus")
+    context = state.get("context", {})
+    if not isinstance(context, Mapping):
+        raise TypeError("state.context must be an object")
+    named = v3_context_keys(questions, include_uid=include_uid)
+    projected_context = {
+        key: context[key]
+        for key in sorted(named)
+        if key in context
+    }
+    return {"focus": focus, "context": projected_context}
+
+
+def v3_context_keys(
+    questions: Mapping[str, Any], *, include_uid: bool = False
+) -> frozenset[str]:
+    named: set[str] = set()
+    for question in questions.values():
+        if not isinstance(question, Mapping):
+            continue
+        instructions = question.get("instructions")
+        if not isinstance(instructions, Mapping):
+            continue
+        fields = instructions.get("state_fields")
+        if not isinstance(fields, (list, tuple)):
+            continue
+        for field in fields:
+            if isinstance(field, str) and field.startswith("context."):
+                named.add(field.removeprefix("context."))
+    if include_uid:
+        named.add("uid")
+    return frozenset(named)
 
 
 @dataclass(frozen=True, slots=True)

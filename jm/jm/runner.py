@@ -45,7 +45,13 @@ from .answers import (
     SkipSummary,
     TypedResponse,
 )
-from .cache import CACHE_SCHEMA, CacheStore, build_cache_preimage, cache_key
+from .cache import (
+    CACHE_SCHEMA,
+    CacheStore,
+    build_cache_preimage,
+    cache_key,
+    v3_context_keys,
+)
 from .gates import (
     GateResult,
     Policy,
@@ -57,6 +63,7 @@ from .gates import (
 )
 from .presets import (
     SCHEMA_V2,
+    SCHEMA_V3,
     Preset,
     PresetUsageError,
     resolve_preset,
@@ -94,6 +101,8 @@ class State:
     state_ref: str
     focus: str
     context: Mapping[str, Any] = field(default_factory=dict)
+    source_ref: str | None = None
+    wire_context_keys: frozenset[str] | None = None
 
     def __post_init__(self) -> None:
         if not self.state_ref:
@@ -116,7 +125,16 @@ class State:
 
     @property
     def api_payload(self) -> dict[str, Any]:
-        return self.payload
+        if self.wire_context_keys is None:
+            return self.payload
+        return {
+            "focus": self.focus,
+            "context": {
+                key: self.context[key]
+                for key in sorted(self.wire_context_keys)
+                if key in self.context
+            },
+        }
 
 
 class JudgeFn(Protocol):
@@ -145,6 +163,10 @@ class InputError(ValueError):
     """Input data cannot be judged safely."""
 
     exit_code = 2
+
+    def __init__(self, message: str, *, source_ref: str | None = None) -> None:
+        super().__init__(message)
+        self.source_ref = source_ref
 
 
 @dataclass(frozen=True, slots=True)
@@ -434,6 +456,19 @@ class RunResult:
 
 
 _DEFAULT_MODEL = GATEWAY_MODEL
+
+_V3_CONTEXT_KEYS: dict[str, frozenset[str] | None] = {
+    "state": None,
+    "file": frozenset({"language", "metadata", "path"}),
+    "line": frozenset({"line", "source", "surrounding", "unit"}),
+    "para": frozenset(
+        {"heading", "paragraph", "source", "surrounding", "unit"}
+    ),
+    "record": frozenset({"metadata", "unit"}),
+    "hunk": frozenset(
+        {"changed_tests", "file", "hunk_header", "surrounding", "unit"}
+    ),
+}
 
 
 class _Unset:
@@ -801,6 +836,8 @@ def _run_pipeline(
     pretty_template: str | None = None,
     policy: str | Policy | None = None,
     require_states: int = 1,
+    formation_diagnostics: Sequence[Diagnostic] = (),
+    empty_input_error: bool = True,
     capture: _PipelineCapture | None = None,
 ) -> _PipelineOutcome:
     compiled_policy = compile_policy(policy, preset) if policy is not None else None
@@ -813,6 +850,8 @@ def _run_pipeline(
     formation = formation_report(
         admission,
         include_prefilter_warning=include_prefilter_warning,
+        diagnostics=formation_diagnostics,
+        empty_input_error=empty_input_error,
     )
     records: Iterable[CanonicalRecord] = _judge_core(
         preset,
@@ -952,7 +991,10 @@ def _judge_core(
         except (StateLimitError, TypeError, ValueError) as exc:
             raise InputError(str(exc)) from exc
         if state.state_ref in seen_refs:
-            raise InputError(f"duplicate state reference {state.state_ref!r}")
+            raise InputError(
+                f"duplicate state reference {state.state_ref!r}",
+                source_ref=state.source_ref,
+            )
         seen_refs.add(state.state_ref)
 
     active_judge = judge_fn
@@ -986,7 +1028,11 @@ def _judge_core(
     runtime_version = loaded_preset.version
     runtime_model = loaded_preset.model
     runtime_chunker = loaded_preset.default_chunker
-    runtime_schema = loaded_preset.schema if loaded_preset.schema == SCHEMA_V2 else None
+    runtime_schema = (
+        loaded_preset.schema
+        if loaded_preset.schema in {SCHEMA_V2, SCHEMA_V3}
+        else None
+    )
     runtime_questions = loaded_preset.questions
     runtime_chunking = dict(loaded_preset.chunking)
 
@@ -1000,6 +1046,20 @@ def _judge_core(
             state=state,
             cache_schema=CACHE_SCHEMA,
             preset_schema=runtime_schema,
+            include_uid=consistency is not None,
+        )
+
+    def request_state(state: State) -> State:
+        if runtime_schema != SCHEMA_V3:
+            return state
+        return State(
+            state.state_ref,
+            state.focus,
+            state.context,
+            source_ref=state.source_ref,
+            wire_context_keys=v3_context_keys(
+                runtime_questions, include_uid=consistency is not None
+            ),
         )
 
     if cache_store is not None and validated_states:
@@ -1017,6 +1077,28 @@ def _judge_core(
         preset_schema=runtime_schema,
     )
     diagnostics = list(formation_report.diagnostics)
+    if runtime_schema == SCHEMA_V3:
+        available = _V3_CONTEXT_KEYS[runtime_chunker]
+        if available is not None:
+            declared = set(loaded_preset.declared_parameters)
+            for question_id, question in runtime_questions.items():
+                for field in question["instructions"]["state_fields"]:
+                    if not field.startswith("context."):
+                        continue
+                    key = field.removeprefix("context.")
+                    if key in declared or key in available:
+                        continue
+                    diagnostics.append(
+                        Diagnostic(
+                            "warning",
+                            "state_field_unavailable",
+                            f"question '{question_id}' references unavailable field "
+                            f"'{field}' for chunker '{runtime_chunker}'",
+                            path=(
+                                f"questions.{question_id}.instructions.state_fields"
+                            ),
+                        )
+                    )
     effective_concurrency = min(concurrency, 8)
     if concurrency > 8:
         diagnostics.append(
@@ -1106,7 +1188,10 @@ def _judge_core(
                             consistency_cache_hits += 1
                     return cached.response, True
             response = _call_public_judge(
-                active_judge, call_state, runtime_questions, runtime_model
+                active_judge,
+                request_state(call_state),
+                runtime_questions,
+                runtime_model,
             )
             if (
                 isinstance(response, JudgeResponse)
@@ -1657,6 +1742,8 @@ def formation_report(
     admission: StateAdmission,
     *,
     include_prefilter_warning: bool,
+    diagnostics: Sequence[Diagnostic] = (),
+    empty_input_error: bool = True,
 ) -> FormationReport:
     events: list[FormationEvent] = []
     for rejection in admission.rejections:
@@ -1706,14 +1793,14 @@ def formation_report(
             )
             for state in admission.skipped
         )
-    diagnostics: list[Diagnostic] = []
+    result_diagnostics = list(diagnostics)
     if include_prefilter_warning:
         count = sum(
             rejection.reason == "prefiltered"
             for rejection in admission.skip_rejections
         )
         if count:
-            diagnostics.append(
+            result_diagnostics.append(
                 Diagnostic(
                     "warning",
                     "prefilter_recall",
@@ -1722,7 +1809,7 @@ def formation_report(
                     "--prefilter for full recall",
                 )
             )
-    if not admission.formed and not events:
+    if empty_input_error and not admission.formed and not events:
         events.append(
             FormationEvent(
                 "input_error",
@@ -1733,7 +1820,7 @@ def formation_report(
                 None,
             )
         )
-    return FormationReport(tuple(events), tuple(diagnostics))
+    return FormationReport(tuple(events), tuple(result_diagnostics))
 
 
 def _record_visible(

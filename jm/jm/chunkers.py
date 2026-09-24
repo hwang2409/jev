@@ -64,7 +64,7 @@ def _state(
     rejections: list[StateRejection] | None = None,
     source_ref: str | None = None,
 ) -> list[State]:
-    state = State(state_ref, focus, context)
+    state = State(state_ref, focus, context, source_ref=source_ref)
     try:
         validate_state(state, limits)
     except StateLimitError as exc:
@@ -130,6 +130,15 @@ def _input_error(
     rejections.append(StateRejection(None, "input_error", message, source_ref))
 
 
+def _with_parameters(
+    context: Mapping[str, Any], parameters: Mapping[str, str] | None
+) -> dict[str, Any]:
+    result = dict(context)
+    if parameters:
+        result.update(parameters)
+    return result
+
+
 def chunk_line(
     text: str | bytes,
     *,
@@ -137,6 +146,7 @@ def chunk_line(
     adjacent_lines: int = 1,
     query: str | None = None,
     predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
     limits: StateLimits = StateLimits(),
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
@@ -160,6 +170,7 @@ def chunk_line(
             context["query"] = query
         if predicate is not None:
             context["predicate"] = predicate
+        context = _with_parameters(context, parameters)
         states.extend(
             _state(
                 f"{source}#L{index}",
@@ -209,6 +220,7 @@ def chunk_para(
     adjacent_paragraphs: int = 1,
     query: str | None = None,
     predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
     limits: StateLimits = StateLimits(),
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
@@ -235,6 +247,7 @@ def chunk_para(
             context["query"] = query
         if predicate is not None:
             context["predicate"] = predicate
+        context = _with_parameters(context, parameters)
         states.extend(
             _state(
                 f"{source}#P{index}",
@@ -313,6 +326,7 @@ def chunk_hunk(
     *,
     limits: StateLimits = StateLimits(),
     changed_test_paths: Iterable[str] | None = None,
+    parameters: Mapping[str, str] | None = None,
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     lines = _as_text(diff).splitlines()
@@ -376,6 +390,7 @@ def chunk_hunk(
             "surrounding": surrounding,
             "changed_tests": tests,
         }
+        context = _with_parameters(context, parameters)
         states.extend(
             _state(
                 state_ref,
@@ -400,6 +415,7 @@ def chunk_file(
     limits: StateLimits = StateLimits(),
     query: str | None = None,
     predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
     _rejections: list[StateRejection] | None = None,
     _source_ref: str | None = None,
 ) -> list[State]:
@@ -417,6 +433,7 @@ def chunk_file(
         context["query"] = query
     if predicate is not None:
         context["predicate"] = predicate
+    context = _with_parameters(context, parameters)
     return _state(
         normalized,
         decoded,
@@ -434,6 +451,7 @@ def chunk_files(
     limits: StateLimits = StateLimits(),
     query: str | None = None,
     predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
     if isinstance(records, Mapping):
@@ -445,6 +463,7 @@ def chunk_files(
             limits=limits,
             query=query,
             predicate=predicate,
+            parameters=parameters,
             _rejections=_rejections,
         )
     states: list[State] = []
@@ -479,6 +498,7 @@ def chunk_files(
                 limits=limits,
                 query=query,
                 predicate=predicate,
+                parameters=parameters,
                 _rejections=_rejections,
                 _source_ref=source_ref,
             )
@@ -493,6 +513,7 @@ def chunk_record(
     metadata_fields: Iterable[str] | None = None,
     query: str | None = None,
     predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
     limits: StateLimits = StateLimits(),
     _rejections: list[StateRejection] | None = None,
 ) -> list[State]:
@@ -555,6 +576,7 @@ def chunk_record(
             context["query"] = query
         if predicate is not None:
             context["predicate"] = predicate
+        context = _with_parameters(context, parameters)
         states.extend(
             _state(
                 state_ref,
@@ -567,6 +589,91 @@ def chunk_record(
             )
         )
     return states
+
+
+def chunk_state(
+    states: str | bytes | Mapping[str, Any],
+    *,
+    limits: StateLimits = StateLimits(),
+    parameters: Mapping[str, str] | None = None,
+    _rejections: list[StateRejection] | None = None,
+) -> list[State]:
+    """Read universal raw states from a finite JSONL stream."""
+
+    values: list[tuple[str, Mapping[str, Any]]] = []
+    if isinstance(states, Mapping):
+        values.append(("stdin:byte=0,line=1", states))
+    else:
+        for line_number, byte_offset, line in _jsonl_lines(states):
+            if not line.strip():
+                continue
+            source_ref = f"stdin:byte={byte_offset},line={line_number}"
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                _input_error(
+                    _rejections,
+                    f"state JSONL line {line_number} is invalid JSON: {exc.msg}",
+                    source_ref,
+                )
+                continue
+            if not isinstance(value, dict):
+                _input_error(
+                    _rejections,
+                    f"state JSONL line {line_number} must be an object",
+                    source_ref,
+                )
+                continue
+            values.append((source_ref, value))
+
+    formed: list[State] = []
+    for source_ref, value in values:
+        unknown = set(value) - {"state_ref", "focus", "context"}
+        if unknown:
+            _input_error(
+                _rejections,
+                "state contains unknown field(s): "
+                + ", ".join(sorted(str(item) for item in unknown)),
+                source_ref,
+            )
+            continue
+        missing = [
+            field
+            for field in ("state_ref", "focus", "context")
+            if field not in value
+        ]
+        if missing:
+            _input_error(
+                _rejections,
+                f"state is missing required field(s): {', '.join(missing)}",
+                source_ref,
+            )
+            continue
+        state_ref = value["state_ref"]
+        focus = value["focus"]
+        context = value["context"]
+        if not isinstance(state_ref, str) or not state_ref:
+            _input_error(
+                _rejections,
+                "state_ref must be a non-empty string",
+                source_ref,
+            )
+            continue
+        if not isinstance(focus, str):
+            _input_error(_rejections, "focus must be a string", source_ref)
+            continue
+        if not isinstance(context, dict):
+            _input_error(_rejections, "context must be an object", source_ref)
+            continue
+        merged_context = _with_parameters(context, parameters)
+        try:
+            state = State(state_ref, focus, merged_context, source_ref=source_ref)
+            validate_state(state, limits)
+        except (StateLimitError, TypeError, ValueError) as exc:
+            _input_error(_rejections, str(exc), source_ref)
+            continue
+        formed.append(state)
+    return formed
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,6 +728,7 @@ def chunk_input(
         "hunk": chunk_hunk,
         "file": chunk_files,
         "record": chunk_record,
+        "state": chunk_state,
     }
     try:
         chunker = functions[by]
