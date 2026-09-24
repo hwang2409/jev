@@ -1237,6 +1237,10 @@ def _judge_core(
                 if cache_store is not None:
                     cached = cache_store.get(key)
                     if cached is not None:
+                        if not _complete_for_questions(
+                            cached.response, runtime_questions
+                        ):
+                            return ErrorResponse("malformed answer"), True
                         cache_store.publish(
                             request.payload["state"],
                             cached.response,
@@ -1990,10 +1994,16 @@ def _complete_for_questions(
 ) -> bool:
     if not response.complete or set(response.answers) != set(questions):
         return False
-    return all(
-        getattr(response.answers[question_id], "type", None) == _question_type(question)
-        for question_id, question in questions.items()
-    )
+    for question_id, question in questions.items():
+        answer = response.answers[question_id]
+        if getattr(answer, "type", None) != _question_type(question):
+            return False
+        if isinstance(answer, ScoreAnswer):
+            try:
+                score_argmax(answer)
+            except (TypeError, ValueError):
+                return False
+    return True
 
 
 def _aggregate_responses(
