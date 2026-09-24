@@ -36,7 +36,12 @@ def evaluate(cases: list[dict], catalog=None, route_fn=route) -> list[dict]:
                 usage=routed.usage,
                 calls=getattr(routed, "calls", 1),
             )
-            for field in ("latency_ms", "category", "category_confidence"):
+            for field in (
+                "latency_ms",
+                "category",
+                "category_confidence",
+                "category_probabilities",
+            ):
                 value = getattr(routed, field, None)
                 if value is not None:
                     row[field] = value

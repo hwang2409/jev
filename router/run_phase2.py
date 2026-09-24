@@ -2,13 +2,14 @@
 
 import argparse
 import json
+import random
 import statistics
 import time
 from pathlib import Path
 
 from jm.client import JevClient
 
-from catalogs import SUBSETS, catalog_for_size
+from catalogs import SUBSETS, catalog_for_size, primary_category_for_tool
 from evalcore import _mean, load_cases, top_k
 from evalcore import evaluate as evaluate_cases
 from hierarchical import route_hierarchical
@@ -101,7 +102,8 @@ def summarize_routing(
     }
     if any("category" in result for result in successful):
         category_correct = sum(
-            result.get("category") == result["expected_tool"].split("_", 1)[0]
+            result.get("category")
+            == primary_category_for_tool(result["expected_tool"])
             for result in successful
         )
         summary["category_top1_accuracy"] = _accuracy(
@@ -110,7 +112,7 @@ def summarize_routing(
         summary["mean_category_confidence"] = _mean(
             [r["category_confidence"] for r in successful]
         )
-        summary["top3_scope"] = "selected-category tools"
+        summary["top3_scope"] = "end-to-end catalog tools"
     if transport_status_counts:
         total_statuses = sum(transport_status_counts.values())
         summary["transport_status_counts"] = transport_status_counts
@@ -202,8 +204,12 @@ def run_comparison(
     return data
 
 
-def focused_cases(cases: list[dict], count: int = 20) -> list[dict]:
-    """Select one fixed case per core tool, then fill from the curve set."""
+def focused_cases(
+    cases: list[dict], count: int = 20, catalog: dict[str, str] | None = None
+) -> list[dict]:
+    """Select one fixed case per available tool, then fill from the curve set."""
+    if catalog is not None:
+        cases = [case for case in cases if case["expected_tool"] in catalog]
     selected = []
     seen_tools = set()
     for case in cases:
@@ -255,44 +261,83 @@ def run_limit_probe(
     return results
 
 
+class _AttemptThrottle:
+    def __init__(self, pace_seconds: float) -> None:
+        self.pace_seconds = pace_seconds
+        self.last_attempt = 0.0
+
+    def wait(self) -> None:
+        now = time.monotonic()
+        delay = self.pace_seconds - (now - self.last_attempt)
+        if self.last_attempt and delay > 0:
+            time.sleep(delay)
+        self.last_attempt = time.monotonic()
+
+
 def run_live_comparison(
-    cases: list[dict], pace_seconds: float = 2.1
+    cases: list[dict], pace_seconds: float = 2.1, seed: int = 810250
 ) -> dict[str, dict[int, dict]]:
-    """Run the focused comparison through one paced gateway client per variant."""
-    selected_cases = focused_cases(cases)
-    data = {}
-    for label, route_fn in (("flat", route), ("hierarchical", route_hierarchical)):
-        statuses: list[str] = []
-        client = JevClient()
-        client.set_response_observer(lambda status: statuses.append(str(status)))
-        last_call = [0.0]
+    """Run a fixed, interleaved comparison with one global attempt throttle."""
+    data = {"flat": {}, "hierarchical": {}}
+    sizes = list(CURVE_SIZES)
+    random.Random(seed).shuffle(sizes)
+    status_counts = {
+        (label, size): {}
+        for label in data
+        for size in CURVE_SIZES
+    }
+    active_block: list[tuple[str, int] | None] = [None]
+    client = JevClient()
+    throttle = _AttemptThrottle(pace_seconds)
 
-        def paced_route(task, step, history=None, catalog=None):
-            now = time.monotonic()
-            wait = pace_seconds - (now - last_call[0])
-            if last_call[0] and wait > 0:
-                time.sleep(wait)
-            last_call[0] = time.monotonic()
-            return route_fn(
-                task, step, history=history, catalog=catalog, client=client
-            )
+    def observe_status(status: int) -> None:
+        if active_block[0] is None:
+            return
+        counts = status_counts[active_block[0]]
+        key = str(status)
+        counts[key] = counts.get(key, 0) + 1
 
-        try:
-            data[label] = {}
-            for size in CURVE_SIZES:
-                statuses.clear()
-                results = evaluate_cases(
-                    selected_cases, SUBSETS[size], route_fn=paced_route
-                )
-                counts = {}
-                for status in statuses:
-                    counts[status] = counts.get(status, 0) + 1
+    client.set_request_observer(throttle.wait)
+    client.set_response_observer(observe_status)
+
+    def paced_route(task, step, history=None, catalog=None, route_fn=route):
+        return route_fn(
+            task, step, history=history, catalog=catalog, client=client
+        )
+
+    try:
+        for size in sizes:
+            selected_cases = focused_cases(cases, catalog=SUBSETS[size])
+            results_by_label = {"flat": [], "hierarchical": []}
+            for case in selected_cases:
+                for label, route_fn in (
+                    ("flat", route),
+                    ("hierarchical", route_hierarchical),
+                ):
+                    active_block[0] = (label, size)
+                    result = evaluate_cases(
+                        [case],
+                        SUBSETS[size],
+                        route_fn=lambda task, step, history=None, catalog=None: (
+                            paced_route(
+                                task,
+                                step,
+                                history=history,
+                                catalog=catalog,
+                                route_fn=route_fn,
+                            )
+                        ),
+                    )[0]
+                    results_by_label[label].append(result)
+            for label, results in results_by_label.items():
                 data[label][size] = {
-                    "summary": summarize_routing(results, counts),
+                    "summary": summarize_routing(
+                        results, status_counts[(label, size)]
+                    ),
                     "results": results,
                 }
-        finally:
-            client.close()
+    finally:
+        client.close()
     return data
 
 
@@ -301,14 +346,10 @@ def run_live_limit_probe(
 ) -> list[dict]:
     """Probe option counts through one paced gateway client."""
     client = JevClient()
-    last_call = [0.0]
+    throttle = _AttemptThrottle(pace_seconds)
+    client.set_request_observer(throttle.wait)
 
     def paced_route(task, step, history=None, catalog=None):
-        now = time.monotonic()
-        wait = pace_seconds - (now - last_call[0])
-        if last_call[0] and wait > 0:
-            time.sleep(wait)
-        last_call[0] = time.monotonic()
         return route(task, step, history=history, catalog=catalog, client=client)
 
     try:

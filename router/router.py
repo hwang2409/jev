@@ -20,6 +20,26 @@ class RouteResult:
     latency_ms: int | None = None
     category: str | None = None
     category_confidence: float | None = None
+    category_probabilities: dict[str, float] | None = None
+
+
+GATE_QUESTIONS = {
+    "needs_tool": {
+        "type": "noul",
+        "instructions": (
+            "Does the current step require calling a tool, rather than "
+            "the agent answering or reasoning directly from what it "
+            "already knows?"
+        ),
+    },
+    "step_clarity": {
+        "type": "noul",
+        "instructions": (
+            "Is the current step description specific enough to route "
+            "to a single tool with confidence?"
+        ),
+    },
+}
 
 
 def build_request(
@@ -34,25 +54,7 @@ def build_request(
         "single tool should it call to accomplish this step?",
         catalog,
     )
-    body["questions"].update(
-        {
-            "needs_tool": {
-                "type": "noul",
-                "instructions": (
-                    "Does the current step require calling a tool, rather than "
-                    "the agent answering or reasoning directly from what it "
-                    "already knows?"
-                ),
-            },
-            "step_clarity": {
-                "type": "noul",
-                "instructions": (
-                    "Is the current step description specific enough to route "
-                    "to a single tool with confidence?"
-                ),
-            },
-        }
-    )
+    body["questions"].update(GATE_QUESTIONS)
     return body
 
 

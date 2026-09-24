@@ -385,13 +385,72 @@ SUBSETS: dict[int, dict[str, str]] = {
 }
 
 
+_DOMAIN_CATEGORIES = {
+    "files": "workspace",
+    "shell": "runtime",
+    "web": "web_content",
+    "calendar": "scheduling",
+    "email": "communications",
+    "crm": "contacts",
+    "deploy": "deployments",
+    "data": "records",
+    "chat": "conversations",
+    "payments": "billing",
+}
+
+CATEGORY_DESCRIPTIONS = {
+    "workspace": "Documents, stored files, and local artifacts.",
+    "runtime": "Foreground and background process control.",
+    "web_content": "Remote pages, links, and fetched web content.",
+    "scheduling": "Calendar events, availability, and reminders.",
+    "communications": "Mailbox delivery, threads, and recipient messages.",
+    "contacts": "People, companies, deals, and relationship records.",
+    "deployments": "Release versions, environments, and rollouts.",
+    "records": "Structured rows, schemas, and stored business records.",
+    "conversations": "Chat channels, message threads, and conversation history.",
+    "billing": "Charges, invoices, balances, and payment methods.",
+}
+
+# Some actions honestly belong to more than one routing lane. The primary
+# category remains the domain lane, while these aliases test stage ambiguity.
+_OVERLAPPING_TOOLS = {
+    "communications": {
+        "chat_send_message",
+        "chat_reply_thread",
+        "chat_search_messages",
+    },
+    "conversations": {
+        "email_reply_thread",
+        "email_forward_message",
+        "email_search_messages",
+    },
+    "runtime": {"deploy_view_logs", "deploy_check_health"},
+    "records": {"crm_add_note", "crm_log_activity", "payments_get_balance"},
+}
+
+
 def category_catalogs(catalog: dict[str, str]) -> dict[str, dict[str, str]]:
-    """Group a catalog by its first name component."""
-    groups: dict[str, dict[str, str]] = {}
+    """Group a catalog by semantic routing lanes with honest overlaps."""
+    groups = {category: {} for category in CATEGORY_DESCRIPTIONS}
     for name, description in catalog.items():
-        category = name.split("_", 1)[0]
-        groups.setdefault(category, {})[name] = description
-    return groups
+        domain = name.split("_", 1)[0]
+        category = _DOMAIN_CATEGORIES.get(domain)
+        if category is None:
+            raise ValueError(f"no routing category for tool: {name}")
+        groups[category][name] = description
+        for overlapping_category, tools in _OVERLAPPING_TOOLS.items():
+            if name in tools:
+                groups[overlapping_category][name] = description
+    return {category: tools for category, tools in groups.items() if tools}
+
+
+def primary_category_for_tool(tool: str) -> str:
+    """Return the domain lane used for end-to-end probability accounting."""
+    domain = tool.split("_", 1)[0]
+    try:
+        return _DOMAIN_CATEGORIES[domain]
+    except KeyError as exc:
+        raise ValueError(f"no routing category for tool: {tool}") from exc
 
 
 def catalog_for_size(size: int) -> dict[str, str]:

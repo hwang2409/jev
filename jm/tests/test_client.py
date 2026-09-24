@@ -331,6 +331,32 @@ def test_client_retries_503_and_504_without_retry_after_with_bounded_backoff(
     assert sleeps == [1.25, 2.25]
 
 
+def test_request_observer_runs_before_every_transport_attempt(monkeypatch) -> None:
+    attempts = 0
+    observed: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503, request=request)
+        return _response(request, answers={})
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+        jitter=lambda: 0.0,
+    )
+    client.set_request_observer(lambda: observed.append(attempts + 1))
+    try:
+        assert client.evaluate(State("case#1", "focus"), {}).complete
+    finally:
+        client.close()
+
+    assert observed == [1, 2, 3]
+
+
 @pytest.mark.parametrize(
     ("metadata", "expected"),
     [

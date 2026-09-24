@@ -9,6 +9,7 @@ from catalogs import (
     CATALOG_250,
     SUBSETS,
     _generated_tools,
+    category_catalogs,
 )
 
 DOMAINS = {
@@ -66,6 +67,16 @@ def test_catalog_names_and_descriptions_are_concrete():
         assert "  " not in description
 
 
+def test_hierarchy_categories_are_semantic_and_overlap_honestly():
+    groups = category_catalogs(CATALOG_250)
+
+    assert "files" not in groups
+    assert "workspace" in groups
+    assert "files_get_status" in groups["workspace"]
+    assert "email_reply_thread" in groups["communications"]
+    assert "email_reply_thread" in groups["conversations"]
+
+
 def test_subsets_are_strictly_nested_and_complete():
     assert list(SUBSETS) == [15, 30, 60, 120, 180, 250]
     assert len(SUBSETS[15]) == 15
@@ -88,11 +99,12 @@ def test_subset_names_are_valid_catalog_names():
 
 def test_curve_evalset_has_schema_count_and_subset_coverage():
     cases = load_evalset("evalset_curve.jsonl")
-    assert len(cases) == 40
-    assert len({case["id"] for case in cases}) == 40
+    assert len(cases) == 50
+    assert len({case["id"] for case in cases}) == 50
     counts = Counter(case["expected_tool"] for case in cases)
-    assert set(counts) <= set(SUBSETS[15])
+    assert set(counts) <= set(SUBSETS[250])
     assert all(counts[tool] >= 2 for tool in SUBSETS[15])
+    assert sum(tool not in SUBSETS[15] for tool in counts) == 10
     for case in cases:
         assert set(case) == SCHEMA
         assert case["expected_needs_tool"] is True
