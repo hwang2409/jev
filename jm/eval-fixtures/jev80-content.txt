@@ -1,0 +1,19 @@
+release note: the operator approved the release candidate for review.
+
+release status: the candidate build passed unit checks.
+
+release scope: the candidate build changes the parser only.
+
+release risk: the candidate build has one known warning.
+
+review owner: the platform team owns the final review.
+
+review timing: the platform team reviews the candidate on friday.
+
+rollout plan: the operator enables the candidate for one workspace.
+
+rollback plan: the operator restores the previous build if needed.
+
+observability: the dashboard tracks errors and latency during rollout.
+
+decision record: the release proceeds after the platform review.
