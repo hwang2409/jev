@@ -157,9 +157,7 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
     _string(root["name"], "name")
     _string(root["version"], "version")
-    model = _string(root["model"], "model")
-    if model != GATEWAY_MODEL:
-        raise PresetValidationError(f"model must be {GATEWAY_MODEL!r}")
+    _string(root["model"], "model")
     if "description" in root:
         _string(root["description"], "description")
     if "calibration" in root:

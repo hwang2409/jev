@@ -150,8 +150,7 @@ class CacheEntry:
         }
         if self.usage is not None:
             result["usage"] = self.usage
-        if self.response.served_model is not None:
-            result["served_model"] = self.response.served_model
+        result["served_model"] = self.response.served_model or "unknown"
         return result
 
 
@@ -192,6 +191,14 @@ class CacheStore:
             raise ValueError("response answer IDs do not match question battery")
         if not response.complete:
             raise ValueError("only complete responses can be cached")
+        if response.served_model is None:
+            response = JudgeResponse(
+                response.answers,
+                response.missing_questions,
+                served_model="unknown",
+                usage=response.usage,
+                latency_ms=response.latency_ms,
+            )
         resolved_usage = response.usage if usage is None else usage
         key = cache_key(write_preimage)
         entry = CacheEntry(
@@ -412,15 +419,14 @@ def _parse_entry(
     created_at = payload.get("created_at")
     if not isinstance(created_at, str):
         raise ValueError("cache entry has no creation time")
-    served_model = payload.get("served_model")
-    if served_model is not None and not isinstance(served_model, str):
+    served_model = payload.get("served_model", "unknown")
+    if not isinstance(served_model, str) or not served_model:
         raise ValueError("cache entry has an invalid served model")
-    if served_model is not None:
-        response = JudgeResponse(
-            response.answers,
-            response.missing_questions,
-            served_model=served_model,
-        )
+    response = JudgeResponse(
+        response.answers,
+        response.missing_questions,
+        served_model=served_model,
+    )
     response = JudgeResponse(
         response.answers,
         response.missing_questions,

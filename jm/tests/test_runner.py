@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import pytest
 
 from jm.answers import (
     ChoiceAnswer,
+    DiagnosticRecord,
     ErrorResponse,
     JudgeResponse,
     NoulAnswer,
@@ -181,6 +184,7 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "model": preset.model,
         "chunker": "file",
         "cache": "not_applicable",
+        "served_model": "unknown",
     }
 
 
@@ -196,7 +200,262 @@ def test_runner_records_gateway_served_model() -> None:
         {"matches_query": {"type": "noul"}},
     )
 
-    assert result.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
+    assert result.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
+    assert result.records[0].to_dict()["meta"]["served_model"] == "jev-1.13.0"
+
+
+def test_default_concurrency_is_four() -> None:
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def judge(*_args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(8)],
+        {"matches": {"type": "noul"}},
+    )
+
+    assert max_active == 4
+    assert result.stats.discovered == result.stats.judged == 8
+
+
+def test_concurrency_is_capped_and_reports_a_diagnostic() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def judge(*_args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(16)],
+        {"matches": {"type": "noul"}},
+        concurrency=12,
+    )
+
+    assert max_active <= 8
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics == [
+        {
+            "severity": "warning",
+            "code": "concurrency_capped",
+            "message": "requested=12 effective=8 cap=8",
+            "path": None,
+            "source_ref": None,
+        }
+    ]
+    assert result.stats.discovered == result.stats.judged == 16
+
+
+def test_two_consecutive_503s_back_off_without_changing_coverage_counts() -> None:
+    def judge(state, *_args):
+        if state.state_ref in {"state-0", "state-1"}:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(6)],
+        {"matches": {"type": "noul"}},
+    )
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert diagnostics[0]["message"] == "status=503 consecutive=2 effective=2"
+    assert result.stats.discovered == 6
+    assert result.stats.judged == 6
+    assert result.stats.failed == 2
+
+
+def test_clean_minute_restores_one_concurrency_step(monkeypatch) -> None:
+    clock = iter((0.0, 0.0, 61.0, 61.0, 61.0, 61.0))
+    monkeypatch.setattr("jm.runner._time.monotonic", lambda: next(clock, 61.0))
+
+    def judge(state, *_args):
+        if state.state_ref in {"state-0", "state-1"}:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(6)],
+        {"matches": {"type": "noul"}},
+    )
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[-1]["code"] == "concurrency_restored"
+    assert diagnostics[-1]["message"] == "clean_seconds=60 effective=3"
+
+
+def test_transport_503_retries_feed_runner_backoff() -> None:
+    statuses = iter((503, 503, 200))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = next(statuses)
+        if status == 200:
+            return httpx.Response(
+                status,
+                json={
+                    "answers": {
+                        "matches": {"type": "boolean", "probability": 0.9}
+                    }
+                },
+                request=request,
+            )
+        return httpx.Response(status, request=request)
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        result = Runner(gateway).run(
+            [State("state-0", "focus")],
+            {"matches": {"type": "noul"}},
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert result.stats.discovered == result.stats.judged == 1
+    assert result.stats.failed == 0
+
+
+@pytest.mark.parametrize("boundary", [59.0, 60.0])
+def test_transport_restore_boundary_uses_observation_time(
+    boundary: float, monkeypatch
+) -> None:
+    clock = 0.0
+    finished_retries = threading.Event()
+    attempts_by_state: dict[str, int] = {}
+
+    def success(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "matches": {"type": "boolean", "probability": 0.9}
+                }
+            },
+            request=request,
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal clock
+        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        if state_ref == "state-0":
+            attempt = attempts_by_state.get(state_ref, 0) + 1
+            attempts_by_state[state_ref] = attempt
+            clock = 0.0
+            if attempt < 3:
+                return httpx.Response(503, request=request)
+            finished_retries.set()
+            return success(request)
+        finished_retries.wait(timeout=1.0)
+        clock = boundary
+        return success(request)
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        monkeypatch.setattr("jm.runner._time.monotonic", lambda: clock)
+        result = Runner(gateway).run(
+            [
+                State("state-0", "focus"),
+                State("state-1", "focus"),
+                State("state-2", "focus"),
+            ],
+            {"matches": {"type": "noul"}},
+            concurrency=2,
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert (diagnostics[-1]["code"] == "concurrency_restored") is (boundary == 60.0)
+
+
+def test_transport_backoff_reduces_repeated_bursts_to_one() -> None:
+    attempts_by_state: dict[str, int] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        attempt = attempts_by_state.get(state_ref, 0) + 1
+        attempts_by_state[state_ref] = attempt
+        if attempt < 3:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "matches": {"type": "boolean", "probability": 0.9}
+                }
+            },
+            request=request,
+        )
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        result = Runner(gateway).run(
+            [State("state-0", "focus"), State("state-1", "focus")],
+            {"matches": {"type": "noul"}},
+            concurrency=4,
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert [diagnostic["message"] for diagnostic in diagnostics] == [
+        "status=503 consecutive=2 effective=2",
+        "status=503 consecutive=2 effective=1",
+    ]
+    assert result.stats.discovered == result.stats.judged == 2
+    assert result.stats.failed == 0
 
 
 @pytest.mark.parametrize("noul", [0.5, 0.9])
@@ -597,9 +856,10 @@ def test_runner_emits_exact_partial_json() -> None:
                 "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
-                "chunker": "para",
-                "cache": "not_applicable",
-                "partial": True,
+                    "chunker": "para",
+                    "cache": "not_applicable",
+                    "partial": True,
+                    "served_model": "unknown",
             },
         },
         {
@@ -616,9 +876,10 @@ def test_runner_emits_exact_partial_json() -> None:
             "meta": {
                 "preset": "jm",
                 "preset_version": "1",
-                "model": "typesafe-ai/jev",
-                "chunker": "para",
-                "cache": "not_applicable",
+                    "model": "typesafe-ai/jev",
+                    "chunker": "para",
+                    "cache": "not_applicable",
+                    "served_model": "unknown",
             },
         },
     ]
@@ -662,6 +923,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
             "model": "typesafe-ai/jev",
             "chunker": "para",
             "cache": "not_applicable",
+            "served_model": "unknown",
         },
     }
     assert summary["boundary"] == "max_chunks=2"
@@ -762,6 +1024,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
+                "served_model": "unknown",
             },
         },
         {
@@ -781,6 +1044,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
+                "served_model": "unknown",
             },
         },
     ]
@@ -1293,16 +1557,19 @@ def test_gateway_client_never_includes_api_key_in_error(monkeypatch) -> None:
     assert "do-not-leak-this" not in response.error
 
 
-def test_gateway_client_rejects_moving_model_name(monkeypatch) -> None:
+def test_gateway_client_accepts_and_sends_configured_model_name(monkeypatch) -> None:
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["ai-model-id"] == "jev-latest"
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
     client = httpx.Client(
-        transport=httpx.MockTransport(
-            lambda request: pytest.fail("moving model must not make a request")
-        )
+        transport=httpx.MockTransport(handler)
     )
 
     response = GatewayClient(http_client=client)(
-        State("stdin#L1", "focus"), QUESTIONS, "jev-latest"
+        State("stdin#L1", "focus"), {}, "jev-latest"
     )
 
-    assert response == ErrorResponse("model must be typesafe-ai/jev")
+    assert response.complete

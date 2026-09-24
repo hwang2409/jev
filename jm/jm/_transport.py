@@ -33,6 +33,7 @@ _GATEWAY_HEADERS = {
     "ai-model-id": _GATEWAY_MODEL,
 }
 _DEFAULT_MAX_ATTEMPTS = 3
+_RETRYABLE_STATUSES = frozenset({429, 503, 504, 529})
 _MAX_WAIT_SECONDS = 300.0
 _MAX_RESPONSE_BYTES = 1_048_576
 
@@ -77,14 +78,26 @@ class _GatewayTransport:
         self.async_sleep = async_sleep
         self.jitter = jitter or (lambda: _random.uniform(0.0, backoff_base))
         self.backoff_base = backoff_base
+        self._response_observer: _Callable[[int], None] | None = None
+
+    def set_response_observer(
+        self, observer: _Callable[[int], None] | None
+    ) -> None:
+        self._response_observer = observer
+
+    def _observe_response(self, status_code: int) -> None:
+        if self._response_observer is not None:
+            self._response_observer(status_code)
 
     def post(
         self,
         payload: _Mapping[str, _Any],
         api_key: str,
         attempts_used: int = 0,
+        *,
+        model: str = _GATEWAY_MODEL,
     ) -> tuple[_TransportResponse | _ErrorResponse, int]:
-        headers = {"Authorization": f"Bearer {api_key}", **_GATEWAY_HEADERS}
+        headers = _request_headers(api_key, model)
         attempts = attempts_used
         if attempts >= self.max_attempts:
             return _attempt_budget_error(attempts), attempts
@@ -98,7 +111,8 @@ class _GatewayTransport:
                     json=payload,
                     timeout=self.timeout,
                 ) as response:
-                    if response.status_code in {429, 529}:
+                    self._observe_response(response.status_code)
+                    if response.status_code in _RETRYABLE_STATUSES:
                         if attempts < self.max_attempts:
                             self._wait(attempts, _retry_after(response))
                             continue
@@ -130,8 +144,10 @@ class _GatewayTransport:
         payload: _Mapping[str, _Any],
         api_key: str,
         attempts_used: int = 0,
+        *,
+        model: str = _GATEWAY_MODEL,
     ) -> tuple[_TransportResponse | _ErrorResponse, int]:
-        headers = {"Authorization": f"Bearer {api_key}", **_GATEWAY_HEADERS}
+        headers = _request_headers(api_key, model)
         attempts = attempts_used
         if self._async_http_client is None:
             self._async_http_client = _httpx.AsyncClient(timeout=self.timeout)
@@ -146,7 +162,8 @@ class _GatewayTransport:
                     json=payload,
                     timeout=self.timeout,
                 )
-                if response.status_code in {429, 529}:
+                self._observe_response(response.status_code)
+                if response.status_code in _RETRYABLE_STATUSES:
                     if attempts < self.max_attempts:
                         await self._await_wait(attempts, _retry_after(response))
                         continue
@@ -195,6 +212,14 @@ async def _async_sleep(delay: float) -> None:
     import asyncio
 
     await asyncio.sleep(delay)
+
+
+def _request_headers(api_key: str, model: str) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {api_key}",
+        **_GATEWAY_HEADERS,
+        "ai-model-id": model,
+    }
 
 
 def _resolve_gateway_key() -> str | None:

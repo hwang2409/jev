@@ -5,6 +5,7 @@ import json
 import math
 import re
 import string
+import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -20,6 +21,8 @@ from .answers import (
     ChoiceAnswer,
     CoverageReason,
     CoverageRecord,
+    Diagnostic,
+    DiagnosticRecord,
     ErrorDetail,
     ErrorRecord,
     ErrorResponse,
@@ -304,6 +307,7 @@ class RunResult:
     coverage_reasons: tuple[CoverageReason, ...] = ()
     exit_code: int = 0
     gate_result: GateResult | None = None
+    broken_pipe: bool = False
 
 
 _DEFAULT_MODEL = GATEWAY_MODEL
@@ -363,7 +367,7 @@ class Runner:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
-        concurrency: int = 1,
+        concurrency: int = 4,
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
         policy: str | Policy | None = None,
@@ -375,7 +379,11 @@ class Runner:
     ) -> RunResult:
         if policy is not None and require_states < 0:
             raise PolicyError("require_states must be non-negative")
-        if concurrency <= 0:
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or concurrency <= 0
+        ):
             raise ValueError("concurrency must be a positive integer")
         loaded_preset = self._load_preset(self.preset if preset is None else preset)
         if policy is not None and prefilter is not None:
@@ -515,11 +523,24 @@ class Runner:
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
+        effective_concurrency = min(concurrency, 8)
+        if concurrency > 8:
+            records.append(
+                DiagnosticRecord(
+                    Diagnostic(
+                        "warning",
+                        "concurrency_capped",
+                        f"requested={concurrency} "
+                        f"effective={effective_concurrency} cap=8",
+                    )
+                )
+            )
         consistency_cache_hits = 0
         consistency_live_calls = 0
         consistency_usage: dict[str, int | float] = {}
         consistency_lock = Lock()
         consistency_call_lock = Lock()
+        concurrency_lock = Lock()
 
         def judge_state(
             state: State,
@@ -585,7 +606,9 @@ class Runner:
                         cache="hit" if cache_hit else "miss",
                     )
                 if isinstance(response, JudgeResponse) and response.served_model:
-                    state_meta = replace(state_meta, model=response.served_model)
+                    state_meta = replace(
+                        state_meta, served_model=response.served_model
+                    )
                 return response, state_meta
 
             responses_for_state: list[JudgeResponse] = []
@@ -640,20 +663,123 @@ class Runner:
                     state_meta,
                 )
             if aggregate.served_model:
-                state_meta = replace(state_meta, model=aggregate.served_model)
+                state_meta = replace(
+                    state_meta, served_model=aggregate.served_model
+                )
             return aggregate, state_meta
 
+        broken_pipe = False
+
         def write(record: CanonicalRecord, visible: bool = True) -> None:
+            nonlocal broken_pipe
+            if broken_pipe:
+                return
             records.append(record)
-            if stdout is not None and visible:
+            if (
+                stdout is None
+                or not visible
+                or isinstance(record, DiagnosticRecord)
+            ):
+                return
+            try:
                 emit_jsonl(record, stdout)
+            except BrokenPipeError:
+                broken_pipe = True
+                try:
+                    stdout.close()
+                except OSError:
+                    pass
 
         admitted = admission.admitted
-        if concurrency == 1 or len(admitted) <= 1:
-            judged = [judge_state(state) for state in admitted]
-        else:
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                judged = list(executor.map(judge_state, admitted))
+        judged: list[tuple[TypedResponse, RecordMeta]] = []
+        current_concurrency = effective_concurrency
+        consecutive_503 = 0
+        last_503_at: float | None = None
+        concurrency_diagnostics: list[DiagnosticRecord] = []
+
+        def observe_response(status_code: int) -> None:
+            nonlocal consecutive_503, current_concurrency, last_503_at
+            with concurrency_lock:
+                now = _time.monotonic()
+                if status_code == 503:
+                    consecutive_503 += 1
+                    last_503_at = now
+                    if consecutive_503 >= 2:
+                        reduced = max(1, current_concurrency // 2)
+                        if reduced < current_concurrency:
+                            current_concurrency = reduced
+                            concurrency_diagnostics.append(
+                                DiagnosticRecord(
+                                    Diagnostic(
+                                        "warning",
+                                        "concurrency_backoff",
+                                        "status=503 "
+                                        "consecutive=2 "
+                                        f"effective={current_concurrency}",
+                                    )
+                                )
+                            )
+                        consecutive_503 = 0
+                    return
+
+                consecutive_503 = 0
+                if (
+                    last_503_at is not None
+                    and current_concurrency < effective_concurrency
+                    and now - last_503_at >= 60.0
+                ):
+                    current_concurrency += 1
+                    concurrency_diagnostics.append(
+                        DiagnosticRecord(
+                            Diagnostic(
+                                "info",
+                                "concurrency_restored",
+                                f"clean_seconds=60 effective={current_concurrency}",
+                            )
+                        )
+                    )
+                    last_503_at = now
+
+        set_response_observer = getattr(
+            self.judge_fn, "set_response_observer", None
+        )
+        uses_transport_observer = callable(set_response_observer)
+        if uses_transport_observer:
+            set_response_observer(observe_response)
+        offset = 0
+        diagnostics_published = 0
+        try:
+            while offset < len(admitted):
+                with concurrency_lock:
+                    batch_size = current_concurrency
+                batch = admitted[offset : offset + batch_size]
+                if batch_size == 1 or len(batch) <= 1:
+                    batch_results = [judge_state(state) for state in batch]
+                else:
+                    with ThreadPoolExecutor(max_workers=batch_size) as executor:
+                        batch_results = list(executor.map(judge_state, batch))
+                judged.extend(batch_results)
+                if not uses_transport_observer:
+                    for response, _state_meta in batch_results:
+                        status_code = (
+                            response.http_status
+                            if isinstance(response, ErrorResponse)
+                            and response.http_status is not None
+                            else 200
+                        )
+                        observe_response(status_code)
+                with concurrency_lock:
+                    new_diagnostics = concurrency_diagnostics[
+                        diagnostics_published:
+                    ]
+                    diagnostics_published = len(concurrency_diagnostics)
+                records.extend(new_diagnostics)
+                offset += len(batch)
+        finally:
+            if uses_transport_observer:
+                set_response_observer(None)
+
+        responses.extend(response for response, _state_meta in judged)
 
         pretty_template = (
             loaded_preset.data["output"]["pretty_template"]
@@ -661,12 +787,13 @@ class Runner:
             else None
         )
         for state, (response, state_meta) in zip(admitted, judged):
-            responses.append(response)
             record = _response_record(state.state_ref, response, state_meta)
             visible = not isinstance(record, ResultRecord) or result_filter is None
             if isinstance(record, ResultRecord) and result_filter is not None:
                 visible = result_filter(record)
             write(record, visible)
+            if broken_pipe:
+                break
             if (
                 output_format == "pretty"
                 and isinstance(record, ResultRecord)
@@ -677,6 +804,8 @@ class Runner:
 
         for record in _rejection_records(admission, meta):
             write(record)
+            if broken_pipe:
+                break
             if stderr is not None and record.error.kind != "prefiltered":
                 stderr.write(f"jm: warning: {record.error.message}\n")
                 stderr.flush()
@@ -718,6 +847,17 @@ class Runner:
             meta=coverage_meta,
         )
         write(coverage_record)
+        if broken_pipe:
+            return RunResult(
+                admission,
+                tuple(responses),
+                stats,
+                tuple(records),
+                reasons,
+                0,
+                None,
+                True,
+            )
         if stderr is not None:
             if coverage == "partial":
                 prefiltered_count = sum(
@@ -770,6 +910,7 @@ class Runner:
             reasons,
             exit_code,
             gate_result,
+            False,
         )
 
     def run_gate(

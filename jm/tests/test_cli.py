@@ -22,6 +22,17 @@ from jm.runner import BM25CorpusStats, State, bm25_rank, bm25_score, tokenize
 ROOT = Path(__file__).parents[1]
 
 
+class BrokenPipeStream:
+    def write(self, _value: str) -> int:
+        raise BrokenPipeError(32, "broken pipe")
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def _invoke(
     argv: list[str],
     *,
@@ -41,6 +52,73 @@ def _invoke(
     )
     records = [json.loads(line) for line in stdout.getvalue().splitlines()]
     return code, records, stderr.getvalue()
+
+
+def test_sigpipe_returns_quietly_without_a_traceback(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    code = main(
+        ["jgrep", "--query", "launch"],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=lambda state, questions, model: JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)}
+        ),
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert "traceback" not in stderr.getvalue().lower()
+
+
+def test_sigpipe_gate_returns_zero_without_late_stderr(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    code = main(
+        [
+            "gate",
+            "--preset",
+            "jgrep",
+            "--policy",
+            "any(matches_query.noul >= 0.75)",
+            "--query",
+            "launch",
+        ],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert stderr.getvalue() == ""
+
+
+def test_sigpipe_partial_judgment_returns_zero_without_late_stderr(
+    tmp_path: Path,
+) -> None:
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+        ],
+        stdin=io.StringIO("launch decision\n\nother text\n\nthird text\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert stderr.getvalue() == ""
 
 
 def _judge(*_args) -> JudgeResponse:
@@ -1150,6 +1228,19 @@ def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) 
         "stdin#L3",
         "stdin#L4",
     ]
+
+
+def test_cli_routes_concurrency_diagnostics_to_stderr(tmp_path: Path) -> None:
+    code, _records, stderr = _invoke(
+        ["jgrep", "--query", "launch", "--by", "line", "--concurrency", "12"],
+        input_text="launch\n",
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert "code=concurrency_capped" in stderr
+    assert "severity=warning" in stderr
 
 
 def test_incompatible_by_is_usage_error_without_coverage() -> None:
