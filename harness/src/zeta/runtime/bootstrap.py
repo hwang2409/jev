@@ -135,19 +135,8 @@ def _create_runtime_bootstrap(
 
     repo_root = discover_repo_root(Path.cwd())
     loaded_settings = load_settings_fn(home=home, project_dir=repo_root / ".zeta")
-    config = resolve_settings(
-        loaded_settings.settings,
-        cli_provider=getattr(args, "provider", None),
-        cli_model=getattr(args, "model", None),
-        cli_router=getattr(args, "router", None),
-        cli_router_style=getattr(args, "router_style", None),
-        cli_jev_compaction=getattr(args, "jev_compaction", None),
-        cli_memory_injection=getattr(args, "memory_injection", None),
-        cli_yolo=getattr(args, "yolo", None),
-        cli_safety_tier=getattr(args, "safety_tier", None),
-        cli_token_budget=getattr(args, "token_budget", None),
-        cli_memory_config=getattr(args, "memory_config", None),
-    )
+    cli_provider = getattr(args, "provider", None)
+    cli_model = getattr(args, "model", None)
 
     resume_id = getattr(args, "resume", None)
     continue_session = bool(getattr(args, "continue_session", False))
@@ -155,7 +144,7 @@ def _create_runtime_bootstrap(
     resuming = continue_session or resume_id is not None
     if force_provider and not resuming:
         raise SessionError("--force-provider requires --continue or --resume")
-    if force_provider and config.model is None:
+    if force_provider and cli_model is None and loaded_settings.settings.model is None:
         raise SessionError("--force-provider requires --model")
 
     opened = None
@@ -175,8 +164,6 @@ def _create_runtime_bootstrap(
         metadata = opened.metadata
         skill_catalog = _session_skill_catalog(metadata, home, manager)
         agent_catalog = _session_agent_catalog(metadata, home, manager)
-        cli_provider = getattr(args, "provider", None)
-        cli_model = getattr(args, "model", None)
         provider_override = cli_provider or loaded_settings.settings.provider
         model_override = cli_model or loaded_settings.settings.model
         mismatches = []
@@ -227,8 +214,8 @@ def _create_runtime_bootstrap(
                 model if model != metadata.model else None,
             )
     else:
-        provider = config.provider
-        model = config.model
+        provider = cli_provider or loaded_settings.settings.provider or "fake"
+        model = None
         skill_catalog = discover_session_skills(home=home, project_dir=repo_root)
         agent_catalog = discover_session_agents(home=home, project_dir=repo_root)
         project_context = load_project_context_fn(
@@ -240,6 +227,30 @@ def _create_runtime_bootstrap(
             catalog=skill_catalog,
         )
         override_on_resume = False
+
+    cli_router = getattr(args, "router", None)
+    if (
+        getattr(args, "headless", False)
+        and cli_router is None
+        and loaded_settings.settings.router is None
+        and provider == "fake"
+    ):
+        cli_router = False
+    config = resolve_settings(
+        loaded_settings.settings,
+        cli_provider=cli_provider,
+        cli_model=cli_model,
+        cli_router=cli_router,
+        cli_router_style=getattr(args, "router_style", None),
+        cli_jev_compaction=getattr(args, "jev_compaction", None),
+        cli_memory_injection=getattr(args, "memory_injection", None),
+        cli_yolo=getattr(args, "yolo", None),
+        cli_safety_tier=getattr(args, "safety_tier", None),
+        cli_token_budget=getattr(args, "token_budget", None),
+        cli_memory_config=getattr(args, "memory_config", None),
+    )
+    if not resuming:
+        model = config.model
 
     def completion_success() -> None:
         nonlocal pending_override
@@ -398,6 +409,7 @@ def create_headless_app(args: argparse.Namespace) -> HeadlessApp:
             args,
             home=home,
             ephemeral_root=ephemeral_root,
+            backend_builder=build_backend,
         )
         return HeadlessApp(
             runtime.composition.loop,

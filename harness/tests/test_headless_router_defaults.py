@@ -62,7 +62,7 @@ def test_resumed_headless_router_default_uses_session_provider(
 
     backend = FakeBackend([ScriptedTurn(content=[TextContent("done")])])
     monkeypatch.setattr(
-        "zeta.tui.app.build_backend",
+        "zeta.runtime.bootstrap.build_backend",
         lambda *_args, **_kwargs: (backend, "test-model"),
     )
 
