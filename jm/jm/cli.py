@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from ._transport import _resolve_gateway_key as resolve_gateway_key
-from .answers import NoulAnswer, ResultRecord, ScoreAnswer
+from .answers import DiagnosticRecord, NoulAnswer, ResultRecord, ScoreAnswer
 from .cache import CacheStore
 from .calibrate import (
     CalibrationTolerances,
@@ -215,6 +215,8 @@ def main(
         errors.write(f"jm: error: {exc}\n")
         errors.flush()
         return 64
+    except BrokenPipeError:
+        return 0
     except OSError as exc:
         errors.write(f"jm: error: {exc}\n")
         errors.flush()
@@ -363,6 +365,7 @@ def _judgment_command(
             run_kwargs["policy"] = args.policy
             run_kwargs["require_states"] = args.require_states
         result = runner.run(states, **run_kwargs)
+        _emit_diagnostics(result.records, stderr)
         return result.exit_code
     finally:
         if client is not None:
@@ -380,6 +383,19 @@ def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> N
         if isinstance(question, Mapping)
     ):
         raise _UsageError("--consistency requires at least one Noul question")
+
+
+def _emit_diagnostics(records: tuple[object, ...], stderr: TextIO) -> None:
+    for record in records:
+        if not isinstance(record, DiagnosticRecord):
+            continue
+        diagnostic = record.diagnostic
+        stderr.write(
+            "jm: diagnostic: "
+            f"code={diagnostic.code} severity={diagnostic.severity} "
+            f"{diagnostic.message}\n"
+        )
+    stderr.flush()
 
 
 def resolve_preset_or_path(identifier: str) -> Preset:

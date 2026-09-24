@@ -43,6 +43,33 @@ def _invoke(
     return code, records, stderr.getvalue()
 
 
+def test_sigpipe_returns_quietly_without_a_traceback(tmp_path: Path) -> None:
+    class BrokenPipeStream:
+        def write(self, _value: str) -> int:
+            raise BrokenPipeError(32, "broken pipe")
+
+        def flush(self) -> None:
+            return None
+
+        def close(self) -> None:
+            return None
+
+    stderr = io.StringIO()
+    code = main(
+        ["jgrep", "--query", "launch"],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=lambda state, questions, model: JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)}
+        ),
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert "traceback" not in stderr.getvalue().lower()
+
+
 def _judge(*_args) -> JudgeResponse:
     return JudgeResponse({"matches_query": NoulAnswer(0.9)})
 
@@ -1150,6 +1177,19 @@ def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) 
         "stdin#L3",
         "stdin#L4",
     ]
+
+
+def test_cli_routes_concurrency_diagnostics_to_stderr(tmp_path: Path) -> None:
+    code, _records, stderr = _invoke(
+        ["jgrep", "--query", "launch", "--by", "line", "--concurrency", "12"],
+        input_text="launch\n",
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert "code=concurrency_capped" in stderr
+    assert "severity=warning" in stderr
 
 
 def test_incompatible_by_is_usage_error_without_coverage() -> None:

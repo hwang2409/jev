@@ -5,6 +5,7 @@ import json
 import math
 import re
 import string
+import time as _time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field, replace
@@ -20,6 +21,8 @@ from .answers import (
     ChoiceAnswer,
     CoverageReason,
     CoverageRecord,
+    Diagnostic,
+    DiagnosticRecord,
     ErrorDetail,
     ErrorRecord,
     ErrorResponse,
@@ -363,7 +366,7 @@ class Runner:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
-        concurrency: int = 1,
+        concurrency: int = 4,
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
         policy: str | Policy | None = None,
@@ -375,7 +378,11 @@ class Runner:
     ) -> RunResult:
         if policy is not None and require_states < 0:
             raise PolicyError("require_states must be non-negative")
-        if concurrency <= 0:
+        if (
+            isinstance(concurrency, bool)
+            or not isinstance(concurrency, int)
+            or concurrency <= 0
+        ):
             raise ValueError("concurrency must be a positive integer")
         loaded_preset = self._load_preset(self.preset if preset is None else preset)
         if policy is not None and prefilter is not None:
@@ -515,6 +522,18 @@ class Runner:
         )
         responses: list[TypedResponse] = []
         records: list[CanonicalRecord] = []
+        effective_concurrency = min(concurrency, 8)
+        if concurrency > 8:
+            records.append(
+                DiagnosticRecord(
+                    Diagnostic(
+                        "warning",
+                        "concurrency_capped",
+                        f"requested={concurrency} "
+                        f"effective={effective_concurrency} cap=8",
+                    )
+                )
+            )
         consistency_cache_hits = 0
         consistency_live_calls = 0
         consistency_usage: dict[str, int | float] = {}
@@ -585,7 +604,9 @@ class Runner:
                         cache="hit" if cache_hit else "miss",
                     )
                 if isinstance(response, JudgeResponse) and response.served_model:
-                    state_meta = replace(state_meta, model=response.served_model)
+                    state_meta = replace(
+                        state_meta, served_model=response.served_model
+                    )
                 return response, state_meta
 
             responses_for_state: list[JudgeResponse] = []
@@ -640,20 +661,86 @@ class Runner:
                     state_meta,
                 )
             if aggregate.served_model:
-                state_meta = replace(state_meta, model=aggregate.served_model)
+                state_meta = replace(
+                    state_meta, served_model=aggregate.served_model
+                )
             return aggregate, state_meta
 
+        broken_pipe = False
+
         def write(record: CanonicalRecord, visible: bool = True) -> None:
+            nonlocal broken_pipe
             records.append(record)
-            if stdout is not None and visible:
+            if (
+                stdout is None
+                or not visible
+                or isinstance(record, DiagnosticRecord)
+                or broken_pipe
+            ):
+                return
+            try:
                 emit_jsonl(record, stdout)
+            except BrokenPipeError:
+                broken_pipe = True
+                try:
+                    stdout.close()
+                except OSError:
+                    pass
 
         admitted = admission.admitted
-        if concurrency == 1 or len(admitted) <= 1:
-            judged = [judge_state(state) for state in admitted]
-        else:
-            with ThreadPoolExecutor(max_workers=concurrency) as executor:
-                judged = list(executor.map(judge_state, admitted))
+        judged: list[tuple[TypedResponse, RecordMeta]] = []
+        current_concurrency = effective_concurrency
+        consecutive_503 = 0
+        last_503_at: float | None = None
+        offset = 0
+        while offset < len(admitted):
+            batch = admitted[offset : offset + current_concurrency]
+            if current_concurrency == 1 or len(batch) <= 1:
+                batch_results = [judge_state(state) for state in batch]
+            else:
+                with ThreadPoolExecutor(max_workers=current_concurrency) as executor:
+                    batch_results = list(executor.map(judge_state, batch))
+            judged.extend(batch_results)
+            for response, _state_meta in batch_results:
+                now = _time.monotonic()
+                if isinstance(response, ErrorResponse) and response.http_status == 503:
+                    consecutive_503 += 1
+                    last_503_at = now
+                    if consecutive_503 >= 2:
+                        reduced = max(1, current_concurrency // 2)
+                        if reduced < current_concurrency:
+                            current_concurrency = reduced
+                            records.append(
+                                DiagnosticRecord(
+                                    Diagnostic(
+                                        "warning",
+                                        "concurrency_backoff",
+                                        "status=503 "
+                                        "consecutive=2 "
+                                        f"effective={current_concurrency}",
+                                    )
+                                )
+                            )
+                        consecutive_503 = 0
+                    continue
+                consecutive_503 = 0
+                if (
+                    last_503_at is not None
+                    and current_concurrency < effective_concurrency
+                    and now - last_503_at >= 60.0
+                ):
+                    current_concurrency += 1
+                    records.append(
+                        DiagnosticRecord(
+                            Diagnostic(
+                                "info",
+                                "concurrency_restored",
+                                f"clean_seconds=60 effective={current_concurrency}",
+                            )
+                        )
+                    )
+                    last_503_at = now
+            offset += len(batch)
 
         pretty_template = (
             loaded_preset.data["output"]["pretty_template"]

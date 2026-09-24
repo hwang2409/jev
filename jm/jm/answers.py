@@ -25,6 +25,7 @@ CoverageReason = Literal[
     "malformed_answer",
     "partial_answer",
 ]
+DiagnosticSeverity = Literal["info", "warning", "error"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,36 @@ class JudgeResponse:
 
 
 @dataclass(frozen=True, slots=True)
+class Diagnostic:
+    severity: DiagnosticSeverity
+    code: str
+    message: str
+    path: str | None = None
+    source_ref: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "severity": self.severity,
+            "code": self.code,
+            "message": self.message,
+            "path": self.path,
+            "source_ref": self.source_ref,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DiagnosticRecord:
+    diagnostic: Diagnostic
+    record_type: Literal["diagnostic"] = "diagnostic"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "record_type": self.record_type,
+            "diagnostic": self.diagnostic.to_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ErrorResponse:
     error: str
     answers: dict[str, Answer] = field(default_factory=dict)
@@ -95,10 +126,13 @@ class RecordMeta:
     cache: CacheStatus
     partial: bool = False
     preset_schema: str | None = None
+    served_model: str = "unknown"
 
     def __post_init__(self) -> None:
         if self.cache not in {"hit", "miss", "not_applicable"}:
             raise ValueError(f"unknown cache status: {self.cache}")
+        if not self.served_model:
+            raise ValueError("served_model must not be empty")
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -112,6 +146,7 @@ class RecordMeta:
             result["partial"] = True
         if self.preset_schema is not None:
             result["preset_schema"] = self.preset_schema
+        result["served_model"] = self.served_model
         return result
 
 
@@ -213,6 +248,7 @@ class PartialResultRecord:
                     self.meta.cache,
                     partial=True,
                     preset_schema=self.meta.preset_schema,
+                    served_model=self.meta.served_model,
                 ),
             )
 
@@ -321,7 +357,7 @@ class CoverageRecord:
 
 
 type CanonicalRecord = (
-    ResultRecord | PartialResultRecord | ErrorRecord | CoverageRecord
+    DiagnosticRecord | ResultRecord | PartialResultRecord | ErrorRecord | CoverageRecord
 )
 
 

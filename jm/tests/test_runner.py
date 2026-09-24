@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import io
 import json
+import threading
+import time
 from copy import deepcopy
 from pathlib import Path
 
@@ -10,6 +12,7 @@ import pytest
 
 from jm.answers import (
     ChoiceAnswer,
+    DiagnosticRecord,
     ErrorResponse,
     JudgeResponse,
     NoulAnswer,
@@ -181,6 +184,7 @@ def test_runner_uses_one_validated_preset_for_runtime_values() -> None:
         "model": preset.model,
         "chunker": "file",
         "cache": "not_applicable",
+        "served_model": "unknown",
     }
 
 
@@ -196,7 +200,117 @@ def test_runner_records_gateway_served_model() -> None:
         {"matches_query": {"type": "noul"}},
     )
 
-    assert result.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
+    assert result.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
+    assert result.records[0].to_dict()["meta"]["served_model"] == "jev-1.13.0"
+
+
+def test_default_concurrency_is_four() -> None:
+    lock = threading.Lock()
+    active = 0
+    max_active = 0
+
+    def judge(*_args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.02)
+        with lock:
+            active -= 1
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(8)],
+        {"matches": {"type": "noul"}},
+    )
+
+    assert max_active == 4
+    assert result.stats.discovered == result.stats.judged == 8
+
+
+def test_concurrency_is_capped_and_reports_a_diagnostic() -> None:
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def judge(*_args):
+        nonlocal active, max_active
+        with lock:
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(16)],
+        {"matches": {"type": "noul"}},
+        concurrency=12,
+    )
+
+    assert max_active <= 8
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics == [
+        {
+            "severity": "warning",
+            "code": "concurrency_capped",
+            "message": "requested=12 effective=8 cap=8",
+            "path": None,
+            "source_ref": None,
+        }
+    ]
+    assert result.stats.discovered == result.stats.judged == 16
+
+
+def test_two_consecutive_503s_back_off_without_changing_coverage_counts() -> None:
+    def judge(state, *_args):
+        if state.state_ref in {"state-0", "state-1"}:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(6)],
+        {"matches": {"type": "noul"}},
+    )
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert diagnostics[0]["message"] == "status=503 consecutive=2 effective=2"
+    assert result.stats.discovered == 6
+    assert result.stats.judged == 6
+    assert result.stats.failed == 2
+
+
+def test_clean_minute_restores_one_concurrency_step(monkeypatch) -> None:
+    clock = iter((0.0, 0.0, 61.0, 61.0, 61.0, 61.0))
+    monkeypatch.setattr("jm.runner._time.monotonic", lambda: next(clock, 61.0))
+
+    def judge(state, *_args):
+        if state.state_ref in {"state-0", "state-1"}:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return JudgeResponse({"matches": NoulAnswer(0.9)})
+
+    result = Runner(judge).run(
+        [State(f"state-{index}", "focus") for index in range(6)],
+        {"matches": {"type": "noul"}},
+    )
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[-1]["code"] == "concurrency_restored"
+    assert diagnostics[-1]["message"] == "clean_seconds=60 effective=3"
 
 
 @pytest.mark.parametrize("noul", [0.5, 0.9])
@@ -597,9 +711,10 @@ def test_runner_emits_exact_partial_json() -> None:
                 "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
-                "chunker": "para",
-                "cache": "not_applicable",
-                "partial": True,
+                    "chunker": "para",
+                    "cache": "not_applicable",
+                    "partial": True,
+                    "served_model": "unknown",
             },
         },
         {
@@ -616,9 +731,10 @@ def test_runner_emits_exact_partial_json() -> None:
             "meta": {
                 "preset": "jm",
                 "preset_version": "1",
-                "model": "typesafe-ai/jev",
-                "chunker": "para",
-                "cache": "not_applicable",
+                    "model": "typesafe-ai/jev",
+                    "chunker": "para",
+                    "cache": "not_applicable",
+                    "served_model": "unknown",
             },
         },
     ]
@@ -662,6 +778,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
             "model": "typesafe-ai/jev",
             "chunker": "para",
             "cache": "not_applicable",
+            "served_model": "unknown",
         },
     }
     assert summary["boundary"] == "max_chunks=2"
@@ -762,6 +879,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
+                "served_model": "unknown",
             },
         },
         {
@@ -781,6 +899,7 @@ def test_runner_empty_input_emits_input_error_and_partial_coverage() -> None:
                 "model": "typesafe-ai/jev",
                 "chunker": "unknown",
                 "cache": "not_applicable",
+                "served_model": "unknown",
             },
         },
     ]
@@ -1293,16 +1412,19 @@ def test_gateway_client_never_includes_api_key_in_error(monkeypatch) -> None:
     assert "do-not-leak-this" not in response.error
 
 
-def test_gateway_client_rejects_moving_model_name(monkeypatch) -> None:
+def test_gateway_client_accepts_and_sends_configured_model_name(monkeypatch) -> None:
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["ai-model-id"] == "jev-latest"
+        return httpx.Response(200, json={"answers": {}}, request=request)
+
     client = httpx.Client(
-        transport=httpx.MockTransport(
-            lambda request: pytest.fail("moving model must not make a request")
-        )
+        transport=httpx.MockTransport(handler)
     )
 
     response = GatewayClient(http_client=client)(
-        State("stdin#L1", "focus"), QUESTIONS, "jev-latest"
+        State("stdin#L1", "focus"), {}, "jev-latest"
     )
 
-    assert response == ErrorResponse("model must be typesafe-ai/jev")
+    assert response.complete

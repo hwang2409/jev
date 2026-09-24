@@ -66,12 +66,17 @@ class JevClient:
         self._transport = _transport or _GatewayTransport()
 
     def evaluate(
-        self, state: _State | _Mapping[str, _Any], questions: _Mapping[str, _Any]
+        self,
+        state: _State | _Mapping[str, _Any],
+        questions: _Mapping[str, _Any],
+        *,
+        model: str = _GATEWAY_MODEL,
     ) -> JevResponse:
+        _validate_model(model)
         api_key = _require_gateway_key()
         payload = _request_payload(state, questions)
         started = _time.monotonic()
-        response, attempts = self._transport.post(payload, api_key)
+        response, attempts = self._transport.post(payload, api_key, model=model)
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
 
@@ -79,18 +84,27 @@ class JevClient:
         if parsed.complete or attempts >= self._transport.max_attempts:
             return parsed
 
-        response, retry_attempts = self._transport.post(payload, api_key, attempts)
+        response, retry_attempts = self._transport.post(
+            payload, api_key, attempts, model=model
+        )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
         return self._parse_response(response, questions, started, retry_attempts)
 
     async def evaluate_async(
-        self, state: _State | _Mapping[str, _Any], questions: _Mapping[str, _Any]
+        self,
+        state: _State | _Mapping[str, _Any],
+        questions: _Mapping[str, _Any],
+        *,
+        model: str = _GATEWAY_MODEL,
     ) -> JevResponse:
+        _validate_model(model)
         api_key = _require_gateway_key()
         payload = _request_payload(state, questions)
         started = _time.monotonic()
-        response, attempts = await self._transport.apost(payload, api_key)
+        response, attempts = await self._transport.apost(
+            payload, api_key, model=model
+        )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
 
@@ -99,7 +113,7 @@ class JevClient:
             return parsed
 
         response, retry_attempts = await self._transport.apost(
-            payload, api_key, attempts
+            payload, api_key, attempts, model=model
         )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
@@ -111,10 +125,8 @@ class JevClient:
         questions: _Mapping[str, _Any],
         model: str = _GATEWAY_MODEL,
     ) -> JevResponse | _ErrorResponse:
-        if model != _GATEWAY_MODEL:
-            return _ErrorResponse(f"model must be {_GATEWAY_MODEL}")
         try:
-            return self.evaluate(state, questions)
+            return self.evaluate(state, questions, model=model)
         except JevError as exc:
             return _ErrorResponse(
                 exc.message,
@@ -182,6 +194,11 @@ def _require_gateway_key() -> str:
     if not api_key:
         raise JevError("Vercel AI Gateway API key is not set")
     return api_key
+
+
+def _validate_model(model: str) -> None:
+    if not isinstance(model, str) or not model:
+        raise JevError("model must be a non-empty string")
 
 
 def _as_jev_error(response: _ErrorResponse) -> JevError:
@@ -267,14 +284,44 @@ def _served_model(payload: _Mapping[str, _Any]) -> str | None:
     metadata = payload.get("providerMetadata")
     if not isinstance(metadata, _Mapping):
         return None
-    for provider in ("typesafe", "gateway"):
-        provider_data = metadata.get(provider)
-        if not isinstance(provider_data, _Mapping):
+    gateway = metadata.get("gateway")
+    if not isinstance(gateway, _Mapping):
+        return None
+    routing = gateway.get("routing")
+    if isinstance(routing, _Mapping):
+        canonical_slug = routing.get("canonicalSlug")
+        if isinstance(canonical_slug, str) and canonical_slug:
+            return canonical_slug
+    attempts = gateway.get("modelAttempts")
+    if not isinstance(attempts, (list, tuple)):
+        return None
+    for attempt in reversed(attempts):
+        if not isinstance(attempt, _Mapping) or not _successful_attempt(attempt):
             continue
-        model = provider_data.get("model")
-        if isinstance(model, str) and model:
-            return model
+        canonical_slug = attempt.get("canonicalSlug")
+        if isinstance(canonical_slug, str) and canonical_slug:
+            return canonical_slug
     return None
+
+
+def _successful_attempt(attempt: _Mapping[str, _Any]) -> bool:
+    for key in ("success", "successful", "isSuccessful"):
+        if attempt.get(key) is False:
+            return False
+    status = attempt.get("status")
+    if isinstance(status, str) and status.lower() not in {
+        "success",
+        "succeeded",
+        "complete",
+        "completed",
+        "ok",
+    }:
+        return False
+    for key in ("statusCode", "status_code"):
+        status_code = attempt.get(key)
+        if isinstance(status_code, int) and not 200 <= status_code < 300:
+            return False
+    return True
 
 
 def _normalize_usage(usage: _Any) -> dict[str, _Any] | None:

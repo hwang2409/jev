@@ -218,6 +218,7 @@ def test_canonical_records_preserve_each_typed_answer_shape() -> None:
             "model": "typesafe-ai/jev",
             "chunker": "hunk",
             "cache": "miss",
+            "served_model": "unknown",
         },
     }
 
@@ -285,6 +286,7 @@ def test_canonical_partial_error_skip_and_coverage_shapes() -> None:
             "model": "typesafe-ai/jev",
             "chunker": "para",
             "cache": "not_applicable",
+            "served_model": "unknown",
         },
     }
 

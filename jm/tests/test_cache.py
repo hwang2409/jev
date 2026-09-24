@@ -244,7 +244,8 @@ def test_cache_store_uses_two_level_paths_and_round_trips_typed_answers(
     assert list(path.parent.glob("*.tmp")) == []
     loaded = store.get(entry.cache_key, QUESTIONS)
     assert loaded is not None
-    assert loaded.response == response
+    assert loaded.response.answers == response.answers
+    assert loaded.response.served_model == "unknown"
 
 
 def test_publish_refuses_silently_missing_answers(tmp_path) -> None:
@@ -268,7 +269,31 @@ def test_publish_accepts_matching_answer_ids(tmp_path) -> None:
 
     entry = store.publish(_preimage(), response)
 
-    assert entry.response == response
+    assert entry.response.answers == response.answers
+    assert entry.response.served_model == "unknown"
+
+
+def test_cache_preserves_configured_and_served_model_provenance(tmp_path) -> None:
+    store = CacheStore(tmp_path)
+    preimage = _preimage()
+    preimage["model"] = "jev-custom"
+    response = JudgeResponse(
+        {
+            "matches_query": NoulAnswer(0.93),
+            "risk": ScoreAnswer(1.5, confidence=0.8),
+        },
+        served_model="jev-served",
+    )
+
+    entry = store.publish(preimage, response)
+    loaded = store.get(entry.cache_key, QUESTIONS)
+
+    assert loaded is not None
+    assert loaded.model == "jev-custom"
+    assert loaded.response.served_model == "jev-served"
+    payload = entry.to_dict()
+    assert payload["model"] == "jev-custom"
+    assert payload["served_model"] == "jev-served"
 
 
 def test_malformed_and_partial_files_are_cache_misses(tmp_path) -> None:
@@ -397,8 +422,10 @@ def test_runner_replays_a_complete_answer_from_cache(tmp_path) -> None:
     assert calls == 1
     assert first.records[0].to_dict()["meta"]["cache"] == "miss"
     assert second.records[0].to_dict()["meta"]["cache"] == "hit"
-    assert first.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
-    assert second.records[0].to_dict()["meta"]["model"] == "jev-1.13.0"
+    assert first.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
+    assert first.records[0].to_dict()["meta"]["served_model"] == "jev-1.13.0"
+    assert second.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
+    assert second.records[0].to_dict()["meta"]["served_model"] == "jev-1.13.0"
     assert second.responses[0] == first.responses[0]
     assert second.records[-1].to_dict() == first.records[-1].to_dict()
 

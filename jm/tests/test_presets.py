@@ -98,7 +98,7 @@ def test_validation_requires_every_top_level_field(missing: str) -> None:
         validate_preset(data)
 
 
-def test_validation_rejects_unknown_fields_and_alias_models() -> None:
+def test_validation_rejects_unknown_fields_and_accepts_configured_models() -> None:
     data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
     data["unexpected"] = True
     with pytest.raises(PresetValidationError, match="unknown"):
@@ -106,8 +106,7 @@ def test_validation_rejects_unknown_fields_and_alias_models() -> None:
     data = copy.deepcopy(data)
     data.pop("unexpected")
     data["model"] = "jev-latest"
-    with pytest.raises(PresetValidationError, match="model"):
-        validate_preset(data)
+    assert validate_preset(data)["model"] == "jev-latest"
 
 
 def test_v1_rejects_prefilter_and_v2_validates_prefilter_fields() -> None:

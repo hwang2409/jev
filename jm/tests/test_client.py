@@ -64,7 +64,9 @@ def test_client_sends_exact_gateway_request_and_normalizes_answers(monkeypatch) 
                 },
             },
             usage={"inputTokens": 120, "outputTokens": 20, "futureField": 3},
-            providerMetadata={"typesafe": {"model": "jev-1.13.0"}},
+            providerMetadata={
+                "gateway": {"routing": {"canonicalSlug": "jev-1.13.0"}}
+            },
         )
 
     monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-secret")
@@ -131,6 +133,25 @@ def test_client_sends_exact_gateway_request_and_normalizes_answers(monkeypatch) 
         "futureField": 3,
     }
     assert response.served_model == "jev-1.13.0"
+
+
+def test_client_sends_a_configured_model_id(monkeypatch) -> None:
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return _response(request, answers={})
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    try:
+        client(State("case#1", "focus"), {}, "jev-custom")
+    finally:
+        client.close()
+
+    assert seen[0].headers["ai-model-id"] == "jev-custom"
 
 
 @pytest.mark.parametrize(
@@ -278,6 +299,73 @@ def test_client_retries_only_retryable_statuses_with_finite_hint(
         client.close()
     assert attempts == 3
     assert sleeps == [59.0, 59.0]
+
+
+@pytest.mark.parametrize("status", [503, 504])
+def test_client_retries_503_and_504_without_retry_after_with_bounded_backoff(
+    monkeypatch, status: int
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(status, request=request)
+        return _response(request, answers={})
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=sleeps.append,
+        jitter=lambda: 0.25,
+        backoff_base=1.0,
+    )
+    try:
+        assert client.evaluate(State("case#1", "focus"), {}).complete
+    finally:
+        client.close()
+
+    assert attempts == 3
+    assert sleeps == [1.25, 2.25]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "expected"),
+    [
+        (
+            {
+                "gateway": {
+                    "routing": {"canonicalSlug": "routed"},
+                    "modelAttempts": [{"canonicalSlug": "attempt"}],
+                }
+            },
+            "routed",
+        ),
+        (
+            {
+                "gateway": {
+                    "modelAttempts": [
+                        {"canonicalSlug": "failed", "status": "error"},
+                        {"canonicalSlug": "successful", "status": "success"},
+                    ]
+                }
+            },
+            "successful",
+        ),
+        (
+            {"gateway": {"modelAttempts": [{"canonicalSlug": "failed"}]}},
+            "failed",
+        ),
+        ({"gateway": {"model": "alias"}}, None),
+        ({}, None),
+    ],
+)
+def test_served_model_uses_locked_gateway_precedence(metadata, expected) -> None:
+    from jm.client import _served_model
+
+    assert _served_model({"providerMetadata": metadata}) == expected
 
 
 def test_client_bounds_absurd_retry_after_and_never_leaks_key(monkeypatch) -> None:
