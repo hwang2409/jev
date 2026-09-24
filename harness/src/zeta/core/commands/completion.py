@@ -27,6 +27,8 @@ _zeta() {
         '--verbose[show raw stream events]' \
         '--yolo[auto-approve every tool call]' \
         '--no-yolo[force prompts even when settings enable yolo]' \
+        '--safety-tier[use Jev safety checks before yolo shell commands]' \
+        '--no-safety-tier[disable Jev safety checks before yolo shell commands]' \
         '--router[route tool choices through Jev]' \
         '--no-router[restore the full toolset]' \
         '--router-style=[routing style]:style:(tool auto)' \
@@ -151,7 +153,7 @@ def bash_script() -> str:
     if (( command_index > 0 && COMP_CWORD > command_index + 1 )); then
         verb="${COMP_WORDS[command_index+1]}"
     fi
-    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --router --no-router --router-style --jev-compaction --no-jev-compaction --memory-injection --no-memory-injection --token-budget --memory-config --max-turns --print -p --format --system-prompt --append-system-prompt"
+    local top_flags="-h --help --provider --model --continue -c --resume --no-session --force-provider --verbose --yolo --no-yolo --safety-tier --no-safety-tier --router --no-router --router-style --jev-compaction --no-jev-compaction --memory-injection --no-memory-injection --token-budget --memory-config --max-turns --print -p --format --system-prompt --append-system-prompt"
     local commands="login serve session automation completion"
 
     if (( command_index == 0 )); then
