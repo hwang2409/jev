@@ -111,6 +111,19 @@ cd jm && VERCEL_AI_GATEWAY="$VERCEL_AI_GATEWAY" \
 The smoke sends one small three-question battery. It prints latency, model,
 usage, and typed answers.
 
+### client request observer
+
+`JevClient.set_request_observer` accepts a synchronous zero-argument callback.
+jm calls it directly before every transport attempt, including retries.
+`evaluate_async` does not await it, so the callback runs synchronously in the
+async path. If it raises, the exception propagates unchanged and jm stops
+before sending that attempt. Pass `None` to remove the observer.
+
+```python
+client.set_request_observer(on_request)
+client.set_request_observer(None)
+```
+
 ### exit codes
 
 | code | meaning |

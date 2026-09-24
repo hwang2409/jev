@@ -117,6 +117,16 @@ class JevClient:
     def set_response_observer(self, observer: _Callable[[int], None] | None) -> None:
         self._transport.set_response_observer(observer)
 
+    def set_request_observer(self, observer: _Callable[[], None] | None) -> None:
+        """Set a synchronous callback invoked before every transport attempt.
+
+        The callback runs directly, including in ``evaluate_async``, and runs
+        again for retries. It is not awaited. Observer exceptions propagate
+        unchanged and stop evaluation before that attempt's HTTP request.
+        Pass ``None`` to remove the observer.
+        """
+        self._transport.set_request_observer(observer)
+
     def evaluate(
         self,
         state: _State | _Mapping[str, _Any],

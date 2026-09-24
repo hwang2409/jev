@@ -3,8 +3,14 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from catalogs import CATALOG_120, SUBSETS
-
+from catalogs import (
+    CATALOG_120,
+    CATALOG_180,
+    CATALOG_250,
+    SUBSETS,
+    _generated_tools,
+    category_catalogs,
+)
 
 DOMAINS = {
     "files",
@@ -42,6 +48,16 @@ def test_catalog_has_120_tools_in_ten_domains():
     assert set(counts.values()) == {12}
 
 
+def test_large_catalogs_are_deterministic_and_complete():
+    assert len(CATALOG_180) == 180
+    assert len(CATALOG_250) == 250
+    assert CATALOG_250 == {**CATALOG_120, **_generated_tools()}
+    assert set(CATALOG_120) < set(CATALOG_180) < set(CATALOG_250)
+    counts = Counter(name.split("_", 1)[0] for name in CATALOG_250)
+    assert len(counts) == 10
+    assert set(counts.values()) == {25}
+
+
 def test_catalog_names_and_descriptions_are_concrete():
     name_pattern = re.compile(r"^[a-z]+_[a-z]+_[a-z]+$")
     for name, description in CATALOG_120.items():
@@ -51,12 +67,24 @@ def test_catalog_names_and_descriptions_are_concrete():
         assert "  " not in description
 
 
+def test_hierarchy_categories_are_semantic_and_overlap_honestly():
+    groups = category_catalogs(CATALOG_250)
+
+    assert "files" not in groups
+    assert "workspace" in groups
+    assert "files_get_status" in groups["workspace"]
+    assert "email_reply_thread" in groups["communications"]
+    assert "email_reply_thread" in groups["conversations"]
+
+
 def test_subsets_are_strictly_nested_and_complete():
-    assert list(SUBSETS) == [15, 30, 60, 120]
+    assert list(SUBSETS) == [15, 30, 60, 120, 180, 250]
     assert len(SUBSETS[15]) == 15
     assert len(SUBSETS[30]) == 30
     assert len(SUBSETS[60]) == 60
     assert SUBSETS[120] == CATALOG_120
+    assert SUBSETS[180] == CATALOG_180
+    assert SUBSETS[250] == CATALOG_250
     assert set(SUBSETS[15]) < set(SUBSETS[30])
     assert set(SUBSETS[30]) < set(SUBSETS[60])
     assert set(SUBSETS[60]) < set(SUBSETS[120])
@@ -65,17 +93,18 @@ def test_subsets_are_strictly_nested_and_complete():
 
 def test_subset_names_are_valid_catalog_names():
     for subset in SUBSETS.values():
-        assert set(subset) <= set(CATALOG_120)
-        assert all(subset[name] == CATALOG_120[name] for name in subset)
+        assert set(subset) <= set(CATALOG_250)
+        assert all(subset[name] == CATALOG_250[name] for name in subset)
 
 
 def test_curve_evalset_has_schema_count_and_subset_coverage():
     cases = load_evalset("evalset_curve.jsonl")
-    assert len(cases) == 40
-    assert len({case["id"] for case in cases}) == 40
+    assert len(cases) == 50
+    assert len({case["id"] for case in cases}) == 50
     counts = Counter(case["expected_tool"] for case in cases)
-    assert set(counts) <= set(SUBSETS[15])
+    assert set(counts) <= set(SUBSETS[250])
     assert all(counts[tool] >= 2 for tool in SUBSETS[15])
+    assert sum(tool not in SUBSETS[15] for tool in counts) == 10
     for case in cases:
         assert set(case) == SCHEMA
         assert case["expected_needs_tool"] is True

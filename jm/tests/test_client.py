@@ -331,6 +331,199 @@ def test_client_retries_503_and_504_without_retry_after_with_bounded_backoff(
     assert sleeps == [1.25, 2.25]
 
 
+def test_request_observer_runs_before_every_transport_attempt(monkeypatch) -> None:
+    attempts = 0
+    observed: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            return httpx.Response(503, request=request)
+        return _response(request, answers={})
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _: None,
+        jitter=lambda: 0.0,
+    )
+    client.set_request_observer(lambda: observed.append(attempts + 1))
+    try:
+        assert client.evaluate(State("case#1", "focus"), {}).complete
+    finally:
+        client.close()
+
+    assert observed == [1, 2, 3]
+
+
+def test_async_request_observer_runs_before_every_transport_attempt(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    async def run() -> None:
+        attempts = 0
+        observed: list[int] = []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            if attempts < 3:
+                return httpx.Response(503, request=request)
+            return _response(request, answers={})
+
+        async def async_sleep(_: float) -> None:
+            return None
+
+        client = _client(
+            async_http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            ),
+            async_sleep=async_sleep,
+            jitter=lambda: 0.0,
+        )
+        client.set_request_observer(lambda: observed.append(attempts + 1))
+        try:
+            assert (await client.evaluate_async(State("case#1", "focus"), {})).complete
+        finally:
+            await client.aclose()
+
+        assert observed == [1, 2, 3]
+
+    asyncio.run(run())
+
+
+def test_request_observer_exception_propagates_before_http_send(monkeypatch) -> None:
+    sent = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        return _response(request, answers={})
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+
+    def observer() -> None:
+        raise RuntimeError("observer failed")
+
+    client.set_request_observer(observer)
+    try:
+        with pytest.raises(RuntimeError, match="observer failed"):
+            client.evaluate(State("case#1", "focus"), {})
+    finally:
+        client.close()
+
+    assert sent == 0
+
+
+def test_request_observer_timeout_exception_is_not_retried(monkeypatch) -> None:
+    sent = 0
+    observer_calls = 0
+    observer_error = httpx.TimeoutException("observer timeout")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        return _response(request, answers={})
+
+    def observer() -> None:
+        nonlocal observer_calls
+        observer_calls += 1
+        raise observer_error
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    client.set_request_observer(observer)
+    try:
+        with pytest.raises(httpx.TimeoutException) as exc_info:
+            client.evaluate(State("case#1", "focus"), {})
+    finally:
+        client.close()
+
+    assert exc_info.value is observer_error
+    assert observer_calls == 1
+    assert sent == 0
+
+
+def test_async_request_observer_exception_propagates_before_http_send(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    async def run() -> None:
+        sent = 0
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal sent
+            sent += 1
+            return _response(request, answers={})
+
+        client = _client(
+            async_http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            )
+        )
+
+        def observer() -> None:
+            raise RuntimeError("observer failed")
+
+        client.set_request_observer(observer)
+        try:
+            with pytest.raises(RuntimeError, match="observer failed"):
+                await client.evaluate_async(State("case#1", "focus"), {})
+        finally:
+            await client.aclose()
+
+        assert sent == 0
+
+    asyncio.run(run())
+
+
+def test_async_request_observer_timeout_exception_is_not_retried(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    async def run() -> None:
+        sent = 0
+        observer_calls = 0
+        observer_error = httpx.TimeoutException("observer timeout")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal sent
+            sent += 1
+            return _response(request, answers={})
+
+        def observer() -> None:
+            nonlocal observer_calls
+            observer_calls += 1
+            raise observer_error
+
+        client = _client(
+            async_http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            )
+        )
+        client.set_request_observer(observer)
+        try:
+            with pytest.raises(httpx.TimeoutException) as exc_info:
+                await client.evaluate_async(State("case#1", "focus"), {})
+        finally:
+            await client.aclose()
+
+        assert exc_info.value is observer_error
+        assert observer_calls == 1
+        assert sent == 0
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("metadata", "expected"),
     [

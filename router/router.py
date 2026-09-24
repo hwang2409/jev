@@ -16,10 +16,55 @@ class RouteResult:
     needs_tool: float
     step_clarity: float
     usage: dict[str, int]
+    calls: int = 1
+    latency_ms: int | None = None
+    category: str | None = None
+    category_confidence: float | None = None
+    category_probabilities: dict[str, float] | None = None
+
+
+GATE_QUESTIONS = {
+    "needs_tool": {
+        "type": "noul",
+        "instructions": (
+            "Does the current step require calling a tool, rather than "
+            "the agent answering or reasoning directly from what it "
+            "already knows?"
+        ),
+    },
+    "step_clarity": {
+        "type": "noul",
+        "instructions": (
+            "Is the current step description specific enough to route "
+            "to a single tool with confidence?"
+        ),
+    },
+}
 
 
 def build_request(
     task: str, step: str, history: list[str], catalog: dict[str, str]
+) -> dict:
+    body = build_choice_request(
+        task,
+        step,
+        history,
+        "tool",
+        "An agent is working on the task and describes its current step. Which "
+        "single tool should it call to accomplish this step?",
+        catalog,
+    )
+    body["questions"].update(GATE_QUESTIONS)
+    return body
+
+
+def build_choice_request(
+    task: str,
+    step: str,
+    history: list[str],
+    choice_name: str,
+    instructions: str,
+    criteria: dict[str, str],
 ) -> dict:
     return {
         "state": {
@@ -28,29 +73,10 @@ def build_request(
             "recent_steps": list(history[-5:]),
         },
         "questions": {
-            "tool": {
+            choice_name: {
                 "type": "choice",
-                "instructions": (
-                    "An agent is working on the task and describes its current "
-                    "step. Which single tool should it call to accomplish this "
-                    "step?"
-                ),
-                "criteria": catalog,
-            },
-            "needs_tool": {
-                "type": "noul",
-                "instructions": (
-                    "Does the current step require calling a tool, rather than "
-                    "the agent answering or reasoning directly from what it "
-                    "already knows?"
-                ),
-            },
-            "step_clarity": {
-                "type": "noul",
-                "instructions": (
-                    "Is the current step description specific enough to route "
-                    "to a single tool with confidence?"
-                ),
+                "instructions": instructions,
+                "criteria": criteria,
             },
         },
     }
@@ -66,6 +92,7 @@ def parse_response(response: JevResponse | Mapping[str, object]) -> RouteResult:
         needs_tool=_answer_field(answers["needs_tool"], "noul"),
         step_clarity=_answer_field(answers["step_clarity"], "noul"),
         usage=dict(_response_field(response, "usage") or {}),
+        latency_ms=getattr(response, "latency_ms", None),
     )
 
 

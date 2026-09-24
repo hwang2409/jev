@@ -1,4 +1,6 @@
-"""Synthetic phase-2 catalog with realistic near-neighbor tools."""
+"""Synthetic phase-2 catalogs with deterministic near-neighbor tools."""
+
+import random
 
 CATALOG_120: dict[str, str] = {
     # files
@@ -330,9 +332,136 @@ def _catalog_for(names: list[str]) -> dict[str, str]:
     return {name: CATALOG_120[name] for name in names}
 
 
+_GENERATED_SPECS = [
+    ("archive", "record"),
+    ("restore", "record"),
+    ("lock", "record"),
+    ("unlock", "record"),
+    ("tag", "record"),
+    ("clone", "record"),
+    ("export", "snapshot"),
+    ("import", "snapshot"),
+    ("validate", "resource"),
+    ("watch", "stream"),
+    ("list", "history"),
+    ("get", "status"),
+    ("rotate", "credential"),
+]
+_GENERATION_SEED = 810250
+_DOMAINS = tuple(name.split("_", 1)[0] for name in _SUBSET_120_NAMES[::12])
+
+
+def _generated_tools() -> dict[str, str]:
+    tools = {}
+    for index, domain in enumerate(_DOMAINS):
+        specs = list(_GENERATED_SPECS)
+        random.Random(_GENERATION_SEED + index).shuffle(specs)
+        for action, noun in specs:
+            name = f"{domain}_{action}_{noun}"
+            tools[name] = (
+                f"{action.capitalize()} a {noun} in the {domain} service "
+                "using its stored settings."
+            )
+    return tools
+
+
+_EXTRA_TOOLS = _generated_tools()
+_EXTRA_NAMES = list(_EXTRA_TOOLS)
+_EXTRA_60 = _EXTRA_NAMES[:60]
+
+CATALOG_180: dict[str, str] = {**CATALOG_120, **{
+    name: _EXTRA_TOOLS[name] for name in _EXTRA_60
+}}
+CATALOG_250: dict[str, str] = {**CATALOG_120, **_EXTRA_TOOLS}
+
+
 SUBSETS: dict[int, dict[str, str]] = {
     15: _catalog_for(_SUBSET_15_NAMES),
     30: _catalog_for(_SUBSET_30_NAMES),
     60: _catalog_for(_SUBSET_60_NAMES),
     120: _catalog_for(_SUBSET_120_NAMES),
+    180: CATALOG_180,
+    250: CATALOG_250,
 }
+
+
+_DOMAIN_CATEGORIES = {
+    "files": "workspace",
+    "shell": "runtime",
+    "web": "web_content",
+    "calendar": "scheduling",
+    "email": "communications",
+    "crm": "contacts",
+    "deploy": "deployments",
+    "data": "records",
+    "chat": "conversations",
+    "payments": "billing",
+}
+
+CATEGORY_DESCRIPTIONS = {
+    "workspace": "Documents, stored files, and local artifacts.",
+    "runtime": "Foreground and background process control.",
+    "web_content": "Remote pages, links, and fetched web content.",
+    "scheduling": "Calendar events, availability, and reminders.",
+    "communications": "Mailbox delivery, threads, and recipient messages.",
+    "contacts": "People, companies, deals, and relationship records.",
+    "deployments": "Release versions, environments, and rollouts.",
+    "records": "Structured rows, schemas, and stored business records.",
+    "conversations": "Chat channels, message threads, and conversation history.",
+    "billing": "Charges, invoices, balances, and payment methods.",
+}
+
+# Some actions honestly belong to more than one routing lane. The primary
+# category remains the domain lane, while these aliases test stage ambiguity.
+_OVERLAPPING_TOOLS = {
+    "communications": {
+        "chat_send_message",
+        "chat_reply_thread",
+        "chat_search_messages",
+    },
+    "conversations": {
+        "email_reply_thread",
+        "email_forward_message",
+        "email_search_messages",
+    },
+    "runtime": {"deploy_view_logs", "deploy_check_health"},
+    "records": {"crm_add_note", "crm_log_activity", "payments_get_balance"},
+}
+
+
+def category_catalogs(catalog: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Group a catalog by semantic routing lanes with honest overlaps."""
+    groups = {category: {} for category in CATEGORY_DESCRIPTIONS}
+    for name, description in catalog.items():
+        domain = name.split("_", 1)[0]
+        category = _DOMAIN_CATEGORIES.get(domain)
+        if category is None:
+            raise ValueError(f"no routing category for tool: {name}")
+        groups[category][name] = description
+        for overlapping_category, tools in _OVERLAPPING_TOOLS.items():
+            if name in tools:
+                groups[overlapping_category][name] = description
+    return {category: tools for category, tools in groups.items() if tools}
+
+
+def primary_category_for_tool(tool: str) -> str:
+    """Return the domain lane used for end-to-end probability accounting."""
+    domain = tool.split("_", 1)[0]
+    try:
+        return _DOMAIN_CATEGORIES[domain]
+    except KeyError as exc:
+        raise ValueError(f"no routing category for tool: {tool}") from exc
+
+
+def catalog_for_size(size: int) -> dict[str, str]:
+    """Return a committed catalog or a deterministic limit-probe catalog."""
+    if size in SUBSETS:
+        return SUBSETS[size]
+    if 250 < size:
+        catalog = dict(CATALOG_250)
+        for index in range(251, size + 1):
+            catalog[f"probe_tool_{index}"] = (
+                f"Select deterministic option {index} for API limit probing."
+            )
+        return catalog
+    raise ValueError(f"unsupported catalog size: {size}")

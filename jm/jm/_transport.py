@@ -78,9 +78,13 @@ class _GatewayTransport:
         self.jitter = jitter or (lambda: _random.uniform(0.0, backoff_base))
         self.backoff_base = backoff_base
         self._response_observer: _Callable[[int], None] | None = None
+        self._request_observer: _Callable[[], None] | None = None
 
     def set_response_observer(self, observer: _Callable[[int], None] | None) -> None:
         self._response_observer = observer
+
+    def set_request_observer(self, observer: _Callable[[], None] | None) -> None:
+        self._request_observer = observer
 
     def _observe_response(self, status_code: int) -> None:
         if self._response_observer is not None:
@@ -100,6 +104,8 @@ class _GatewayTransport:
             return _attempt_budget_error(attempts), attempts
         while attempts < self.max_attempts:
             attempts += 1
+            if self._request_observer is not None:
+                self._request_observer()
             try:
                 request_options = (
                     {"content": payload}
@@ -157,6 +163,8 @@ class _GatewayTransport:
             return _attempt_budget_error(attempts), attempts
         while attempts < self.max_attempts:
             attempts += 1
+            if self._request_observer is not None:
+                self._request_observer()
             try:
                 request_options = (
                     {"content": payload}
