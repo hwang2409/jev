@@ -543,10 +543,20 @@ def _validate_preimage(preimage: Mapping[str, Any], schema: str) -> None:
         state["context"], Mapping
     ):
         raise ValueError("cache preimage has an invalid state")
-    state_ref = state["context"].get("state_ref")
-    if (
-        not is_v3 or state_ref is not None
-    ) and (not isinstance(state_ref, str) or not state_ref):
+    context = state["context"]
+    state_ref = context.get("state_ref")
+    if is_v3:
+        names_state_ref = "state_ref" in v3_context_keys(battery)
+        if names_state_ref:
+            if (
+                "state_ref" not in context
+                or not isinstance(state_ref, str)
+                or not state_ref
+            ):
+                raise ValueError("cache preimage has an invalid state reference")
+        elif "state_ref" in context:
+            raise ValueError("cache preimage has an invalid state reference")
+    elif not isinstance(state_ref, str) or not state_ref:
         raise ValueError("cache preimage has an invalid state reference")
 
 

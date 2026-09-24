@@ -188,6 +188,44 @@ def test_v2_prefilter_migration_to_v3_state_preset_runs(tmp_path: Path) -> None:
     assert records[-1]["coverage_counts"]["judged"] == 1
 
 
+def test_v2_prefilter_migration_uses_parameter_query_source(
+    tmp_path: Path,
+) -> None:
+    preset = _write_v3_state_preset(
+        tmp_path,
+        state_fields=["focus", "context.query"],
+        prefilter={
+            "ranker": "bm25",
+            "top": 1,
+            "query_source": "context.query",
+            "fields": ["focus"],
+        },
+    )
+    stdout = io.StringIO()
+    code = main(
+        [
+            "run",
+            "--preset",
+            str(preset),
+            "--by",
+            "state",
+            "--param",
+            "query=needle",
+        ],
+        stdin=io.StringIO(
+            '{"state_ref":"case-1","focus":"needle","context":{}}\n'
+        ),
+        stdout=stdout,
+        stderr=io.StringIO(),
+        judge_fn=_judge,
+    )
+
+    records = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+    assert records[-1]["coverage_counts"]["judged"] == 1
+
+
 def test_duplicate_raw_state_rejection_does_not_read_cache(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

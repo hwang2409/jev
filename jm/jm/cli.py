@@ -327,8 +327,7 @@ def _judgment_command(
         top=args.prefilter_top,
         fields=args.prefilter_fields,
         query=args.prefilter_query,
-        invocation_query=query,
-        invocation_predicate=predicate,
+        parameters=parameters,
     )
     prefilter_parameters = set()
     if prefilter is not None:
@@ -624,15 +623,14 @@ def _parse_parameters(
             raise _UsageError(f"parameter '{key}' was supplied more than once")
         values[key] = value
     aliases = {"query": query, "predicate": predicate}
-    if preset.schema == SCHEMA_V3:
-        for key, value in aliases.items():
-            if value is None:
-                continue
-            if key in values:
-                raise _UsageError(
-                    f"parameter '{key}' conflicts with its --{key} alias"
-                )
-            values[key] = value
+    for key, value in aliases.items():
+        if value is None:
+            continue
+        if preset.schema == SCHEMA_V3 and key in values:
+            raise _UsageError(
+                f"parameter '{key}' conflicts with its --{key} alias"
+            )
+        values[key] = value
     return values
 
 

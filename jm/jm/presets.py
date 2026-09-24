@@ -482,8 +482,7 @@ def resolve_prefilter(
     top: int | None = None,
     fields: str | None = None,
     query: str | None = None,
-    invocation_query: str | None = None,
-    invocation_predicate: str | None = None,
+    parameters: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """Resolve preset and explicit prefilter values."""
     supplied = any(value is not None for value in (ranker, top, fields, query))
@@ -566,20 +565,22 @@ def resolve_prefilter(
         if not isinstance(resolved_query, str) or not resolved_query.strip():
             raise PresetUsageError("--prefilter-query is required")
     elif query_source == "context.query":
-        if not isinstance(invocation_query, str) or not invocation_query.strip():
+        parameter_query = (parameters or {}).get("query")
+        if not isinstance(parameter_query, str) or not parameter_query.strip():
             raise PresetUsageError(
                 "prefilter query_source context.query requires --query"
             )
-        resolved_query = invocation_query
+        resolved_query = parameter_query
     elif query_source == "context.predicate":
+        parameter_predicate = (parameters or {}).get("predicate")
         if (
-            not isinstance(invocation_predicate, str)
-            or not invocation_predicate.strip()
+            not isinstance(parameter_predicate, str)
+            or not parameter_predicate.strip()
         ):
             raise PresetUsageError(
                 "prefilter query_source context.predicate requires --predicate"
             )
-        resolved_query = invocation_predicate
+        resolved_query = parameter_predicate
     elif query_source == "literal":
         if not isinstance(resolved_query, str) or not resolved_query.strip():
             raise PresetUsageError("literal prefilter query must not be empty")

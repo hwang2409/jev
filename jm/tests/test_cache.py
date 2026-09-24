@@ -338,6 +338,63 @@ def test_v3_cache_round_trip_uses_projected_state_identity(tmp_path) -> None:
     assert store.get(cache_key(named_ref_second), named_ref_questions) is None
 
 
+@pytest.mark.parametrize(
+    ("names_state_ref", "state_ref_shape", "valid"),
+    (
+        (True, "string", True),
+        (True, "null", False),
+        (True, "missing", False),
+        (False, "string", False),
+    ),
+)
+def test_v3_cache_validates_named_state_ref_shape(
+    tmp_path, names_state_ref, state_ref_shape, valid
+) -> None:
+    store = CacheStore(tmp_path)
+    questions = {
+        "matches_query": {
+            "type": "noul",
+            "instructions": {
+                "state_fields": [
+                    "focus",
+                    "context.state_ref" if names_state_ref else "context.query",
+                ]
+            },
+            "criteria": {"true": {"what": "direct evidence"}},
+        }
+    }
+    preimage = build_cache_preimage(
+        model="typesafe-ai/jev",
+        preset="raw",
+        preset_version="1",
+        preset_schema="jm.preset/v3",
+        chunking={
+            "by": "state",
+            "limits": {
+                "focus_bytes": 16_384,
+                "context_field_bytes": 4_096,
+                "state_bytes": 32_768,
+            },
+        },
+        questions=questions,
+        state=State("case-1", "focus", {"state_ref": "case-1"}),
+        limits=StateLimits(),
+    )
+    context = preimage["state"]["context"]
+    if state_ref_shape == "null":
+        context["state_ref"] = None
+    elif state_ref_shape == "missing":
+        del context["state_ref"]
+    elif not names_state_ref:
+        context["state_ref"] = "case-1"
+
+    entry = store.publish(
+        preimage,
+        JudgeResponse({"matches_query": NoulAnswer(0.93)}),
+    )
+    assert (store.get(entry.cache_key, questions) is not None) is valid
+
+
 def test_publish_refuses_silently_missing_answers(tmp_path) -> None:
     store = CacheStore(tmp_path)
     response = JudgeResponse({"matches_query": NoulAnswer(0.93)})

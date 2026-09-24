@@ -4,6 +4,7 @@ import io
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from jm.answers import JudgeResponse, NoulAnswer
@@ -13,6 +14,11 @@ from jm.presets import SCHEMA_V3, validate_preset
 from jm.runner import State
 
 ROOT = Path(__file__).parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("JM_CACHE_DIR", str(tmp_path / "cache"))
 
 
 def _preset(tmp_path: Path, *, context_field_bytes: int = 4096) -> Path:
