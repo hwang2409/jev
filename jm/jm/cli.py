@@ -76,7 +76,9 @@ def _parser() -> argparse.ArgumentParser:
 
     jfilter = commands.add_parser("jfilter", help="run the jfilter preset")
     jfilter.add_argument("predicate", nargs="?", help="natural-language predicate")
-    jfilter.add_argument("--predicate", dest="predicate_option")
+    jfilter.add_argument(
+        "--predicate", dest="predicate_option", action="append"
+    )
     jfilter.set_defaults(short_preset="jfilter")
     _add_judgment_options(jfilter, include_query=False, include_predicate=False)
     jfilter.add_argument("paths", nargs="*", help="file paths when --by file is used")
@@ -156,9 +158,9 @@ def _add_judgment_options(
         help="supply a declared preset parameter as key=value",
     )
     if include_query:
-        parser.add_argument("--query")
+        parser.add_argument("--query", action="append")
     if include_predicate:
-        parser.add_argument("--predicate")
+        parser.add_argument("--predicate", action="append")
 
 
 def _positive_int(value: str) -> int:
@@ -299,14 +301,16 @@ def _judgment_command(
     if paths and args.input is not None:
         raise _UsageError("positional input paths cannot be combined with --input")
 
-    query = getattr(args, "query", None)
-    query_option = getattr(args, "query_option", None)
+    query = _single_alias(getattr(args, "query", None), "query")
+    query_option = _single_alias(getattr(args, "query_option", None), "query")
     if query_option is not None:
         if query is not None:
             raise _UsageError("query was supplied more than once")
         query = query_option
-    predicate = getattr(args, "predicate", None)
-    predicate_option = getattr(args, "predicate_option", None)
+    predicate = _single_alias(getattr(args, "predicate", None), "predicate")
+    predicate_option = _single_alias(
+        getattr(args, "predicate_option", None), "predicate"
+    )
     if predicate_option is not None:
         if predicate is not None:
             raise _UsageError("predicate was supplied more than once")
@@ -632,6 +636,18 @@ def _parse_parameters(
             )
         values[key] = value
     return values
+
+
+def _single_alias(
+    values: str | list[str] | None, name: str
+) -> str | None:
+    if values is None:
+        return None
+    if isinstance(values, str):
+        return values
+    if len(values) > 1:
+        raise _UsageError(f"{name} was supplied more than once")
+    return values[0]
 
 
 def _result_filter(

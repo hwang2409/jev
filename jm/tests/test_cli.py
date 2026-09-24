@@ -22,6 +22,11 @@ from jm.runner import BM25CorpusStats, State, bm25_rank, bm25_score, tokenize
 ROOT = Path(__file__).parents[1]
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("JM_CACHE_DIR", str(tmp_path / "cache"))
+
+
 class BrokenPipeStream:
     def write(self, _value: str) -> int:
         raise BrokenPipeError(32, "broken pipe")

@@ -173,6 +173,51 @@ def test_v3_parameters_validate_before_input_and_aliases_share_path(
         assert records == []
 
 
+@pytest.mark.parametrize(
+    "options",
+    [
+        ("--query", "one", "--query", "two"),
+        ("--predicate", "one", "--predicate", "two"),
+        ("--query", "one", "--param", "query=two"),
+    ],
+)
+def test_v3_alias_duplicates_fail_before_judge_or_cache(
+    options: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preset = _preset(tmp_path)
+    judge_calls = []
+    cache_calls = []
+    cache = CacheStore(tmp_path / "cache")
+    monkeypatch.setattr(
+        cache,
+        "get",
+        lambda *args, **kwargs: cache_calls.append(("get", args, kwargs)),
+    )
+    monkeypatch.setattr(
+        cache,
+        "publish",
+        lambda *args, **kwargs: cache_calls.append(
+            ("publish", args, kwargs)
+        ),
+    )
+
+    code, records, stderr = _invoke(
+        preset,
+        "not json\n",
+        *options,
+        judge_fn=lambda *args: judge_calls.append(args),
+        cache_store=cache,
+    )
+
+    assert code == 64
+    assert records == []
+    assert "supplied more than once" in stderr or "conflicts" in stderr
+    assert judge_calls == []
+    assert cache_calls == []
+
+
 def test_v3_cache_projection_includes_declared_context_only() -> None:
     questions = {
         "query_match": {
