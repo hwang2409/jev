@@ -106,7 +106,12 @@ def test_prefilter_ranks_before_scan_cap_and_assigns_one_skip_reason() -> None:
     )
     result = Runner(judge).run(
         states,
-        {"matches": {"type": "noul"}},
+        {
+            "matches": {
+                "type": "noul",
+                "instructions": {"state_fields": ["focus", "context.state_ref"]},
+            }
+        },
         max_chunks=1,
         prefilter={
             "ranker": "bm25",
@@ -154,7 +159,12 @@ def test_negative_max_chunks_is_rejected_on_both_admission_paths(prefilter) -> N
     with pytest.raises(ValueError, match="max_chunks must be non-negative"):
         Runner(judge).run(
             [State("a", "needle")],
-            {"matches": {"type": "noul"}},
+            {
+                "matches": {
+                    "type": "noul",
+                    "instructions": {"state_fields": ["focus", "context.state_ref"]},
+                }
+            },
             max_chunks=-1,
             prefilter=prefilter,
         )
@@ -321,11 +331,7 @@ def test_transport_503_retries_feed_runner_backoff() -> None:
         if status == 200:
             return httpx.Response(
                 status,
-                json={
-                    "answers": {
-                        "matches": {"type": "boolean", "probability": 0.9}
-                    }
-                },
+                json={"answers": {"matches": {"type": "boolean", "probability": 0.9}}},
                 request=request,
             )
         return httpx.Response(status, request=request)
@@ -337,7 +343,12 @@ def test_transport_503_retries_feed_runner_backoff() -> None:
     try:
         result = Runner(gateway).run(
             [State("state-0", "focus")],
-            {"matches": {"type": "noul"}},
+            {
+                "matches": {
+                    "type": "noul",
+                    "instructions": {"state_fields": ["focus", "context.state_ref"]},
+                }
+            },
         )
     finally:
         gateway.close()
@@ -363,11 +374,7 @@ def test_transport_restore_boundary_uses_observation_time(
     def success(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             200,
-            json={
-                "answers": {
-                    "matches": {"type": "boolean", "probability": 0.9}
-                }
-            },
+            json={"answers": {"matches": {"type": "boolean", "probability": 0.9}}},
             request=request,
         )
 
@@ -398,7 +405,12 @@ def test_transport_restore_boundary_uses_observation_time(
                 State("state-1", "focus"),
                 State("state-2", "focus"),
             ],
-            {"matches": {"type": "noul"}},
+            {
+                "matches": {
+                    "type": "noul",
+                    "instructions": {"state_fields": ["focus", "context.state_ref"]},
+                }
+            },
             concurrency=2,
         )
     finally:
@@ -424,11 +436,7 @@ def test_transport_backoff_reduces_repeated_bursts_to_one() -> None:
             return httpx.Response(503, request=request)
         return httpx.Response(
             200,
-            json={
-                "answers": {
-                    "matches": {"type": "boolean", "probability": 0.9}
-                }
-            },
+            json={"answers": {"matches": {"type": "boolean", "probability": 0.9}}},
             request=request,
         )
 
@@ -439,7 +447,12 @@ def test_transport_backoff_reduces_repeated_bursts_to_one() -> None:
     try:
         result = Runner(gateway).run(
             [State("state-0", "focus"), State("state-1", "focus")],
-            {"matches": {"type": "noul"}},
+            {
+                "matches": {
+                    "type": "noul",
+                    "instructions": {"state_fields": ["focus", "context.state_ref"]},
+                }
+            },
             concurrency=4,
         )
     finally:
@@ -510,9 +523,7 @@ def test_consistency_uses_fresh_uids_and_aggregates_only_noul_answers() -> None:
     assert answers["match"]["noul"] == pytest.approx(0.4)
     assert answers["match"]["consistency"]["samples"] == 3
     assert answers["match"]["consistency"]["mean"] == pytest.approx(0.4)
-    assert answers["match"]["consistency"]["stddev"] == pytest.approx(
-        (0.08 / 3) ** 0.5
-    )
+    assert answers["match"]["consistency"]["stddev"] == pytest.approx((0.08 / 3) ** 0.5)
     assert answers["kind"]["choice"] == "first"
     assert answers["risk"]["score"] == 1.0
     assert "consistency" not in answers["kind"]
@@ -658,13 +669,9 @@ def test_runner_rejects_explicit_defaults_for_different_preset_values() -> None:
     state = State("stdin#L1", "launch")
 
     with pytest.raises(PresetUsageError, match="model"):
-        Runner(FakeJudge(), model="other-model").run(
-            [state], preset=custom_preset
-        )
+        Runner(FakeJudge(), model="other-model").run([state], preset=custom_preset)
     with pytest.raises(PresetUsageError, match="limits"):
-        Runner(FakeJudge(), limits=StateLimits()).run(
-            [state], preset=custom_preset
-        )
+        Runner(FakeJudge(), limits=StateLimits()).run([state], preset=custom_preset)
 
     result = Runner(FakeJudge()).run([state], preset=custom_preset)
     assert result.records[0].to_dict()["meta"]["model"] == "typesafe-ai/jev"
@@ -856,10 +863,10 @@ def test_runner_emits_exact_partial_json() -> None:
                 "preset": "jm",
                 "preset_version": "1",
                 "model": "typesafe-ai/jev",
-                    "chunker": "para",
-                    "cache": "not_applicable",
-                    "partial": True,
-                    "served_model": "unknown",
+                "chunker": "para",
+                "cache": "not_applicable",
+                "partial": True,
+                "served_model": "unknown",
             },
         },
         {
@@ -876,10 +883,10 @@ def test_runner_emits_exact_partial_json() -> None:
             "meta": {
                 "preset": "jm",
                 "preset_version": "1",
-                    "model": "typesafe-ai/jev",
-                    "chunker": "para",
-                    "cache": "not_applicable",
-                    "served_model": "unknown",
+                "model": "typesafe-ai/jev",
+                "chunker": "para",
+                "cache": "not_applicable",
+                "served_model": "unknown",
             },
         },
     ]
@@ -912,9 +919,7 @@ def test_runner_groups_cap_skips_and_keeps_eight_samples() -> None:
             "skip_summary": {
                 "boundary": "max_chunks=2",
                 "count": 9,
-                "sample_refs": [
-                    f"notes:paragraph={index}" for index in range(2, 10)
-                ],
+                "sample_refs": [f"notes:paragraph={index}" for index in range(2, 10)],
             },
         },
         "meta": {
@@ -1231,9 +1236,7 @@ def test_gateway_client_rejects_malformed_success_response(monkeypatch) -> None:
         State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
     )
 
-    assert response == ErrorResponse(
-        "malformed answer", http_status=200, attempts=1
-    )
+    assert response == ErrorResponse("malformed answer", http_status=200, attempts=1)
 
 
 def test_gateway_client_retries_retryable_statuses_and_timeout(
@@ -1254,9 +1257,7 @@ def test_gateway_client_retries_retryable_statuses_and_timeout(
         client = httpx.Client(transport=httpx.MockTransport(handler))
         response = GatewayClient(
             http_client=client, sleep=sleeps.append, jitter=lambda: 0.0
-        )(
-            State("stdin#L1", "focus"), QUESTIONS, "typesafe-ai/jev"
-        )
+        )(State("stdin#L1", "focus"), QUESTIONS, "typesafe-ai/jev")
 
         assert attempts == 3
         assert len(sleeps) == 2
@@ -1290,9 +1291,7 @@ def test_gateway_client_honors_retry_after(monkeypatch) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            return httpx.Response(
-                429, headers={"Retry-After": "7"}, request=request
-            )
+            return httpx.Response(429, headers={"Retry-After": "7"}, request=request)
         return httpx.Response(200, json={"answers": {}}, request=request)
 
     sleeps: list[float] = []
@@ -1300,9 +1299,7 @@ def test_gateway_client_honors_retry_after(monkeypatch) -> None:
     client = httpx.Client(transport=httpx.MockTransport(handler))
     response = GatewayClient(
         http_client=client, sleep=sleeps.append, jitter=lambda: 99.0
-    )(
-        State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
-    )
+    )(State("stdin#L1", "focus"), {}, "typesafe-ai/jev")
 
     assert response.complete
     assert sleeps == [7.0]
@@ -1315,9 +1312,7 @@ def test_gateway_client_honors_long_retry_after(monkeypatch) -> None:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
-            return httpx.Response(
-                429, headers={"Retry-After": "59"}, request=request
-            )
+            return httpx.Response(429, headers={"Retry-After": "59"}, request=request)
         return httpx.Response(200, json={"answers": {}}, request=request)
 
     sleeps: list[float] = []
@@ -1338,9 +1333,7 @@ def test_gateway_client_honors_long_retry_after(monkeypatch) -> None:
         {"type": "boolean", "probability": 0.9, "extra": True},
     ],
 )
-def test_gateway_client_rejects_non_gateway_boolean_shapes(
-    monkeypatch, answer
-) -> None:
+def test_gateway_client_rejects_non_gateway_boolean_shapes(monkeypatch, answer) -> None:
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(
         transport=httpx.MockTransport(
@@ -1356,9 +1349,7 @@ def test_gateway_client_rejects_non_gateway_boolean_shapes(
         State("stdin#L1", "focus"), {"is_relevant": {"type": "noul"}}, "typesafe-ai/jev"
     )
 
-    assert response == ErrorResponse(
-        "malformed answer", http_status=200, attempts=1
-    )
+    assert response == ErrorResponse("malformed answer", http_status=200, attempts=1)
 
 
 def test_gateway_client_clamps_large_retry_after(monkeypatch) -> None:
@@ -1428,9 +1419,7 @@ def test_gateway_client_shares_attempt_budget_across_retries(monkeypatch) -> Non
 
     monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
     client = httpx.Client(transport=httpx.MockTransport(handler))
-    response = GatewayClient(
-        http_client=client, max_attempts=99, sleep=lambda _: None
-    )(
+    response = GatewayClient(http_client=client, max_attempts=99, sleep=lambda _: None)(
         State("stdin#L1", "focus"),
         {"is_relevant": {"type": "noul"}, "kind": {"type": "choice"}},
         "typesafe-ai/jev",
@@ -1454,9 +1443,7 @@ def test_gateway_client_enforces_timeout_on_injected_client(monkeypatch) -> None
     )
 
     assert response.complete
-    assert seen_timeouts == [
-        {"connect": 2.5, "read": 2.5, "write": 2.5, "pool": 2.5}
-    ]
+    assert seen_timeouts == [{"connect": 2.5, "read": 2.5, "write": 2.5, "pool": 2.5}]
 
 
 def test_gateway_client_rejects_oversized_response(monkeypatch) -> None:
@@ -1480,9 +1467,7 @@ def test_gateway_client_rejects_oversized_response(monkeypatch) -> None:
         assert "Content-Length" not in response.headers
         return response
 
-    client = httpx.Client(
-        transport=httpx.MockTransport(handler)
-    )
+    client = httpx.Client(transport=httpx.MockTransport(handler))
 
     response = GatewayClient(http_client=client, sleep=lambda _: None)(
         State("stdin#L1", "focus"), {}, "typesafe-ai/jev"
@@ -1522,9 +1507,7 @@ def test_gateway_client_returns_missing_ids_after_second_incomplete_response(
             lambda request: httpx.Response(
                 200,
                 json={
-                    "answers": {
-                        "is_relevant": {"type": "boolean", "probability": 0.5}
-                    }
+                    "answers": {"is_relevant": {"type": "boolean", "probability": 0.5}}
                 },
                 request=request,
             )
@@ -1564,9 +1547,7 @@ def test_gateway_client_accepts_and_sends_configured_model_name(monkeypatch) -> 
         assert request.headers["ai-model-id"] == "jev-latest"
         return httpx.Response(200, json={"answers": {}}, request=request)
 
-    client = httpx.Client(
-        transport=httpx.MockTransport(handler)
-    )
+    client = httpx.Client(transport=httpx.MockTransport(handler))
 
     response = GatewayClient(http_client=client)(
         State("stdin#L1", "focus"), {}, "jev-latest"
