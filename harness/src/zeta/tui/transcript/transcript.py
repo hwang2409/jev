@@ -17,17 +17,17 @@ from prompt_toolkit.mouse_events import MouseButton, MouseEvent, MouseEventType
 from rich.console import Console, RenderableType
 from rich.text import Text
 
-from ..protocol.types import (
+from ...protocol.types import (
     RedactedThinkingContent,
     StreamEvent,
     TextContent,
     ThinkingContent,
     ToolCall,
 )
-from . import theme
-from .agent_card import AgentCard
-from .render import render_tool_progress
-from .theme import RICH_THEME
+from .. import theme
+from ..agent_card import AgentCard
+from ..render import render_tool_progress
+from ..theme import RICH_THEME
 from .transcript_search import (
     AnchoredSelection,
     Cell,
@@ -38,7 +38,6 @@ from .transcript_search import (
     find_matches,
     highlight_fragments,
 )
-
 
 MAX_TOOL_TAIL_CHARS = 4_096
 
