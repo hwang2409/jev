@@ -104,9 +104,9 @@ class _GatewayTransport:
             return _attempt_budget_error(attempts), attempts
         while attempts < self.max_attempts:
             attempts += 1
+            if self._request_observer is not None:
+                self._request_observer()
             try:
-                if self._request_observer is not None:
-                    self._request_observer()
                 request_options = (
                     {"content": payload}
                     if isinstance(payload, bytes)
@@ -163,9 +163,9 @@ class _GatewayTransport:
             return _attempt_budget_error(attempts), attempts
         while attempts < self.max_attempts:
             attempts += 1
+            if self._request_observer is not None:
+                self._request_observer()
             try:
-                if self._request_observer is not None:
-                    self._request_observer()
                 request_options = (
                     {"content": payload}
                     if isinstance(payload, bytes)

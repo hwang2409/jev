@@ -420,6 +420,37 @@ def test_request_observer_exception_propagates_before_http_send(monkeypatch) -> 
     assert sent == 0
 
 
+def test_request_observer_timeout_exception_is_not_retried(monkeypatch) -> None:
+    sent = 0
+    observer_calls = 0
+    observer_error = httpx.TimeoutException("observer timeout")
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal sent
+        sent += 1
+        return _response(request, answers={})
+
+    def observer() -> None:
+        nonlocal observer_calls
+        observer_calls += 1
+        raise observer_error
+
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+    client = _client(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler))
+    )
+    client.set_request_observer(observer)
+    try:
+        with pytest.raises(httpx.TimeoutException) as exc_info:
+            client.evaluate(State("case#1", "focus"), {})
+    finally:
+        client.close()
+
+    assert exc_info.value is observer_error
+    assert observer_calls == 1
+    assert sent == 0
+
+
 def test_async_request_observer_exception_propagates_before_http_send(
     monkeypatch,
 ) -> None:
@@ -449,6 +480,45 @@ def test_async_request_observer_exception_propagates_before_http_send(
         finally:
             await client.aclose()
 
+        assert sent == 0
+
+    asyncio.run(run())
+
+
+def test_async_request_observer_timeout_exception_is_not_retried(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "test-secret")
+
+    async def run() -> None:
+        sent = 0
+        observer_calls = 0
+        observer_error = httpx.TimeoutException("observer timeout")
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            nonlocal sent
+            sent += 1
+            return _response(request, answers={})
+
+        def observer() -> None:
+            nonlocal observer_calls
+            observer_calls += 1
+            raise observer_error
+
+        client = _client(
+            async_http_client=httpx.AsyncClient(
+                transport=httpx.MockTransport(handler)
+            )
+        )
+        client.set_request_observer(observer)
+        try:
+            with pytest.raises(httpx.TimeoutException) as exc_info:
+                await client.evaluate_async(State("case#1", "focus"), {})
+        finally:
+            await client.aclose()
+
+        assert exc_info.value is observer_error
+        assert observer_calls == 1
         assert sent == 0
 
     asyncio.run(run())
