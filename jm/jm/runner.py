@@ -48,7 +48,7 @@ from .answers import (
 from .cache import (
     CACHE_SCHEMA,
     CacheStore,
-    build_cache_preimage,
+    battery_hash,
     cache_key,
     v3_context_keys,
 )
@@ -192,9 +192,7 @@ class FormationEvent:
             if self.state_ref is None or self.reason == "input_error":
                 raise ConfigurationError("skip events require a state reference")
         elif self.reason != "input_error":
-            raise ConfigurationError(
-                "input_error events require reason input_error"
-            )
+            raise ConfigurationError("input_error events require reason input_error")
         elif self.source_ref is None or self.state_ref is not None:
             raise ConfigurationError(
                 "input_error events require a source reference only"
@@ -365,10 +363,10 @@ def admit_states(
     max_chunks: int | None = None,
     rejections: Sequence[StateRejection] = (),
 ) -> StateAdmission:
-    if (
-        max_chunks is not None
-        and (isinstance(max_chunks, bool) or not isinstance(max_chunks, int)
-             or max_chunks < 0)
+    if max_chunks is not None and (
+        isinstance(max_chunks, bool)
+        or not isinstance(max_chunks, int)
+        or max_chunks < 0
     ):
         raise ValueError("max_chunks must be non-negative")
     formed = tuple(states)
@@ -461,13 +459,9 @@ _V3_CONTEXT_KEYS: dict[str, frozenset[str] | None] = {
     "state": None,
     "file": frozenset({"language", "metadata", "path"}),
     "line": frozenset({"line", "source", "surrounding", "unit"}),
-    "para": frozenset(
-        {"heading", "paragraph", "source", "surrounding", "unit"}
-    ),
+    "para": frozenset({"heading", "paragraph", "source", "surrounding", "unit"}),
     "record": frozenset({"metadata", "unit"}),
-    "hunk": frozenset(
-        {"changed_tests", "file", "hunk_header", "surrounding", "unit"}
-    ),
+    "hunk": frozenset({"changed_tests", "file", "hunk_header", "surrounding", "unit"}),
 }
 
 
@@ -509,6 +503,7 @@ class Runner:
         for state in states:
             validate_state(state, self.limits)
         return admit_states(states, max_chunks, rejections)
+
     def run(
         self,
         states: Sequence[State],
@@ -679,13 +674,9 @@ class Runner:
             require_states=require_states,
             capture=capture,
         )
-        if (
-            cache_store is not None
-            and any(
-                isinstance(record, ErrorRecord)
-                and record.error.kind == "malformed_answer"
-                for record in capture.records
-            )
+        if cache_store is not None and any(
+            isinstance(record, ErrorRecord) and record.error.kind == "malformed_answer"
+            for record in capture.records
         ):
             raise ValueError("malformed answer")
         return _run_result(
@@ -1016,9 +1007,7 @@ def _judge_core(
             import asyncio
 
             try:
-                return asyncio.run(
-                    async_evaluate(state, questions, model=model)
-                )
+                return asyncio.run(async_evaluate(state, questions, model=model))
             except TypeError:
                 return asyncio.run(async_evaluate(state, questions))
 
@@ -1029,29 +1018,12 @@ def _judge_core(
     runtime_model = loaded_preset.model
     runtime_chunker = loaded_preset.default_chunker
     runtime_schema = (
-        loaded_preset.schema
-        if loaded_preset.schema in {SCHEMA_V2, SCHEMA_V3}
-        else None
+        loaded_preset.schema if loaded_preset.schema in {SCHEMA_V2, SCHEMA_V3} else None
     )
     runtime_questions = loaded_preset.questions
     runtime_chunking = dict(loaded_preset.chunking)
 
-    def cache_preimage(state: State) -> dict[str, Any]:
-        return build_cache_preimage(
-            model=runtime_model,
-            preset=runtime_name,
-            preset_version=runtime_version,
-            chunking=runtime_chunking,
-            questions=runtime_questions,
-            state=state,
-            cache_schema=CACHE_SCHEMA,
-            preset_schema=runtime_schema,
-            include_uid=consistency is not None,
-        )
-
     def request_state(state: State) -> State:
-        if runtime_schema != SCHEMA_V3:
-            return state
         return State(
             state.state_ref,
             state.focus,
@@ -1062,8 +1034,6 @@ def _judge_core(
             ),
         )
 
-    if cache_store is not None and validated_states:
-        cache_preimage(validated_states[0])
     try:
         _validate_consistency(consistency, consistency_sigma, runtime_questions)
     except PresetUsageError as exc:
@@ -1097,9 +1067,7 @@ def _judge_core(
                         "state_field_unavailable",
                         f"question '{question_id}' references unavailable field "
                         f"'{field}' for chunker '{runtime_chunker}'",
-                        path=(
-                            f"questions.{question_id}.instructions.state_fields"
-                        ),
+                        path=(f"questions.{question_id}.instructions.state_fields"),
                     )
                 )
     effective_concurrency = min(concurrency, 8)
@@ -1114,9 +1082,7 @@ def _judge_core(
 
     state_records: list[CanonicalRecord] = []
     formation_records = _formation_records(formation_report.events, base_meta)
-    reasons: set[str] = {
-        event.reason for event in formation_report.events
-    }
+    reasons: set[str] = {event.reason for event in formation_report.events}
     failed = 0
 
     consistency_usage: dict[str, int | float] = {}
@@ -1128,6 +1094,8 @@ def _judge_core(
     consecutive_503 = 0
     last_503_at: float | None = None
     concurrency_diagnostics: list[DiagnosticRecord] = []
+    cache_locks: dict[str, Lock] = {}
+    cache_locks_guard = Lock()
 
     def observe_response(status_code: int) -> None:
         nonlocal consecutive_503, current_concurrency, last_503_at
@@ -1180,53 +1148,89 @@ def _judge_core(
         state: State,
     ) -> ResultRecord | PartialResultRecord | ErrorRecord:
         def one_call(call_state: State) -> tuple[TypedResponse, bool]:
-            preimage = None
-            if cache_store is not None:
-                preimage = cache_preimage(call_state)
-                cached = cache_store.get(cache_key(preimage), runtime_questions)
-                if cached is not None:
-                    nonlocal consistency_cache_hits
-                    if consistency is not None:
-                        with consistency_stats_lock:
-                            consistency_cache_hits += 1
-                    return cached.response, True
-            response = _call_public_judge(
-                active_judge,
-                request_state(call_state),
-                runtime_questions,
-                runtime_model,
+            from .client import build_canonical_request
+
+            wire_state = request_state(call_state)
+            request = build_canonical_request(
+                wire_state, runtime_questions, model=runtime_model
             )
-            if (
-                isinstance(response, JudgeResponse)
-                and response.complete
-                and not _complete_for_questions(response, runtime_questions)
-            ):
-                response = ErrorResponse("malformed answer")
-            nonlocal consistency_live_calls
-            if consistency is not None:
-                with consistency_stats_lock:
-                    consistency_live_calls += 1
-            if (
-                cache_store is not None
-                and preimage is not None
-                and isinstance(response, JudgeResponse)
-                and response.complete
-            ):
-                try:
-                    cache_store.publish(preimage, response, usage=response.usage)
-                except (OSError, TypeError, ValueError):
-                    pass
-            return response, False
+            envelope = {
+                "cache_schema": CACHE_SCHEMA,
+                "wire_request": request.payload,
+                "transport_identity": request.transport_identity,
+            }
+            key = cache_key(envelope)
+
+            def execute() -> tuple[TypedResponse, bool]:
+                if cache_store is not None:
+                    cached = cache_store.get(key)
+                    if cached is not None:
+                        cache_store.add_provenance(
+                            key,
+                            preset=runtime_name,
+                            preset_version=runtime_version,
+                            battery_hash=battery_hash(runtime_questions),
+                            state_ref=call_state.state_ref,
+                        )
+                        nonlocal consistency_cache_hits
+                        if consistency is not None:
+                            with consistency_stats_lock:
+                                consistency_cache_hits += 1
+                        return cached.response, True
+                response = _call_public_judge(
+                    active_judge,
+                    wire_state,
+                    runtime_questions,
+                    runtime_model,
+                )
+                if (
+                    isinstance(response, JudgeResponse)
+                    and response.complete
+                    and not _complete_for_questions(response, runtime_questions)
+                ):
+                    response = ErrorResponse("malformed answer")
+                nonlocal consistency_live_calls
+                if consistency is not None:
+                    with consistency_stats_lock:
+                        consistency_live_calls += 1
+                if (
+                    cache_store is not None
+                    and isinstance(response, JudgeResponse)
+                    and response.complete
+                ):
+                    try:
+                        cache_store.publish(
+                            request.payload["state"],
+                            response,
+                            battery=runtime_questions,
+                            preset=runtime_name,
+                            preset_version=runtime_version,
+                            configured_model=runtime_model,
+                            transport_identity=request.transport_identity,
+                            state_ref=call_state.state_ref,
+                            effective_preset={
+                                "chunking": runtime_chunking,
+                                "thresholds": loaded_preset.data["thresholds"],
+                                "output": loaded_preset.data["output"],
+                            },
+                            usage=response.usage,
+                        )
+                    except (OSError, TypeError, ValueError):
+                        pass
+                return response, False
+
+            if cache_store is None:
+                return execute()
+            with cache_locks_guard:
+                lock = cache_locks.setdefault(key, Lock())
+            with lock:
+                return execute()
 
         cache_state = "not_applicable"
         if consistency is None:
             response, cache_hit = one_call(state)
             cache_state = (
-                "hit"
-                if cache_hit
-                else "miss"
-                if cache_store
-                else "not_applicable"
+                "hit" if cache_hit else "miss" if cache_store else "not_applicable"
             )
         else:
             responses: list[JudgeResponse] = []
@@ -1248,8 +1252,10 @@ def _judge_core(
                 else:
                     responses.append(response)
             cache_state = (
-                "hit" if hits == consistency else "miss"
-            ) if cache_store is not None else "not_applicable"
+                ("hit" if hits == consistency else "miss")
+                if cache_store is not None
+                else "not_applicable"
+            )
             if failure is not None:
                 response = failure
             else:
@@ -1377,10 +1383,10 @@ def _judge_core(
             meta=coverage_meta,
         )
     finally:
-            if client is not None:
-                close = getattr(client, "close", None)
-                if callable(close):
-                    close()
+        if client is not None:
+            close = getattr(client, "close", None)
+            if callable(close):
+                close()
 
 
 def judge(
@@ -1420,9 +1426,7 @@ def judge_async(
         import threading
 
         active_judge_fn = judge_fn
-        if active_judge_fn is not None and inspect.iscoroutinefunction(
-            active_judge_fn
-        ):
+        if active_judge_fn is not None and inspect.iscoroutinefunction(active_judge_fn):
             async_fn = active_judge_fn
 
             def sync_judge(
@@ -1799,8 +1803,7 @@ def formation_report(
     result_diagnostics = list(diagnostics)
     if include_prefilter_warning:
         count = sum(
-            rejection.reason == "prefiltered"
-            for rejection in admission.skip_rejections
+            rejection.reason == "prefiltered" for rejection in admission.skip_rejections
         )
         if count:
             result_diagnostics.append(
@@ -1918,7 +1921,17 @@ def _question_state_fields(question: Any) -> tuple[str, ...]:
 def _repeat_state(state: State) -> State:
     context = dict(state.context)
     context["uid"] = uuid4().hex
-    return State(state.state_ref, state.focus, context)
+    return State(
+        state.state_ref,
+        state.focus,
+        context,
+        source_ref=state.source_ref,
+        wire_context_keys=(
+            state.wire_context_keys | {"uid"}
+            if state.wire_context_keys is not None
+            else None
+        ),
+    )
 
 
 def _complete_for_questions(
@@ -1928,8 +1941,7 @@ def _complete_for_questions(
     if not response.complete or set(response.answers) != set(questions):
         return False
     return all(
-        getattr(response.answers[question_id], "type", None)
-        == _question_type(question)
+        getattr(response.answers[question_id], "type", None) == _question_type(question)
         for question_id, question in questions.items()
     )
 
@@ -2097,15 +2109,9 @@ def bm25_score(
         if not frequency:
             continue
         df = corpus_stats.document_frequency[token]
-        idf = math.log(
-            1
-            + (corpus_stats.document_count - df + 0.5)
-            / (df + 0.5)
-        )
+        idf = math.log(1 + (corpus_stats.document_count - df + 0.5) / (df + 0.5))
         denominator = frequency + _BM25_K1 * (
-            1
-            - _BM25_B
-            + _BM25_B * length / corpus_stats.average_length
+            1 - _BM25_B + _BM25_B * length / corpus_stats.average_length
             if corpus_stats.average_length
             else 1
         )
@@ -2170,9 +2176,7 @@ def _response_record(
         )
         return ErrorRecord(
             state_ref,
-            ErrorDetail(
-                kind, response.error, response.http_status, response.attempts
-            ),
+            ErrorDetail(kind, response.error, response.http_status, response.attempts),
             meta,
         )
     if response.complete:

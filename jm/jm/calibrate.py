@@ -18,7 +18,7 @@ from .answers import (
     answer_to_dict,
     probability_keys_for_question,
 )
-from .cache import CacheEntry, CacheStore
+from .cache import CacheEntry, CacheStore, battery_hash
 from .presets import Preset
 from .runner import State, _repeat_state
 
@@ -68,7 +68,7 @@ def run_calibration(
     resolved = tolerances or tolerances_for_preset(preset)
     try:
         entries = _load_entries(preset, cache_store)
-        states = tuple(_state_for_entry(entry) for entry in entries)
+        states = tuple(_state_for_entry(entry, preset) for entry in entries)
     except CalibrationOperationalError as exc:
         summary = _summary(
             preset,
@@ -134,6 +134,7 @@ def run_calibration(
 
         case_records: list[dict[str, Any]] = []
         case_metrics: list[dict[str, float | bool]] = []
+        target_group = _target_provenance(entry, preset)
         for question_id, question in preset.questions.items():
             try:
                 baseline_answer = entry.response.answers[question_id]
@@ -149,6 +150,7 @@ def run_calibration(
                     candidates,
                     candidate_answers,
                     resolved,
+                    target_group,
                 )
             except (KeyError, TypeError, ValueError) as exc:
                 operational_error = f"malformed calibration answer: {exc}"
@@ -160,9 +162,7 @@ def run_calibration(
             break
 
         completed_cases += 1
-        case_choice_flip = any(
-            bool(metrics["choice_flip"]) for metrics in case_metrics
-        )
+        case_choice_flip = any(bool(metrics["choice_flip"]) for metrics in case_metrics)
         case_threshold_crossing = any(
             bool(metrics["threshold_crossing"]) for metrics in case_metrics
         )
@@ -249,7 +249,11 @@ def tolerances_for_preset(preset: Preset) -> CalibrationTolerances:
 
 def _load_entries(preset: Preset, store: CacheStore) -> tuple[CacheEntry, ...]:
     try:
-        entries = store.calibration_entries(preset.name)
+        entries = store.calibration_entries(
+            preset.name,
+            preset.version,
+            battery_hash(preset.questions),
+        )
     except ValueError as exc:
         raise CalibrationOperationalError(str(exc)) from exc
     for entry in entries:
@@ -258,14 +262,11 @@ def _load_entries(preset: Preset, store: CacheStore) -> tuple[CacheEntry, ...]:
                 f"cache entry {entry.cache_key} has preset version "
                 f"{entry.preset_version!r}, expected {preset.version!r}"
             )
-        if entry.model != preset.model:
+        if entry.configured_model != preset.model:
             raise CalibrationOperationalError(
-                f"cache entry {entry.cache_key} has model {entry.model!r}, "
+                f"cache entry {entry.cache_key} has model "
+                f"{entry.configured_model!r}, "
                 f"expected {preset.model!r}"
-            )
-        if entry.preimage.get("question_battery") != preset.questions:
-            raise CalibrationOperationalError(
-                f"cache entry {entry.cache_key} has a mixed question battery"
             )
         if set(entry.response.answers) != set(preset.questions):
             raise CalibrationOperationalError(
@@ -274,8 +275,21 @@ def _load_entries(preset: Preset, store: CacheStore) -> tuple[CacheEntry, ...]:
     return entries
 
 
-def _state_for_entry(entry: CacheEntry) -> State:
-    raw_state = entry.preimage.get("state")
+def _target_provenance(entry: CacheEntry, preset: Preset) -> Mapping[str, Any]:
+    target = entry.provenance_for(
+        preset.name,
+        preset.version,
+        battery_hash(preset.questions),
+    )
+    if target is None:
+        raise CalibrationOperationalError(
+            f"cache entry {entry.cache_key} has no target provenance"
+        )
+    return target
+
+
+def _state_for_entry(entry: CacheEntry, preset: Preset) -> State:
+    raw_state = entry.wire_state
     if not isinstance(raw_state, Mapping):
         raise CalibrationOperationalError(
             f"cache entry {entry.cache_key} has an invalid state"
@@ -286,12 +300,13 @@ def _state_for_entry(entry: CacheEntry) -> State:
         raise CalibrationOperationalError(
             f"cache entry {entry.cache_key} has an invalid state"
         )
-    state_ref = context.get("state_ref")
+    target = _target_provenance(entry, preset)
+    state_ref = context.get("state_ref") or target["state_refs"][0]
     if not isinstance(state_ref, str) or not state_ref:
         raise CalibrationOperationalError(
             f"cache entry {entry.cache_key} has no state reference"
         )
-    return State(state_ref, focus, context)
+    return State(state_ref, focus, context, wire_context_keys=frozenset(context))
 
 
 def _comparison_record(
@@ -303,6 +318,7 @@ def _comparison_record(
     responses: Sequence[JudgeResponse],
     candidates: Sequence[Answer],
     tolerances: CalibrationTolerances,
+    target_group: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, float | bool]]:
     if len(candidates) != tolerances.repeats:
         raise ValueError("candidate repeat count does not match repeats")
@@ -355,7 +371,8 @@ def _comparison_record(
     record = {
         "record_type": "calibration_case",
         "cache_key": entry.cache_key,
-        "state_ref": entry.preimage["state"]["context"]["state_ref"],
+        "state_ref": target_group["state_refs"][0],
+        "state_refs": list(target_group["state_refs"]),
         "question_id": question_id,
         "primitive": expected_type,
         "baseline_answer": answer_to_dict(baseline),
@@ -410,12 +427,17 @@ def _probability_delta(baseline: Answer, candidates: Sequence[Answer]) -> float:
         if isinstance(candidate, (ChoiceAnswer, ScoreAnswer))
     )
     keys = set().union(*(probabilities for probabilities in maps))
-    return round(max(
-        (abs(probabilities.get(key, 0.0) - baseline.probabilities.get(key, 0.0))
-         for probabilities in maps[1:]
-         for key in keys),
-        default=0.0,
-    ), 12)
+    return round(
+        max(
+            (
+                abs(probabilities.get(key, 0.0) - baseline.probabilities.get(key, 0.0))
+                for probabilities in maps[1:]
+                for key in keys
+            ),
+            default=0.0,
+        ),
+        12,
+    )
 
 
 def _numeric_delta(
@@ -427,11 +449,17 @@ def _numeric_delta(
         return 0.0
     field = "score" if answer_type is ScoreAnswer else "noul"
     baseline_value = float(getattr(baseline, field))
-    return round(max(
-        (abs(float(getattr(candidate, field)) - baseline_value)
-         for candidate in candidates if isinstance(candidate, answer_type)),
-        default=0.0,
-    ), 12)
+    return round(
+        max(
+            (
+                abs(float(getattr(candidate, field)) - baseline_value)
+                for candidate in candidates
+                if isinstance(candidate, answer_type)
+            ),
+            default=0.0,
+        ),
+        12,
+    )
 
 
 def _thresholds(
@@ -497,9 +525,7 @@ def _repeat_classification(
         for item in thresholds
     )
     coherent = (
-        len(directions) <= 1
-        and max(values) - min(values) <= tolerance
-        and same_sides
+        len(directions) <= 1 and max(values) - min(values) <= tolerance and same_sides
     )
     if not coherent:
         return False, True
