@@ -419,10 +419,8 @@ async def test_cancelled_image_token_removes_staged_file_on_send(
 
     assert not staged.exists()
     message = store.messages()[0]
-    assert [
-        block for block in message.content if isinstance(block, TextContent)
-    ] == [TextContent("send")]
-    assert any(isinstance(block, RoutingSchemaContent) for block in message.content)
+    assert isinstance(message.content[1], RoutingSchemaContent)
+    assert message.content == [TextContent("send"), message.content[1]]
     await app.loop.close()
 
 
@@ -664,21 +662,13 @@ async def test_deleted_pending_paste_is_dropped_once(tmp_path: Path) -> None:
     users = [
         message for message in store.messages() if message.role is MessageRole.USER
     ]
-    assert [
-        [
-            block
-            for block in message.content
-            if isinstance(block, (ImageContent, TextContent))
-        ]
-        for message in users
-    ] == [
-        [TextContent("first")],
-        [TextContent("second")],
-    ]
     assert all(
-        any(isinstance(block, RoutingSchemaContent) for block in message.content)
-        for message in users
+        isinstance(message.content[1], RoutingSchemaContent) for message in users
     )
+    assert [message.content for message in users] == [
+        [TextContent("first"), users[0].content[1]],
+        [TextContent("second"), users[1].content[1]],
+    ]
     assert len(notices) == 1
     assert notices[0].startswith("pending attachment dropped:")
     await app.loop.close()

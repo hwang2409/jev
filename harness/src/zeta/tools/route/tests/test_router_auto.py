@@ -14,6 +14,7 @@ from zeta.core.store import ConversationStore
 from zeta.protocol.types import (
     Message,
     MessageRole,
+    RoutingSchemaContent,
     TextContent,
     ToolCall,
     ToolResult,
@@ -630,7 +631,7 @@ async def test_auto_route_needs_tool_gate_advertises_none(
     await collect(loop.run_turn("what is two plus two?"))
 
     assert loop.backend.calls[0][1] == [loop._auto_invoke_schema]
-    assert loop.backend.calls[0][0][-1].content[-1] == TextContent(
+    assert loop.backend.calls[0][0][-1].content[-1] == RoutingSchemaContent(
         "no tool is needed this turn — answer directly"
     )
 
