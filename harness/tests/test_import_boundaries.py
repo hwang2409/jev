@@ -7,6 +7,109 @@ import sys
 
 
 ROOT = Path(__file__).parents[1] / "src" / "zeta"
+LEGACY_RUNTIME_LOOP_EXPORTS = (
+    "AgentCatalog",
+    "AgentLoop",
+    "AgentTree",
+    "Any",
+    "ApprovalPolicy",
+    "AsyncIterator",
+    "BackgroundAgentOwner",
+    "Callable",
+    "CompletionBackend",
+    "ContentBlock",
+    "ContextAssembler",
+    "ConversationStore",
+    "Coroutine",
+    "ErrorInfo",
+    "FAILED_TURN_ERROR",
+    "FAILED_TURN_MARKER",
+    "HookManager",
+    "MAX_AGENT_DEPTH",
+    "MAX_AGENT_RESULT_BYTES",
+    "MAX_ERROR_MESSAGE",
+    "MCPCommandError",
+    "MCPConfigError",
+    "MCPMount",
+    "MCP_USAGE",
+    "MEMORY_INJECTION_EXCERPT_CHARS",
+    "MEMORY_INJECTION_PREFIX",
+    "MEMORY_INJECTION_TOP_K",
+    "MEMORY_INJECTION_TOTAL_CHARS",
+    "MEMORY_RELEVANCE_GATE",
+    "Mapping",
+    "MemoryInjectionSkipReason",
+    "Message",
+    "MessageRole",
+    "NEEDS_TOOL_GATE",
+    "PLAN_MODE_PREAMBLE",
+    "PLAN_MODE_TOOLS",
+    "Path",
+    "ROUTE_TOPK_CONFIDENCE",
+    "RoutingSchemaContent",
+    "Sequence",
+    "SkillCatalog",
+    "SlashModelInput",
+    "StrEnum",
+    "StreamEvent",
+    "StreamEventType",
+    "TYPE_CHECKING",
+    "TaskResult",
+    "TerminalState",
+    "TextContent",
+    "ThinkingContent",
+    "ToolAbortSignal",
+    "ToolCall",
+    "ToolExecutionContext",
+    "ToolHandler",
+    "ToolRegistry",
+    "ToolResult",
+    "ToolSchema",
+    "ToolStreamPublisher",
+    "ToolUseContent",
+    "TypeVar",
+    "UTC",
+    "add_and_mount",
+    "agent_result",
+    "annotations",
+    "asdict",
+    "asyncio",
+    "auto_route",
+    "build_catalog",
+    "compose_system_prompt",
+    "consume_turn",
+    "datetime",
+    "deque",
+    "dispatch_tool_calls",
+    "finalize_agent_results",
+    "flatten_tool_content",
+    "hashlib",
+    "home_config_path",
+    "httpx",
+    "json",
+    "load_identity",
+    "load_mcp_config_overlay",
+    "logging",
+    "memory_relevance",
+    "mount_mcp_servers",
+    "os",
+    "parse_add_command",
+    "project_config_path",
+    "recover_agent_children",
+    "remove_and_unshadow",
+    "render_mcp_status",
+    "replace",
+    "run_agent_tool",
+    "run_mcp_auth",
+    "run_mcp_resource_attach",
+    "run_mcp_resources_list",
+    "select_tool_registry",
+    "shlex",
+    "terminal_state",
+    "tool_prefix",
+    "validate_tool_result",
+    "warnings",
+)
 FORBIDDEN = {
     "automations": {"tui", "cli"},
     "runtime": {"tui", "cli"},
@@ -143,11 +246,26 @@ def test_import_boundaries() -> None:
 
 
 def test_runtime_loop_preserves_legacy_exports() -> None:
-    from zeta.loop import (
-        RoutingSchemaContent as legacy_routing_schema_content,
-        ToolStreamPublisher as legacy_tool_stream_publisher,
-    )
-    from zeta.runtime.loop import RoutingSchemaContent, ToolStreamPublisher
+    """Keep the complete legacy surface covered.
 
-    assert legacy_routing_schema_content is RoutingSchemaContent
-    assert legacy_tool_stream_publisher is ToolStreamPublisher
+    Regenerate ``LEGACY_RUNTIME_LOOP_EXPORTS`` with:
+
+        git show "$(git merge-base HEAD origin/master):harness/src/zeta/runtime/loop.py" | python -c 'import ast,json,sys; tree=ast.parse(sys.stdin.read()); names=set(); [names.add(node.name) for node in tree.body if isinstance(node,(ast.FunctionDef,ast.AsyncFunctionDef,ast.ClassDef))]; [names.add(target.id) for node in tree.body if isinstance(node,(ast.Assign,ast.AnnAssign,ast.AugAssign)) for target in (node.targets if isinstance(node,ast.Assign) else [node.target]) if isinstance(target,ast.Name)]; [names.add(alias.asname or alias.name.split(".")[0]) for node in tree.body if isinstance(node,(ast.Import,ast.ImportFrom)) for alias in node.names if alias.name != "*"]; print(json.dumps(sorted(name for name in names if not name.startswith("_")), indent=2))'
+
+    ``annotations`` is included because the legacy module imported it from
+    ``__future__``.
+    """
+    import importlib
+
+    runtime_loop = importlib.import_module("zeta.runtime.loop")
+    expected = set(LEGACY_RUNTIME_LOOP_EXPORTS)
+
+    assert len(expected) == 101
+    assert set(runtime_loop.__all__) == expected
+    assert all(hasattr(runtime_loop, name) for name in expected)
+
+    wildcard_namespace: dict[str, object] = {}
+    exec("from zeta.loop import *", wildcard_namespace)  # noqa: S102
+    assert {
+        name for name in wildcard_namespace if not name.startswith("_")
+    } == expected

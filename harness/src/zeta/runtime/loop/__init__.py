@@ -1184,7 +1184,6 @@ class AgentLoop(RoutingMixin, AgentChildMixin, PersistenceMixin):
 
 _LEGACY_EXPORT_EXCLUSIONS = frozenset(
     {
-        "annotations",
         "agent",
         "persistence",
         "routing",
