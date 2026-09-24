@@ -5,6 +5,7 @@ import os
 import re
 import string
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -12,6 +13,7 @@ from typing import Any
 import yaml
 
 from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
+from .answers import Diagnostic
 
 SCHEMA = "jm.preset/v1"
 SCHEMA_V2 = "jm.preset/v2"
@@ -45,12 +47,28 @@ _REQUIRED_FIELDS = frozenset(
         "version",
         "model",
         "chunking",
-        "compatible_chunkers",
         "questions",
         "thresholds",
         "output",
     }
 )
+_DEFAULT_LIMITS = {
+    "focus_bytes": 16_384,
+    "context_field_bytes": 4_096,
+    "state_bytes": 32_768,
+}
+_DEFAULT_OUTPUT_FIELDS = [
+    "record_type",
+    "state_ref",
+    "source_ref",
+    "answers",
+    "error",
+    "missing_questions",
+    "coverage",
+    "coverage_counts",
+    "coverage_reasons",
+    "meta",
+]
 _OPTIONAL_FIELDS = frozenset({"description", "calibration"})
 _PARAMETER_FIELDS = frozenset({"declared"})
 _PARAMETER_NAME = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -119,6 +137,7 @@ class PresetNotFoundError(FileNotFoundError):
 class Preset:
     data: Mapping[str, Any]
     path: Path
+    diagnostics: tuple[Diagnostic, ...] = ()
 
     @property
     def name(self) -> str:
@@ -171,9 +190,25 @@ class Preset:
 
 def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     """Validate and return one decoded preset mapping."""
+    validated, _ = _validate_preset(data)
+    return validated
+
+
+def validate_preset_with_diagnostics(
+    data: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], tuple[Diagnostic, ...]]:
+    """Validate a preset and return warnings for open wire fields."""
+    return _validate_preset(data)
+
+
+def _validate_preset(
+    data: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], tuple[Diagnostic, ...]]:
     root = _mapping(data, "preset")
+    root = deepcopy(dict(root))
+    diagnostics: list[Diagnostic] = []
     schema = root.get("schema")
-    allowed_fields = _REQUIRED_FIELDS | _OPTIONAL_FIELDS
+    allowed_fields = _REQUIRED_FIELDS | _OPTIONAL_FIELDS | {"compatible_chunkers"}
     if schema == SCHEMA_V2:
         allowed_fields |= {"prefilter"}
     elif schema == SCHEMA_V3:
@@ -199,17 +234,24 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             f"parameters requires schema {SCHEMA_V3!r}"
         )
 
-    chunking = _mapping(root["chunking"], "chunking")
-    _require_fields(chunking, {"by", "limits"}, "chunking")
+    chunking = dict(_mapping(root["chunking"], "chunking"))
+    root["chunking"] = chunking
+    _require_fields(chunking, {"by"}, "chunking")
     by = _string(chunking["by"], "chunking.by")
     if by not in CHUNKERS:
         raise PresetValidationError(f"chunking.by must be one of {sorted(CHUNKERS)}")
     allowed_settings = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[by]
+    if by == "para" and chunking.get("context_lines") == 0:
+        allowed_settings |= {"context_lines"}
     _reject_unknown(chunking, allowed_settings, "chunking")
-    for field_name in CHUNKER_SETTINGS[by] | {"max_chunks"}:
+    validated_settings = CHUNKER_SETTINGS[by] | {"max_chunks"}
+    if "context_lines" in allowed_settings:
+        validated_settings |= {"context_lines"}
+    for field_name in validated_settings:
         if field_name in chunking:
             _nonnegative_integer(chunking[field_name], f"chunking.{field_name}")
-    limits = _mapping(chunking["limits"], "chunking.limits")
+    limits = dict(chunking.get("limits", _DEFAULT_LIMITS))
+    chunking["limits"] = limits
     _reject_unknown(
         limits,
         {"focus_bytes", "context_field_bytes", "state_bytes"},
@@ -223,6 +265,8 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
     for field_name, value in limits.items():
         _positive_integer(value, f"chunking.limits.{field_name}")
 
+    if "compatible_chunkers" not in root:
+        root["compatible_chunkers"] = [by]
     compatible = _string_list(root["compatible_chunkers"], "compatible_chunkers")
     if not compatible:
         raise PresetValidationError("compatible_chunkers must not be empty")
@@ -252,7 +296,12 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             raise PresetValidationError(
                 f"question ID {question_id!r} is reserved for policy keywords"
             )
-        _validate_question(question, question_id, schema=schema)
+        _validate_question(
+            question,
+            question_id,
+            schema=schema,
+            diagnostics=diagnostics,
+        )
 
     if "prefilter" in root:
         if schema not in {SCHEMA_V2, SCHEMA_V3}:
@@ -269,9 +318,12 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             )
         _validate_threshold(threshold, question_id, questions[question_id])
 
-    output = _mapping(root["output"], "output")
+    output = dict(_mapping(root["output"], "output"))
+    root["output"] = output
     _reject_unknown(output, {"default_format", "pretty_template", "fields"}, "output")
-    _require_fields(output, {"default_format", "pretty_template", "fields"}, "output")
+    _require_fields(output, {"default_format"}, "output")
+    output.setdefault("fields", list(_DEFAULT_OUTPUT_FIELDS))
+    output.setdefault("pretty_template", _default_pretty_template(questions))
     if output["default_format"] not in {"jsonl", "pretty"}:
         raise PresetValidationError("output.default_format must be jsonl or pretty")
     _string(output["pretty_template"], "output.pretty_template")
@@ -283,7 +335,7 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
             f"output.fields contains unknown values: {sorted(unknown_output_fields)}"
         )
 
-    return root
+    return root, tuple(diagnostics)
 
 
 def _validate_prefilter(
@@ -416,10 +468,10 @@ def load_preset(path: str | os.PathLike[str]) -> Preset:
     except yaml.YAMLError as exc:
         raise PresetValidationError(f"invalid YAML in {resolved_path}: {exc}") from exc
     try:
-        validated = validate_preset(data)
+        validated, diagnostics = validate_preset_with_diagnostics(data)
     except PresetValidationError as exc:
         raise PresetValidationError(f"{resolved_path}: {exc}") from exc
-    return Preset(validated, resolved_path.resolve())
+    return Preset(validated, resolved_path.resolve(), diagnostics)
 
 
 def resolve_preset(
@@ -454,10 +506,32 @@ def resolve_preset(
         user = Path("~/.config/jm/presets").expanduser()
 
     locations = (search_cwd, builtins, user)
-    for directory in locations:
+    for location_index, directory in enumerate(locations):
         for candidate in _candidate_paths(directory, identifier):
             if candidate.is_file():
-                return load_preset(candidate)
+                preset = load_preset(candidate)
+                if location_index == 0:
+                    builtin = next(
+                        (
+                            path
+                            for path in _candidate_paths(builtins, identifier)
+                            if path.is_file()
+                        ),
+                        None,
+                    )
+                    if builtin is not None and builtin.resolve() != candidate.resolve():
+                        warning = Diagnostic(
+                            "warning",
+                            "preset_shadow",
+                            f"cwd preset {candidate} shadows built-in preset {builtin}",
+                            path=str(candidate),
+                        )
+                        preset = Preset(
+                            preset.data,
+                            preset.path,
+                            (*preset.diagnostics, warning),
+                        )
+                return preset
     searched = ", ".join(str(directory) for directory in locations)
     raise PresetNotFoundError(f"preset {name!s} was not found in: {searched}")
 
@@ -691,13 +765,18 @@ def _nonnegative_integer(value: Any, field_name: str) -> None:
 
 
 def _validate_question(
-    value: Any, question_id: str, *, schema: str = SCHEMA
+    value: Any,
+    question_id: str,
+    *,
+    schema: str = SCHEMA,
+    diagnostics: list[Diagnostic] | None = None,
 ) -> None:
     question = _mapping(value, f"questions.{question_id}")
-    _reject_unknown(
+    _warn_open_fields(
         question,
         {"type", "instructions", "criteria"},
         f"questions.{question_id}",
+        diagnostics,
     )
     _require_fields(
         question,
@@ -750,6 +829,7 @@ def _validate_question(
         question_type,
         question_id,
         allow_three_score_levels=schema == SCHEMA_V3,
+        diagnostics=diagnostics,
     )
 
 
@@ -759,6 +839,7 @@ def _validate_criteria(
     question_id: str,
     *,
     allow_three_score_levels: bool = False,
+    diagnostics: list[Diagnostic] | None = None,
 ) -> None:
     field_name = f"questions.{question_id}.criteria"
     if question_type == "score":
@@ -772,7 +853,11 @@ def _validate_criteria(
                 "score levels"
             )
         for index, criterion in enumerate(value):
-            _validate_criterion(criterion, f"{field_name}[{index}]")
+            _validate_criterion(
+                criterion,
+                f"{field_name}[{index}]",
+                diagnostics=diagnostics,
+            )
         return
     criteria = _mapping(value, field_name)
     if question_type == "noul":
@@ -786,18 +871,62 @@ def _validate_criteria(
     if not criteria:
         raise PresetValidationError(f"{field_name} must not be empty")
     for polarity, criterion in criteria.items():
-        _validate_criterion(criterion, f"{field_name}.{polarity}")
+        _validate_criterion(
+            criterion,
+            f"{field_name}.{polarity}",
+            diagnostics=diagnostics,
+        )
 
 
-def _validate_criterion(value: Any, field_name: str) -> None:
+def _validate_criterion(
+    value: Any,
+    field_name: str,
+    *,
+    diagnostics: list[Diagnostic] | None = None,
+) -> None:
     criterion = _mapping(value, field_name)
-    _reject_unknown(criterion, {"what", "not_for", "examples"}, field_name)
+    _warn_open_fields(
+        criterion,
+        {"what", "not_for", "examples"},
+        field_name,
+        diagnostics,
+    )
     _require_fields(criterion, {"what", "not_for", "examples"}, field_name)
     _string(criterion["what"], f"{field_name}.what")
     _string(criterion["not_for"], f"{field_name}.not_for")
     examples = _string_list(criterion["examples"], f"{field_name}.examples")
     if not examples:
         raise PresetValidationError(f"{field_name}.examples must not be empty")
+
+
+def _warn_open_fields(
+    value: Mapping[str, Any],
+    allowed: set[str] | frozenset[str],
+    field_name: str,
+    diagnostics: list[Diagnostic] | None,
+) -> None:
+    if diagnostics is None:
+        return
+    for key in sorted(set(value) - allowed):
+        path = f"{field_name}.{key}"
+        diagnostics.append(
+            Diagnostic(
+                "warning",
+                "unknown_wire_field",
+                f"unknown question field {path} passes through to the wire",
+                path=path,
+            )
+        )
+
+
+def _default_pretty_template(questions: Mapping[str, Any]) -> str:
+    question_id, question = next(iter(questions.items()))
+    answer_field = {
+        "noul": "noul",
+        "choice": "choice",
+        "score": "score",
+    }[question["type"]]
+    return f"{{state_ref}}\\t{{answers.{question_id}.{answer_field}}}"
 
 
 def _validate_threshold(value: Any, question_id: str, question: Any) -> None:

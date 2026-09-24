@@ -1194,7 +1194,7 @@ def _judge_core(
         "not_applicable",
         preset_schema=runtime_schema,
     )
-    diagnostics = list(formation_report.diagnostics)
+    diagnostics = [*loaded_preset.diagnostics, *formation_report.diagnostics]
     if runtime_schema == SCHEMA_V3:
         available = CHUNKER_CONTEXT_KEYS[runtime_chunker]
         if available is None:
@@ -1757,7 +1757,9 @@ def _public_preset(preset: Preset | str) -> Preset:
         if isinstance(preset, Preset):
             if preset.path == Path("<runtime>"):
                 return preset
-            return Preset(validate_preset(preset.data), preset.path)
+            return Preset(
+                validate_preset(preset.data), preset.path, preset.diagnostics
+            )
         if not isinstance(preset, str):
             raise ConfigurationError("preset must be a Preset or name")
         return Runner._load_preset(preset)  # type: ignore[return-value]
