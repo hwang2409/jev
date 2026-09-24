@@ -32,13 +32,13 @@ def test_chunkers_produce_stable_refs() -> None:
     assert chunk_line("one\ntwo\n", source="notes.md")[1].state_ref == "notes.md#L2"
     assert (
         chunk_para("# Intro\n\none\n\ntwo\n", source="notes.md")[0].state_ref
-        == "notes.md#P1"
+        == "notes.md#P2"
     )
     diff = (
         "diff --git a/app.py b/app.py\n--- a/app.py\n+++ b/app.py\n"
-        "@@ -1,2 +1,2 @@\n-old\n+new\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
     )
-    assert chunk_hunk(diff)[0].state_ref == "app.py@@-1,2+1,2"
+    assert chunk_hunk(diff)[0].state_ref == "app.py@@-1+1"
     assert chunk_file("app.py", "print('ok')")[0].state_ref == "app.py"
     assert chunk_file("a/app.py", "print('ok')")[0].state_ref == "a/app.py"
     git_diff = "--- a/app.py\n+++ b/app.py\n@@ -1 +1 @@\n-old\n+new\n"
@@ -325,12 +325,15 @@ def test_context_and_complete_state_limits_are_enforced() -> None:
         source="s",
         limits=StateLimits(context_field_bytes=36),
     )[0]
-    assert SURROUNDING_TRUNCATION_MARKER in state.context["surrounding"]
+    assert any(
+        SURROUNDING_TRUNCATION_MARKER in item
+        for item in state.context["surrounding"]
+    )
     assert (
         len(
             json.dumps(state.context["surrounding"], separators=(",", ":")).encode()
         )
-        <= 36
+        == 36
     )
     with pytest.raises(StateLimitError, match="state"):
         chunk_record(
@@ -345,26 +348,93 @@ def test_surrounding_truncation_is_deterministic_and_uses_the_exact_limit() -> N
     second = chunk_para("small\n\n" + "x" * 500, limits=limits)[0]
 
     assert first.context["surrounding"] == second.context["surrounding"]
-    assert SURROUNDING_TRUNCATION_MARKER in first.context["surrounding"]
+    assert any(
+        SURROUNDING_TRUNCATION_MARKER in item
+        for item in first.context["surrounding"]
+    )
     assert (
         len(
             json.dumps(first.context["surrounding"], separators=(",", ":")).encode()
         )
-        <= 64
+        == 64
     )
 
 
 def test_heading_only_paragraphs_are_not_formed() -> None:
     states = chunk_para("# Intro\n\nbody\n\n## Details\n\nmore\n")
 
-    assert [state.state_ref for state in states] == ["stdin#P1", "stdin#P2"]
+    assert [state.state_ref for state in states] == ["stdin#P2", "stdin#P4"]
     assert states[0].context["heading"] == "# Intro"
     assert states[1].context["heading"] == "## Details"
 
 
+def test_heading_only_paragraphs_are_typed_skips_with_exact_coverage() -> None:
+    result = chunk_input("para", "# Intro\n\nbody\n\n## Details\n\nmore\n")
+
+    assert result.discovered == 4
+    assert result.judged == 2
+    assert result.discovered == result.judged + result.skipped_count
+    assert [rejection.reason for rejection in result.rejections] == [
+        "heading_only",
+        "heading_only",
+    ]
+    assert [rejection.state_ref for rejection in result.rejections] == [
+        "stdin#P1",
+        "stdin#P3",
+    ]
+
+
+def test_hunk_counts_allow_header_like_body_content() -> None:
+    diff = (
+        "--- a/one.py\n+++ b/one.py\n@@ -1,2 +1,2 @@\n"
+        "--- a/literal\n+++ b/literal\n keep\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert result.rejections == ()
+    assert "--- a/literal" in result.formed[0].focus
+    assert "+++ b/literal" in result.formed[0].focus
+
+
+def test_hunk_counts_reject_unfinished_and_excess_body_lines() -> None:
+    unfinished = chunk_input(
+        "hunk",
+        "--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n-old\n+new\n",
+    )
+    excess = chunk_input(
+        "hunk",
+        "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n+new\n+extra\n",
+    )
+
+    assert unfinished.rejections[0].reason == "input_error"
+    assert "declared counts" in unfinished.rejections[0].message
+    assert excess.rejections[0].reason == "input_error"
+    assert "extra" in excess.rejections[0].message
+
+
+def test_hunk_invalid_utf8_is_not_repaired_or_judged() -> None:
+    result = chunk_input(
+        "hunk",
+        b"--- a/x\n+++ b/x\n@@ -1,1 +1,1 @@\n-old\n+ne\xffw\n",
+    )
+
+    assert result.rejections[0].reason == "input_error"
+    assert "byte=40" in result.rejections[0].source_ref
+    assert "\ufffd" not in "".join(state.focus for state in result.formed)
+
+
+def test_surrounding_marker_requires_a_large_enough_context_limit() -> None:
+    with pytest.raises(ValueError, match="truncation marker"):
+        chunk_line(
+            "one\n" + "x" * 100,
+            limits=StateLimits(context_field_bytes=8),
+        )
+
+
 def test_invalid_hunk_body_is_an_input_error_and_does_not_swallow_next_hunk() -> None:
     diff = (
-        "--- a/one.py\n+++ b/one.py\n@@ -1,1 +1,1 @@\n-old\n"
+        "--- a/one.py\n+++ b/one.py\n@@ -1,2 +1,2 @@\n-old\n"
         "not-a-body\n"
         "diff --git a/two.py b/two.py\n--- a/two.py\n+++ b/two.py\n"
         "@@ -1,1 +1,1 @@\n-old\n+new\n"
@@ -375,6 +445,23 @@ def test_invalid_hunk_body_is_an_input_error_and_does_not_swallow_next_hunk() ->
     assert [state.context["file"] for state in result.formed] == ["one.py", "two.py"]
     assert result.rejections[0].reason == "input_error"
     assert result.rejections[0].source_ref == "stdin:line=5"
+    assert result.discovered == result.judged == 2
+
+
+def test_wrong_hunk_counts_reject_a_following_file_header() -> None:
+    diff = (
+        "--- a/one.py\n+++ b/one.py\n@@ -1,2 +1,2 @@\n-old\n+new\n"
+        "diff --git a/two.py b/two.py\n--- a/two.py\n+++ b/two.py\n"
+        "@@ -1 +1 @@\n-old\n+new\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert [state.context["file"] for state in result.formed] == [
+        "one.py",
+        "two.py",
+    ]
+    assert result.rejections[0].reason == "input_error"
     assert result.discovered == result.judged == 2
 
 

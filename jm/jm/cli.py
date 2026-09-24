@@ -22,6 +22,8 @@ from .calibrate import (
 from .chunkers import chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
+    CHUNKER_SETTINGS,
+    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
@@ -507,6 +509,9 @@ def _with_chunker(preset: Preset, chunker: str) -> Preset:
     data = copy.deepcopy(dict(preset.data))
     chunking = dict(data["chunking"])
     chunking["by"] = chunker
+    supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[chunker]
+    for setting in set(chunking) - supported:
+        del chunking[setting]
     data["chunking"] = chunking
     return Preset(validate_preset(data), preset.path)
 

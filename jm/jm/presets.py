@@ -17,6 +17,23 @@ SCHEMA = "jm.preset/v1"
 SCHEMA_V2 = "jm.preset/v2"
 SCHEMA_V3 = "jm.preset/v3"
 CHUNKERS = frozenset({"line", "para", "hunk", "file", "record", "state"})
+CHUNKER_SETTINGS = {
+    "line": frozenset({"context_lines"}),
+    "para": frozenset({"context_paragraphs"}),
+    "hunk": frozenset(),
+    "file": frozenset(),
+    "record": frozenset(),
+    "state": frozenset(),
+}
+CHUNKER_CONTEXT_KEYS: dict[str, frozenset[str] | None] = {
+    "file": frozenset({"language", "metadata", "path"}),
+    "line": frozenset({"line", "source", "surrounding", "unit"}),
+    "para": frozenset({"heading", "paragraph", "source", "surrounding", "unit"}),
+    "record": frozenset({"metadata", "unit"}),
+    "hunk": frozenset({"changed_tests", "file", "hunk_header", "surrounding", "unit"}),
+    "state": None,
+}
+CHUNKING_COMMON_SETTINGS = frozenset({"by", "limits", "max_chunks"})
 QUESTION_TYPES = frozenset({"noul", "choice", "score"})
 RESERVED_QUESTION_IDS = frozenset({"any", "all", "not"})
 _QUESTION_ID = re.compile(r"^[a-z][a-z0-9_]*$")
@@ -183,16 +200,13 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
 
     chunking = _mapping(root["chunking"], "chunking")
-    _reject_unknown(
-        chunking,
-        {"by", "context_paragraphs", "context_lines", "max_chunks", "limits"},
-        "chunking",
-    )
-    _require_fields(chunking, {"by", "limits"}, "chunking")
     by = _string(chunking["by"], "chunking.by")
     if by not in CHUNKERS:
         raise PresetValidationError(f"chunking.by must be one of {sorted(CHUNKERS)}")
-    for field_name in ("context_paragraphs", "context_lines", "max_chunks"):
+    allowed_settings = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[by]
+    _reject_unknown(chunking, allowed_settings, "chunking")
+    _require_fields(chunking, {"by", "limits"}, "chunking")
+    for field_name in CHUNKER_SETTINGS[by] | {"max_chunks"}:
         if field_name in chunking:
             _nonnegative_integer(chunking[field_name], f"chunking.{field_name}")
     limits = _mapping(chunking["limits"], "chunking.limits")

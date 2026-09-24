@@ -7,6 +7,9 @@ import pytest
 import yaml
 
 from jm.presets import (
+    CHUNKER_CONTEXT_KEYS,
+    CHUNKER_SETTINGS,
+    CHUNKING_COMMON_SETTINGS,
     PresetNotFoundError,
     PresetUsageError,
     PresetValidationError,
@@ -78,6 +81,45 @@ def test_builtins_match_the_plan_blocks_byte_for_byte() -> None:
             + "\n"
         )
         assert (PRESETS / f"{name}.yml").read_text(encoding="utf-8") == block
+
+
+def test_v5_design_document_and_chunker_inventory_are_pinned() -> None:
+    design = (
+        ROOT / "docs" / "superpowers" / "specs" / "2026-09-23-jm-v3-design.md"
+    ).read_text(encoding="utf-8")
+
+    assert "### 7.1 bounded surrounding context" in design
+    assert "### 7.3 hunk parser" in design
+    assert "### 7.4 paragraph and file behavior" in design
+    assert "### V5: chunker correctness" in design
+    assert set(CHUNKER_SETTINGS) == {
+        "line",
+        "para",
+        "hunk",
+        "file",
+        "record",
+        "state",
+    }
+    assert set(CHUNKER_CONTEXT_KEYS) == set(CHUNKER_SETTINGS)
+    assert CHUNKING_COMMON_SETTINGS == {"by", "limits", "max_chunks"}
+
+
+@pytest.mark.parametrize("chunker", sorted(CHUNKER_SETTINGS))
+@pytest.mark.parametrize("setting", ["context_lines", "context_paragraphs"])
+def test_chunker_rejects_unused_context_setting(chunker: str, setting: str) -> None:
+    data = copy.deepcopy(resolve_preset("jgrep").data)
+    data["chunking"] = {
+        "by": chunker,
+        "limits": data["chunking"]["limits"],
+        setting: 1,
+    }
+    data["compatible_chunkers"] = [chunker]
+
+    if setting not in CHUNKER_SETTINGS[chunker]:
+        with pytest.raises(PresetValidationError, match="unknown fields"):
+            validate_preset(data)
+    else:
+        validate_preset(data)
 
 
 @pytest.mark.parametrize("missing", [

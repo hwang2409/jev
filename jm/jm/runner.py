@@ -61,6 +61,9 @@ from .gates import (
     parse_policy,
 )
 from .presets import (
+    CHUNKER_CONTEXT_KEYS,
+    CHUNKER_SETTINGS,
+    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
@@ -171,7 +174,13 @@ class InputError(ValueError):
 @dataclass(frozen=True, slots=True)
 class FormationEvent:
     kind: Literal["skip", "input_error"]
-    reason: Literal["scan_cap", "context_limit", "prefiltered", "input_error"]
+    reason: Literal[
+        "scan_cap",
+        "context_limit",
+        "prefiltered",
+        "heading_only",
+        "input_error",
+    ]
     message: str
     state_ref: str | None
     source_ref: str | None
@@ -184,6 +193,7 @@ class FormationEvent:
             "scan_cap",
             "context_limit",
             "prefiltered",
+            "heading_only",
             "input_error",
         }:
             raise ConfigurationError(f"unknown formation event reason: {self.reason}")
@@ -273,6 +283,7 @@ class StateRejection:
             "context_limit",
             "input_error",
             "prefiltered",
+            "heading_only",
         }:
             raise ValueError(f"unknown rejection reason: {self.reason}")
         if self.reason == "input_error":
@@ -334,7 +345,7 @@ class StateAdmission:
     def skipped_count(self) -> int:
         return len(self.skipped) + sum(
             rejection.state_ref is not None
-            and rejection.reason in {"scan_cap", "context_limit"}
+            and rejection.reason != "input_error"
             for rejection in self.rejections
         )
 
@@ -453,16 +464,6 @@ class RunResult:
 
 
 _DEFAULT_MODEL = GATEWAY_MODEL
-
-_V3_CONTEXT_KEYS: dict[str, frozenset[str] | None] = {
-    "state": None,
-    "file": frozenset({"language", "metadata", "path"}),
-    "line": frozenset({"line", "source", "surrounding", "unit"}),
-    "para": frozenset({"heading", "paragraph", "source", "surrounding", "unit"}),
-    "record": frozenset({"metadata", "unit"}),
-    "hunk": frozenset({"changed_tests", "file", "hunk_header", "surrounding", "unit"}),
-}
-
 
 class _Unset:
     __slots__ = ()
@@ -608,6 +609,9 @@ class Runner:
             )
             runtime_chunking = dict(loaded_preset.chunking)
             runtime_chunking["by"] = runtime_chunker
+            supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[runtime_chunker]
+            for setting in set(runtime_chunking) - supported:
+                del runtime_chunking[setting]
             if chunking is not _UNSET:
                 if chunking is None:
                     raise PresetUsageError(
@@ -1046,7 +1050,7 @@ def _judge_core(
     )
     diagnostics = list(formation_report.diagnostics)
     if runtime_schema == SCHEMA_V3:
-        available = _V3_CONTEXT_KEYS[runtime_chunker]
+        available = CHUNKER_CONTEXT_KEYS[runtime_chunker]
         if available is None:
             available = frozenset(
                 key for state in validated_states for key in state.context
@@ -1361,6 +1365,7 @@ def _judge_core(
                 "scan_cap",
                 "input_error",
                 "context_limit",
+                "heading_only",
                 "api_error",
                 "malformed_answer",
                 "partial_answer",
