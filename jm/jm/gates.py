@@ -7,7 +7,13 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
-from .answers import ChoiceAnswer, NoulAnswer, ResultRecord, ScoreAnswer
+from .answers import (
+    ChoiceAnswer,
+    NoulAnswer,
+    ResultRecord,
+    ScoreAnswer,
+    score_argmax,
+)
 from .presets import Preset, validate_preset
 
 
@@ -506,7 +512,7 @@ def _answer_value(
     if isinstance(answer, ChoiceAnswer):
         return answer.choice
     if isinstance(answer, ScoreAnswer):
-        return answer.score
+        return score_argmax(answer)
     raise PolicyError(f"unsupported typed answer {type(answer).__name__}")
 
 

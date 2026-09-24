@@ -209,6 +209,30 @@ def test_typed_thresholds_and_choice_equality_evaluate_without_formatting() -> N
     assert evaluate_policy(score_policy, [score_record]) is True
 
 
+def test_score_gate_uses_high_tie_breaking_argmax_not_expected_score() -> None:
+    policy = compile_policy(
+        "any(change_scope.score >= 2)", resolve_preset("diff-risk-heat")
+    )
+    meta = RecordMeta("diff-risk-heat", "1", "typesafe-ai/jev", "hunk", "miss")
+    argmax_record = ResultRecord(
+        "hunk#1",
+        {
+            "change_scope": ScoreAnswer(
+                1.99, probabilities={"1": 0.01, "2": 0.99}
+            )
+        },
+        meta,
+    )
+    tie_record = ResultRecord(
+        "hunk#2",
+        {"change_scope": ScoreAnswer(1.5, probabilities={"1": 0.5, "2": 0.5})},
+        meta,
+    )
+
+    assert evaluate_gate(policy, [argmax_record]).exit_code == 1
+    assert evaluate_gate(policy, [tie_record]).exit_code == 1
+
+
 @pytest.mark.parametrize(
     ("wrapper", "required_states", "expected_exit"),
     [("any", 0, 0), ("any", 1, 2), ("all", 0, 1), ("all", 1, 2)],

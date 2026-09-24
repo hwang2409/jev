@@ -1556,6 +1556,35 @@ def test_gate_uses_require_states_and_jsonl_stdout() -> None:
     assert stderr == ""
 
 
+def test_empty_hunk_gate_has_zero_complete_coverage_and_vacuous_truth() -> None:
+    code, records, stderr = _invoke(
+        [
+            "gate",
+            "--preset",
+            "diff-risk-heat",
+            "--by",
+            "hunk",
+            "--policy",
+            "any(change_scope.score >= 2)",
+            "--require-states",
+            "0",
+        ],
+        input_text="",
+        judge_fn=_judge,
+    )
+
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+    assert records[-1]["coverage_counts"] == {
+        "discovered": 0,
+        "judged": 0,
+        "emitted": 0,
+        "skipped": 0,
+        "failed": 0,
+    }
+    assert stderr == "jm: no hunks found\n"
+
+
 def test_preset_and_cache_commands_have_non_judgment_stdout(tmp_path: Path) -> None:
     stdout = io.StringIO()
     assert main(["preset", "list"], stdout=stdout, stderr=io.StringIO()) == 0

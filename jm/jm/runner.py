@@ -44,6 +44,7 @@ from .answers import (
     ScoreAnswer,
     SkipSummary,
     TypedResponse,
+    score_argmax,
 )
 from .cache import (
     CACHE_SCHEMA,
@@ -835,6 +836,9 @@ def _run_pipeline(
     capture: _PipelineCapture | None = None,
 ) -> _PipelineOutcome:
     compiled_policy = compile_policy(policy, preset) if policy is not None else None
+    filter_policy = None
+    if result_filter is not None and result_filter.kind == "policy":
+        filter_policy = compile_policy(result_filter.expression or "", preset)
     admission = admit_for_judgment(
         tuple(states),
         tuple(rejections),
@@ -869,6 +873,7 @@ def _run_pipeline(
         jsonl_stream=jsonl_stream or io.StringIO(),
         pretty_stream=pretty_stream or io.StringIO(),
         result_filter=result_filter,
+        filter_policy=filter_policy,
         pretty_template=pretty_template,
     )
     gate_result = None
@@ -1480,6 +1485,7 @@ def _emit_core(
     pretty_stream: TextIO,
     output_path: Path | None = None,
     result_filter: ResultFilter | None = None,
+    filter_policy: Policy | None = None,
     input_sidecar: InputSidecar | None = None,
     pretty_template: str | None = None,
 ) -> EmitResult:
@@ -1493,12 +1499,13 @@ def _emit_core(
         raise ConfigurationError("input_sidecar is required for input emission")
     if result_filter is not None and not isinstance(result_filter, ResultFilter):
         raise ConfigurationError("result_filter must be a ResultFilter")
-    compiled_filter_policy = None
+    compiled_filter_policy = filter_policy
     if result_filter is not None and result_filter.kind == "policy":
-        try:
-            compiled_filter_policy = parse_policy(result_filter.expression or "")
-        except PolicyError as exc:
-            raise ConfigurationError(str(exc)) from exc
+        if compiled_filter_policy is None:
+            try:
+                compiled_filter_policy = parse_policy(result_filter.expression or "")
+            except PolicyError as exc:
+                raise ConfigurationError(str(exc)) from exc
 
     sink = jsonl_stream
     close_sink = False
@@ -1851,6 +1858,8 @@ def _record_visible(
     value = getattr(answer, "noul", None)
     if value is None:
         value = getattr(answer, "score", None)
+    if isinstance(answer, ScoreAnswer):
+        value = score_argmax(answer)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         return False
     return value >= result_filter.threshold  # type: ignore[operator]
@@ -1859,6 +1868,8 @@ def _record_visible(
 def _emit_diagnostic(diagnostic: Diagnostic, stream: TextIO) -> None:
     if diagnostic.code == "prefilter_recall":
         stream.write(f"jm: warning: {diagnostic.message}\n")
+    elif diagnostic.code == "empty_input":
+        stream.write(f"jm: {diagnostic.message}\n")
     elif diagnostic.code == "consistency":
         stream.write(f"jm: consistency: {diagnostic.message}\n")
     else:

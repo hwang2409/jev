@@ -128,3 +128,40 @@ def test_calibration_rejects_malformed_v3_entries_before_live_calls(
     path.write_text(json.dumps(payload))
     with pytest.raises(CalibrationOperationalError):
         _load_entries(preset, store)
+
+
+def test_calibration_v3_output_is_deterministic_across_pool_sizes(
+    tmp_path: Path,
+) -> None:
+    store, preset = _seed(tmp_path)
+
+    def candidate(*_args: object) -> JudgeResponse:
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.8)},
+            served_model="candidate",
+            usage={"input_tokens": 2},
+        )
+
+    outputs: list[str] = []
+    for concurrency in (1, 4):
+        stdout = io.StringIO()
+        assert (
+            run_calibration(
+                preset,
+                store,
+                candidate,
+                stdout=stdout,
+                stderr=io.StringIO(),
+                concurrency=concurrency,
+            )
+            == 0
+        )
+        outputs.append(stdout.getvalue())
+
+    assert outputs[0] == outputs[1]
+    comparison = json.loads(outputs[0].splitlines()[0])
+    summary = json.loads(outputs[0].splitlines()[-1])
+    assert comparison["record_type"] == "calibration_comparison"
+    assert comparison["calibration_version"] == "jm.calibration/v3"
+    assert summary["qualified_cases"] == 1
+    assert summary["comparison_count"] == 1

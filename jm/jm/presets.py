@@ -856,8 +856,11 @@ def _validate_calibration(value: Any) -> None:
     }
     _reject_unknown(calibration, allowed, field_name)
     _require_fields(calibration, {"schema"}, field_name)
-    if calibration["schema"] != "jm.calibration/v1":
-        raise PresetValidationError("calibration.schema must be 'jm.calibration/v1'")
+    if calibration["schema"] not in {"jm.calibration/v1", "jm.calibration/v3"}:
+        raise PresetValidationError(
+            "calibration.schema must be 'jm.calibration/v1' or "
+            "'jm.calibration/v3'"
+        )
     for name in (
         "max_choice_flips",
         "max_threshold_crossings",

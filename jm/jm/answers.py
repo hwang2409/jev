@@ -57,6 +57,34 @@ class ScoreAnswer:
 type Answer = NoulAnswer | ChoiceAnswer | ScoreAnswer
 
 
+def score_argmax(answer: ScoreAnswer) -> int | float:
+    """Return the highest level among the most likely score levels."""
+    if not answer.probabilities:
+        value = float(answer.score)
+        return int(value) if value.is_integer() else value
+
+    def level_order(key: str) -> tuple[int | float, str]:
+        try:
+            value = float(key)
+        except ValueError:
+            return float("-inf"), key
+        return value, key
+
+    if any(not level_order(key)[0].is_integer() for key in answer.probabilities):
+        value = float(answer.score)
+        return int(value) if value.is_integer() else value
+
+    best_probability = max(answer.probabilities.values())
+    candidates = [
+        key
+        for key, probability in answer.probabilities.items()
+        if probability == best_probability
+    ]
+    selected = max(candidates, key=level_order)
+    value = level_order(selected)[0]
+    return int(value) if value.is_integer() else value
+
+
 @dataclass(frozen=True, slots=True)
 class JudgeResponse:
     answers: dict[str, Answer] = field(default_factory=dict)
@@ -382,20 +410,24 @@ def answer_to_dict(answer: Answer) -> dict[str, Any]:
             result["consistency"] = dict(answer.consistency)
         return result
     if isinstance(answer, ChoiceAnswer):
-        return {
+        result = {
             "type": "choice",
             "choice": answer.choice,
             "probabilities": dict(answer.probabilities),
-            "confidence": answer.confidence,
         }
+        if answer.confidence is not None:
+            result["confidence"] = answer.confidence
+        return result
     if isinstance(answer, ScoreAnswer):
-        return {
+        result = {
             "type": "score",
             "score": answer.score,
             "legend": dict(answer.legend),
             "probabilities": dict(answer.probabilities),
-            "confidence": answer.confidence,
         }
+        if answer.confidence is not None:
+            result["confidence"] = answer.confidence
+        return result
     raise TypeError(f"unsupported answer type: {type(answer).__name__}")
 
 

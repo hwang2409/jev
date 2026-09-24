@@ -5,6 +5,7 @@ import json
 import sys
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, TextIO
@@ -18,12 +19,13 @@ from .answers import (
     ScoreAnswer,
     answer_to_dict,
     probability_keys_for_question,
+    score_argmax,
 )
 from .cache import CacheEntry, CacheStore, battery_hash, canonical_json_bytes
 from .presets import Preset
 from .runner import State, _repeat_state
 
-CALIBRATION_SCHEMA = "jm.calibration/v1"
+CALIBRATION_SCHEMA = "jm.calibration/v3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,10 +65,18 @@ def run_calibration(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     tolerances: CalibrationTolerances | None = None,
+    concurrency: int = 4,
 ) -> int:
     output = stdout or sys.stdout
     errors = stderr or sys.stderr
     resolved = tolerances or tolerances_for_preset(preset)
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency <= 0
+    ):
+        raise CalibrationOperationalError("concurrency must be a positive integer")
+    effective_concurrency = min(concurrency, 8)
     try:
         entries = _load_entries(preset, cache_store)
         states = tuple(_state_for_entry(entry, preset) for entry in entries)
@@ -75,7 +85,6 @@ def run_calibration(
             preset,
             resolved,
             0,
-            (),
             Counter(),
             Counter(),
             (),
@@ -84,6 +93,8 @@ def run_calibration(
             0.0,
             0.0,
             0.0,
+            0,
+            0,
             0,
             0,
             0,
@@ -96,13 +107,13 @@ def run_calibration(
         errors.flush()
         return 2
 
-    records: list[dict[str, Any]] = []
     model_baseline: Counter[str] = Counter()
     model_candidate: Counter[str] = Counter()
     candidate_usages: list[Mapping[str, Any]] = []
     baseline_usages: list[Mapping[str, Any]] = []
     stable_drift = 0
-    boundary_noise = 0
+    boundary_noise_cases = 0
+    far_side_noise_cases = 0
     choice_flips = 0
     threshold_crossings = 0
     max_probability_delta = 0.0
@@ -110,92 +121,120 @@ def run_calibration(
     max_noul_delta = 0.0
     operational_error: str | None = None
     completed_cases = 0
-
-    for entry, state in zip(entries, states):
-        candidates: list[JudgeResponse] = []
-        for _ in range(resolved.repeats):
-            repeat_state = _repeat_state(state)
-            try:
-                response = judge_fn(repeat_state, preset.questions, preset.model)
-            except Exception as exc:
-                operational_error = f"live calibration call failed: {exc}"
-                break
-            if isinstance(response, ErrorResponse):
-                operational_error = f"live calibration call failed: {response.error}"
-                break
-            if not isinstance(response, JudgeResponse):
-                operational_error = "live calibration returned an invalid response"
-                break
-            if not response.complete or set(response.answers) != set(preset.questions):
-                operational_error = "live calibration returned an incomplete response"
-                break
-            candidates.append(response)
-        if operational_error is not None:
-            break
-
-        case_records: list[dict[str, Any]] = []
-        case_metrics: list[dict[str, float | bool]] = []
-        target_group = _target_provenance(entry, preset)
-        for question_id, question in preset.questions.items():
-            try:
-                baseline_answer = entry.response.answers[question_id]
-                candidate_answers = [
-                    response.answers[question_id] for response in candidates
-                ]
-                record, metrics = _comparison_record(
-                    entry,
-                    question_id,
-                    question,
-                    preset.data["thresholds"].get(question_id),
-                    baseline_answer,
-                    candidates,
-                    candidate_answers,
-                    resolved,
-                    target_group,
+    comparison_count = 0
+    candidate_jobs = {}
+    with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+        for case_index, state in enumerate(states):
+            for repeat_index in range(resolved.repeats):
+                candidate_jobs[(case_index, repeat_index)] = executor.submit(
+                    _candidate_call,
+                    judge_fn,
+                    _repeat_state(state),
+                    preset,
                 )
-            except (KeyError, TypeError, ValueError) as exc:
-                operational_error = f"malformed calibration answer: {exc}"
+
+        for case_index, (entry, _state) in enumerate(zip(entries, states)):
+            candidates: list[JudgeResponse] = []
+            for repeat_index in range(resolved.repeats):
+                response, error = candidate_jobs[(case_index, repeat_index)].result()
+                if error is not None:
+                    operational_error = error
+                    break
+                assert response is not None
+                candidates.append(response)
+            if operational_error is not None:
                 break
-            case_records.append(record)
-            case_metrics.append(metrics)
 
-        if operational_error is not None:
-            break
+            comparisons: list[dict[str, Any]] = []
+            case_metrics: list[dict[str, float | bool]] = []
+            target_group = _target_provenance(entry, preset)
+            for question_id, question in preset.questions.items():
+                try:
+                    baseline_answer = entry.response.answers[question_id]
+                    candidate_answers = [
+                        response.answers[question_id] for response in candidates
+                    ]
+                    comparison, metrics = _comparison_record(
+                        entry,
+                        question_id,
+                        question,
+                        preset.data["thresholds"].get(question_id),
+                        baseline_answer,
+                        candidates,
+                        candidate_answers,
+                        resolved,
+                        target_group,
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    operational_error = f"malformed calibration answer: {exc}"
+                    break
+                comparisons.append(comparison)
+                case_metrics.append(metrics)
+            if operational_error is not None:
+                break
 
-        completed_cases += 1
-        case_choice_flip = any(bool(metrics["choice_flip"]) for metrics in case_metrics)
-        case_threshold_crossing = any(
-            bool(metrics["threshold_crossing"]) for metrics in case_metrics
-        )
-        baseline_model = _served_model(entry.response)
-        candidate_models = [_served_model(response) for response in candidates]
-        if isinstance(entry.usage, Mapping):
-            baseline_usages.append(entry.usage)
-        candidate_usages.extend(
-            response.usage for response in candidates if response.usage is not None
-        )
-        model_baseline.update([baseline_model])
-        model_candidate.update(candidate_models)
-        for record, metrics in zip(case_records, case_metrics):
-            records.append(record)
-            _write_json(record, output)
-            stable_drift += int(metrics["stable_drift"])
-            boundary_noise += int(metrics["boundary_noise"])
-            max_probability_delta = max(
-                max_probability_delta, float(metrics["probability_delta"])
+            completed_cases += 1
+            case_boundary_noise = any(
+                bool(metrics["boundary_noise"]) for metrics in case_metrics
             )
-            max_score_delta = max(max_score_delta, float(metrics["score_delta"]))
-            max_noul_delta = max(max_noul_delta, float(metrics["noul_delta"]))
-        choice_flips += int(case_choice_flip)
-        threshold_crossings += int(case_threshold_crossing)
-        if operational_error is not None:
-            break
+            case_far_side_noise = any(
+                bool(metrics["far_side_noise"]) for metrics in case_metrics
+            )
+            boundary_noise_cases += int(case_boundary_noise)
+            far_side_noise_cases += int(case_far_side_noise)
+            case_choice_flip = any(
+                bool(metrics["choice_flip"]) for metrics in case_metrics
+            )
+            case_threshold_crossing = any(
+                bool(metrics["threshold_crossing"]) for metrics in case_metrics
+            )
+            baseline_model = entry.served_model
+            candidate_models = [_served_model(response) for response in candidates]
+            if isinstance(entry.usage, Mapping):
+                baseline_usages.append(entry.usage)
+            candidate_usages.extend(
+                response.usage for response in candidates if response.usage is not None
+            )
+            model_baseline.update([baseline_model])
+            model_candidate.update(candidate_models)
+            stable_drift += int(
+                any(metrics["stable_drift"] for metrics in case_metrics)
+            )
+            choice_flips += int(case_choice_flip)
+            threshold_crossings += int(case_threshold_crossing)
+            comparison_count += len(comparisons)
+            for metrics in case_metrics:
+                max_probability_delta = max(
+                    max_probability_delta, float(metrics["probability_delta"])
+                )
+                max_score_delta = max(max_score_delta, float(metrics["score_delta"]))
+                max_noul_delta = max(max_noul_delta, float(metrics["noul_delta"]))
+
+            record = {
+                "record_type": "calibration_comparison",
+                "calibration_version": CALIBRATION_SCHEMA,
+                "calibration_case_id": _calibration_case_id(entry, target_group),
+                "cache_entry": {
+                    "cache_key": entry.cache_key,
+                    "provenance": [dict(target_group)],
+                },
+                "comparisons": comparisons,
+                "provenance": {
+                    "baseline_model": baseline_model,
+                    "candidate_models": candidate_models,
+                },
+                "state_ref": target_group["state_refs"][0],
+                "state_refs": list(target_group["state_refs"]),
+                "boundary_noise": case_boundary_noise,
+                "far_side_noise": case_far_side_noise,
+                "within_tolerance": None if case_boundary_noise else True,
+            }
+            _write_json(record, output)
 
     summary = _summary(
         preset,
         resolved,
         completed_cases,
-        records,
         model_baseline,
         model_candidate,
         baseline_usages,
@@ -206,14 +245,16 @@ def run_calibration(
         max_noul_delta,
         threshold_crossings,
         stable_drift,
-        boundary_noise,
+        boundary_noise_cases,
+        far_side_noise_cases,
+        comparison_count,
         operational_error,
     )
     _write_json(summary, output)
     provenance = _provenance(summary)
     if operational_error:
         errors.write(f"jm calibrate: {operational_error}\n")
-    elif not records:
+    elif completed_cases == 0:
         errors.write("jm calibrate: no qualifying cases\n")
     elif summary["within_tolerance"] is True:
         errors.write("jm calibrate: within tolerance\n")
@@ -225,7 +266,7 @@ def run_calibration(
     output.flush()
     errors.flush()
 
-    if operational_error or not records:
+    if operational_error or completed_cases == 0:
         return 2
     if summary["within_tolerance"] is True:
         return 0
@@ -237,12 +278,34 @@ def run_calibration(
 calibrate = run_calibration
 
 
+def _candidate_call(
+    judge_fn: Judge, state: State, preset: Preset
+) -> tuple[JudgeResponse | None, str | None]:
+    try:
+        response = judge_fn(state, preset.questions, preset.model)
+    except Exception as exc:
+        return None, f"live calibration call failed: {exc}"
+    if isinstance(response, ErrorResponse):
+        return None, f"live calibration call failed: {response.error}"
+    if not isinstance(response, JudgeResponse):
+        return None, "live calibration returned an invalid response"
+    if not response.complete or set(response.answers) != set(preset.questions):
+        return None, "live calibration returned an incomplete response"
+    return response, None
+
+
 def tolerances_for_preset(preset: Preset) -> CalibrationTolerances:
     raw = preset.data.get("calibration", {})
     if not isinstance(raw, Mapping):
         return CalibrationTolerances()
-    if raw.get("schema", CALIBRATION_SCHEMA) != CALIBRATION_SCHEMA:
-        raise ValueError(f"calibration.schema must be {CALIBRATION_SCHEMA!r}")
+    if raw.get("schema", CALIBRATION_SCHEMA) not in {
+        "jm.calibration/v1",
+        CALIBRATION_SCHEMA,
+    }:
+        raise ValueError(
+            "calibration.schema must be 'jm.calibration/v1' or "
+            f"{CALIBRATION_SCHEMA!r}"
+        )
     defaults = CalibrationTolerances().as_dict()
     values = {name: raw.get(name, default) for name, default in defaults.items()}
     return CalibrationTolerances(**values)
@@ -361,7 +424,7 @@ def _comparison_record(
         "score": tolerances.max_score_delta,
         "noul": tolerances.max_noul_delta,
     }.get(str(expected_type), tolerances.max_probability_delta)
-    stable, noise = _repeat_classification(
+    stable, boundary_noise, far_side_noise = _repeat_classification(
         expected_type,
         baseline,
         candidates,
@@ -369,18 +432,12 @@ def _comparison_record(
         thresholds,
     )
     candidate_usage = _sum_usage(response.usage for response in responses)
+    baseline_gate_value = _gate_value(baseline)
     candidate_gate_values = [_gate_value(candidate) for candidate in candidates]
     candidate_confidence = [
         _derived_confidence(candidate, question) for candidate in candidates
     ]
     record = {
-        "record_type": "calibration_case",
-        "calibration_case_id": _calibration_case_id(
-            entry, target_group
-        ),
-        "cache_key": entry.cache_key,
-        "state_ref": target_group["state_refs"][0],
-        "state_refs": list(target_group["state_refs"]),
         "question_id": question_id,
         "primitive": expected_type,
         "baseline_answer": answer_to_dict(baseline),
@@ -393,7 +450,7 @@ def _comparison_record(
         "score_delta": score_delta,
         "noul_delta": noul_delta,
         "gate_values": {
-            "baseline": _gate_value(baseline),
+            "baseline": baseline_gate_value,
             "candidate": _one_or_many(candidate_gate_values),
         },
         "derived_confidence": {
@@ -402,8 +459,24 @@ def _comparison_record(
         },
         "thresholds": thresholds,
         "stable_drift": stable,
-        "boundary_noise": noise,
+        "boundary_noise": boundary_noise,
+        "far_side_noise": far_side_noise,
     }
+    if isinstance(baseline, ScoreAnswer):
+        candidate_argmax = [
+            score_argmax(candidate)
+            for candidate in candidates
+            if isinstance(candidate, ScoreAnswer)
+        ]
+        record.update(
+            {
+                "baseline_argmax": score_argmax(baseline),
+                "candidate_argmax": _one_or_many(candidate_argmax),
+                "argmax_crossing": any(
+                    value != score_argmax(baseline) for value in candidate_argmax
+                ),
+            }
+        )
     metrics: dict[str, float | bool] = {
         "choice_flip": choice_flip,
         "probability_delta": probability_delta,
@@ -411,7 +484,8 @@ def _comparison_record(
         "noul_delta": noul_delta,
         "threshold_crossing": threshold_crossing,
         "stable_drift": stable,
-        "boundary_noise": noise,
+        "boundary_noise": boundary_noise,
+        "far_side_noise": far_side_noise,
     }
     return record, metrics
 
@@ -489,9 +563,10 @@ def _thresholds(
 ) -> list[dict[str, Any]]:
     if threshold is None:
         return []
-    field = "score" if isinstance(baseline, ScoreAnswer) else "noul"
-    baseline_value = float(getattr(baseline, field))
-    candidate_values = [float(getattr(candidate, field)) for candidate in candidates]
+    is_score = isinstance(baseline, ScoreAnswer)
+    field = "argmax" if is_score else "noul"
+    baseline_value = float(_gate_value(baseline))
+    candidate_values = [float(_gate_value(candidate)) for candidate in candidates]
     target_name = "keep_at_least" if "keep_at_least" in threshold else "fail_at_least"
     target = float(threshold[target_name])
     values = [baseline_value, *candidate_values]
@@ -519,9 +594,13 @@ def _repeat_classification(
     candidates: Sequence[Answer],
     tolerance: float,
     thresholds: Sequence[Mapping[str, Any]],
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, bool]:
     if len(candidates) <= 1:
-        return False, False
+        changed = bool(candidates) and _gate_value(
+            candidates[0]
+        ) != _gate_value(baseline)
+        boundary = changed and any(item["near_threshold"] for item in thresholds)
+        return False, boundary, changed and not boundary
     if isinstance(baseline, ChoiceAnswer):
         choices = [
             candidate.choice
@@ -529,37 +608,48 @@ def _repeat_classification(
             if isinstance(candidate, ChoiceAnswer)
         ]
         if all(choice == baseline.choice for choice in choices):
-            return False, False
+            return False, False, False
         if len(set(choices)) == 1:
-            return True, False
-        return False, True
+            return True, False, False
+        return False, False, True
 
-    field = "score" if isinstance(baseline, ScoreAnswer) else "noul"
-    values = [float(getattr(candidate, field)) for candidate in candidates]
-    base = float(getattr(baseline, field))
-    deltas = [value - base for value in values]
+    numeric_field = "score" if isinstance(baseline, ScoreAnswer) else "noul"
+    values = [float(_gate_value(candidate)) for candidate in candidates]
+    base = float(_gate_value(baseline))
+    diagnostic_values = [
+        float(getattr(candidate, numeric_field)) for candidate in candidates
+    ]
+    diagnostic_base = float(getattr(baseline, numeric_field))
+    deltas = [value - diagnostic_base for value in diagnostic_values]
     directions = {delta > 0 for delta in deltas if delta != 0}
     same_sides = all(
         len({value >= float(item["target"]) for value in values}) == 1
         for item in thresholds
     )
     coherent = (
-        len(directions) <= 1 and max(values) - min(values) <= tolerance and same_sides
+        len(directions) <= 1
+        and max(diagnostic_values) - min(diagnostic_values) <= tolerance
+        and same_sides
     )
+    changed = any(value != base for value in values)
+    disagreement = len(set(values)) > 1
+    near = any(item["near_threshold"] for item in thresholds)
+    boundary = changed and (near or not same_sides)
+    far_side = changed and not boundary
     if not coherent:
-        return False, True
+        return False, boundary, far_side or disagreement and not boundary
     if all(abs(delta) > tolerance for delta in deltas):
-        return True, False
+        return True, boundary, far_side
     if all(abs(delta) <= tolerance for delta in deltas):
-        return False, False
-    return False, True
+        return False, boundary, far_side
+    return False, boundary, far_side or disagreement and not boundary
 
 
 def _gate_value(answer: Answer) -> str | float:
     if isinstance(answer, ChoiceAnswer):
         return answer.choice
     if isinstance(answer, ScoreAnswer):
-        return answer.score
+        return score_argmax(answer)
     if isinstance(answer, NoulAnswer):
         return answer.noul
     raise TypeError("unsupported answer type")
@@ -583,7 +673,7 @@ def _served_model(response: JudgeResponse) -> str:
     return response.served_model or "unknown"
 
 
-def _sum_usage(usages: Any) -> dict[str, Any] | None:
+def _sum_usage(usages: Any) -> dict[str, Any]:
     totals: dict[str, Any] = {}
     for usage in usages:
         if not isinstance(usage, Mapping):
@@ -592,14 +682,13 @@ def _sum_usage(usages: Any) -> dict[str, Any] | None:
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 continue
             totals[str(key)] = totals.get(str(key), 0) + value
-    return totals or None
+    return totals
 
 
 def _summary(
     preset: Preset,
     tolerances: CalibrationTolerances,
     cases: int,
-    records: Sequence[Mapping[str, Any]],
     baseline_models: Counter[str],
     candidate_models: Counter[str],
     baseline_usages: Sequence[Mapping[str, Any]],
@@ -610,13 +699,20 @@ def _summary(
     max_noul_delta: float,
     threshold_crossings: int,
     stable_drift: int,
-    boundary_noise: int,
+    boundary_noise_cases: int,
+    far_side_noise_cases: int,
+    comparison_count: int,
     operational_error: str | None,
 ) -> dict[str, Any]:
     mixed_models = len(baseline_models) > 1 or len(candidate_models) > 1
     has_evidence = cases > 0
     within: bool | None
-    if not has_evidence or operational_error or mixed_models or boundary_noise:
+    if (
+        not has_evidence
+        or operational_error
+        or mixed_models
+        or boundary_noise_cases
+    ):
         within = None
     else:
         within = (
@@ -629,32 +725,30 @@ def _summary(
         )
     summary: dict[str, Any] = {
         "record_type": "calibration_summary",
-        "calibration_schema": CALIBRATION_SCHEMA,
+        "calibration_version": CALIBRATION_SCHEMA,
         "preset": preset.name,
         "preset_version": preset.version,
-        "cases": cases,
-        "comparison_count": len(records),
         "repeats": tolerances.repeats,
-        "baseline": _model_name(baseline_models),
-        "candidate": _model_name(candidate_models),
+        "comparison_count": comparison_count,
+        "qualified_cases": cases,
         "baseline_model_counts": dict(sorted(baseline_models.items())),
         "candidate_model_counts": dict(sorted(candidate_models.items())),
+        "baseline_usage_totals": _sum_usage(baseline_usages),
+        "candidate_usage_totals": _sum_usage(candidate_usages),
+        "boundary_noise_cases": boundary_noise_cases,
+        "far_side_noise_cases": far_side_noise_cases,
         "tolerances": tolerances.as_dict(),
-        **tolerances.as_dict(),
         "choice_flips": choice_flips,
         "max_probability_delta_observed": max_probability_delta,
         "max_score_delta_observed": max_score_delta,
         "max_noul_delta_observed": max_noul_delta,
         "threshold_crossings": threshold_crossings,
-        "stable_drift": stable_drift,
-        "boundary_noise": boundary_noise,
-        "baseline_usage": _sum_usage(baseline_usages),
-        "candidate_usage": _sum_usage(candidate_usages),
+        "stable_drift_cases": stable_drift,
         "within_tolerance": within,
     }
     if operational_error:
         summary["error"] = operational_error
-    elif not records:
+    elif cases == 0:
         summary["error"] = "no qualifying cases"
     return summary
 
@@ -665,10 +759,8 @@ def _provenance(summary: Mapping[str, Any]) -> str:
         ("date", date.today().isoformat()),
         ("preset", summary["preset"]),
         ("preset_version", summary["preset_version"]),
-        ("cases", summary["cases"]),
+        ("cases", summary["qualified_cases"]),
         ("repeats", summary["repeats"]),
-        ("baseline", summary["baseline"]),
-        ("candidate", summary["candidate"]),
         ("baseline_models", _format_models(summary["baseline_model_counts"])),
         ("candidate_models", _format_models(summary["candidate_model_counts"])),
         ("tol_threshold_margin", f"{tolerances['threshold_margin']:.4f}"),
@@ -685,19 +777,14 @@ def _provenance(summary: Mapping[str, Any]) -> str:
         ("max_score_delta_observed", f"{summary['max_score_delta_observed']:.4f}"),
         ("max_noul_delta_observed", f"{summary['max_noul_delta_observed']:.4f}"),
         ("threshold_crossings", summary["threshold_crossings"]),
-        ("stable_drift", summary["stable_drift"]),
-        ("boundary_noise", summary["boundary_noise"]),
+        ("stable_drift_cases", summary["stable_drift_cases"]),
+        ("boundary_noise_cases", summary["boundary_noise_cases"]),
+        ("far_side_noise_cases", summary["far_side_noise_cases"]),
         ("within_tolerance", str(summary["within_tolerance"]).lower()),
     )
     date_value = fields[0][1]
     remaining = " ".join(f"{key}={value}" for key, value in fields[1:])
     return f"# jm calibrate {date_value}: {remaining}"
-
-
-def _model_name(counts: Mapping[str, int]) -> str:
-    if not counts:
-        return "unknown"
-    return next(iter(counts)) if len(counts) == 1 else "mixed"
 
 
 def _format_models(counts: Mapping[str, int]) -> str:

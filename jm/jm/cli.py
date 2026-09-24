@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TextIO
 
 from ._transport import _resolve_gateway_key as resolve_gateway_key
-from .answers import CoverageRecord, ErrorDetail, ErrorRecord, RecordMeta
+from .answers import CoverageRecord, Diagnostic, ErrorDetail, ErrorRecord, RecordMeta
 from .cache import CacheStore
 from .calibrate import (
     CalibrationTolerances,
@@ -121,6 +121,7 @@ def _parser() -> argparse.ArgumentParser:
     calibrate.add_argument("--max-score-delta", type=_nonnegative_float)
     calibrate.add_argument("--max-noul-delta", type=_nonnegative_float)
     calibrate.add_argument("--repeats", type=_positive_int)
+    calibrate.add_argument("--concurrency", type=_positive_int, default=4)
     calibrate.add_argument("--max-threshold-crossings", type=_nonnegative_int)
     calibrate.add_argument("--format", choices=("jsonl",), default="jsonl")
 
@@ -155,7 +156,8 @@ def _add_judgment_options(
         help="maximum in-flight requests",
     )
     parser.add_argument("--format", choices=("jsonl", "pretty"))
-    parser.add_argument("--filter", choices=("keep",))
+    parser.add_argument("--filter", choices=("keep", "policy"))
+    parser.add_argument("--filter-policy")
     parser.add_argument("--consistency", type=_consistency_count)
     parser.add_argument("--consistency-sigma", type=_nonnegative_float, default=2.0)
     parser.add_argument("--prefilter", choices=("bm25",))
@@ -288,6 +290,7 @@ def _calibration_command(
             stdout=stdout,
             stderr=stderr,
             tolerances=resolved_tolerances,
+            concurrency=args.concurrency,
         )
     finally:
         if close_judge is not None:
@@ -309,6 +312,16 @@ def _judgment_command(
     if args.metadata_fields is not None and by != "record":
         raise _UsageError("--metadata-fields requires --by record")
     paths = tuple(getattr(args, "paths", ()))
+    inline_filter_policy = None
+    if (
+        args.filter == "policy"
+        and args.filter_policy is None
+        and len(paths) == 1
+        and paths[0].startswith(("any(", "all("))
+    ):
+        inline_filter_policy = paths[0]
+        args.paths = ()
+        paths = ()
     if paths and by != "file":
         raise _UsageError("positional input paths require --by file")
     if paths and args.input is not None:
@@ -377,7 +390,15 @@ def _judgment_command(
     )
 
     effective_preset = _with_chunker(effective_preset, by)
-    result_filter = _result_filter(args.filter, effective_preset)
+    result_filter = _result_filter(
+        args.filter,
+        args.filter_policy or inline_filter_policy,
+        effective_preset,
+    )
+    formation_diagnostics: tuple[Diagnostic, ...] = ()
+    if not states and not rejections:
+        message = "no hunks found" if by == "hunk" else "no states found"
+        formation_diagnostics = (Diagnostic("info", "empty_input", message),)
     try:
         outcome = _run_pipeline(
             effective_preset,
@@ -399,7 +420,8 @@ def _judgment_command(
             pretty_template=effective_preset.data["output"]["pretty_template"],
             policy=args.policy if args.command == "gate" else None,
             require_states=getattr(args, "require_states", 1),
-            empty_input_error=by != "state",
+            formation_diagnostics=formation_diagnostics,
+            empty_input_error=False,
         )
     except InputError as exc:
         return _emit_input_error(
@@ -681,8 +703,16 @@ def _single_alias(
 
 
 def _result_filter(
-    requested: str | None, preset: Preset
+    requested: str | None,
+    policy_expression: str | None,
+    preset: Preset,
 ) -> ResultFilter | None:
+    if policy_expression is not None and requested != "policy":
+        raise _UsageError("--filter-policy requires --filter policy")
+    if requested == "policy":
+        if not policy_expression:
+            raise _UsageError("--filter policy requires --filter-policy")
+        return ResultFilter(kind="policy", expression=policy_expression)
     if requested is None:
         return None
     thresholds = preset.data["thresholds"]
