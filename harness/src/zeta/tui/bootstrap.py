@@ -8,6 +8,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..config.settings import ResolvedConfig
+from ..config.settings import resolve as resolve_settings
 from ..core.project_context import (
     ProjectContext,
     PromptArgumentError,
@@ -23,8 +25,6 @@ from ..core.session import (
     format_relative_age,
 )
 from ..runtime import compose_runtime
-from ..config.settings import ResolvedConfig
-from ..config.settings import resolve as resolve_settings
 from ..skills import (
     SkillCatalog,
     discover_session_skills,
@@ -96,11 +96,24 @@ def _create_app_with_root(
     repo_root = discover_repo_root(Path.cwd())
     project_dir = repo_root / ".zeta"
     loaded_settings = _app.load_settings(home=home, project_dir=project_dir)
+    cli_router = getattr(args, "router", None)
+    if (
+        getattr(args, "headless", False)
+        and cli_router is None
+        and loaded_settings.settings.router is None
+        and (
+            getattr(args, "provider", None)
+            or loaded_settings.settings.provider
+            or "fake"
+        )
+        == "fake"
+    ):
+        cli_router = False
     config: ResolvedConfig = resolve_settings(
         loaded_settings.settings,
         cli_provider=getattr(args, "provider", None),
         cli_model=getattr(args, "model", None),
-        cli_router=getattr(args, "router", None),
+        cli_router=cli_router,
         cli_router_style=getattr(args, "router_style", None),
         cli_jev_compaction=getattr(args, "jev_compaction", None),
         cli_memory_injection=getattr(args, "memory_injection", None),
