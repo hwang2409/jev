@@ -200,12 +200,12 @@ def validate_preset(data: Mapping[str, Any]) -> Mapping[str, Any]:
         )
 
     chunking = _mapping(root["chunking"], "chunking")
+    _require_fields(chunking, {"by", "limits"}, "chunking")
     by = _string(chunking["by"], "chunking.by")
     if by not in CHUNKERS:
         raise PresetValidationError(f"chunking.by must be one of {sorted(CHUNKERS)}")
     allowed_settings = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[by]
     _reject_unknown(chunking, allowed_settings, "chunking")
-    _require_fields(chunking, {"by", "limits"}, "chunking")
     for field_name in CHUNKER_SETTINGS[by] | {"max_chunks"}:
         if field_name in chunking:
             _nonnegative_integer(chunking[field_name], f"chunking.{field_name}")

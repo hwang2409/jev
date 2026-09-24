@@ -68,7 +68,7 @@ def _truncate_surrounding_list(value: list[Any], limit: int) -> list[Any]:
 
     retained: list[Any] = []
     for item in value:
-        candidate = [*retained, item]
+        candidate = [*retained, item, marker]
         if _fits_context(candidate, limit):
             retained.append(item)
             continue
@@ -481,7 +481,7 @@ def chunk_hunk(
     pending_old_path: str | None = None
     old_remaining = 0
     new_remaining = 0
-    no_newline_seen = False
+    no_newline_can_attach = False
     last_line_number = 0
     input_byte_length = (
         len(diff.encode("utf-8")) if isinstance(diff, str) else len(diff)
@@ -489,18 +489,19 @@ def chunk_hunk(
 
     def finish_hunk() -> None:
         nonlocal current_header, current_body, old_remaining, new_remaining
+        nonlocal no_newline_can_attach
         if current_header is not None:
             hunks.append((file_path, current_header, current_body))
         current_header = None
         current_body = []
         old_remaining = 0
         new_remaining = 0
+        no_newline_can_attach = False
 
     for line_number, byte_offset, line in _strict_hunk_lines(diff, _rejections):
         last_line_number = line_number
         if line is None:
             finish_hunk()
-            no_newline_seen = False
             continue
         if current_header is not None:
             if old_remaining > 0 or new_remaining > 0:
@@ -512,9 +513,16 @@ def chunk_hunk(
                     )
                     finish_hunk()
                 elif line == _NO_NEWLINE_MARKER:
-                    current_body.append(line)
-                    no_newline_seen = True
-                    continue
+                    if no_newline_can_attach:
+                        current_body.append(line)
+                        no_newline_can_attach = False
+                        continue
+                    _input_error(
+                        _rejections,
+                        "extra unified diff hunk body line",
+                        f"stdin:byte={byte_offset},line={line_number}",
+                    )
+                    finish_hunk()
                 else:
                     excess = (
                         line.startswith((" ", "-")) and old_remaining == 0
@@ -532,10 +540,11 @@ def chunk_hunk(
                             old_remaining -= 1
                         if line.startswith((" ", "+")):
                             new_remaining -= 1
+                        no_newline_can_attach = True
                         continue
-            elif line == _NO_NEWLINE_MARKER and not no_newline_seen:
+            elif line == _NO_NEWLINE_MARKER and no_newline_can_attach:
                 current_body.append(line)
-                no_newline_seen = True
+                no_newline_can_attach = False
                 continue
             elif not line.startswith(("diff --git ", "--- ", "+++ ", "@@ ")):
                 _input_error(
@@ -560,7 +569,7 @@ def chunk_hunk(
             current_body = []
             old_remaining = int(match.group(2) or "1")
             new_remaining = int(match.group(4) or "1")
-            no_newline_seen = False
+            no_newline_can_attach = False
     if current_header is not None:
         if old_remaining > 0 or new_remaining > 0:
             _input_error(

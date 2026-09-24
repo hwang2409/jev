@@ -360,6 +360,26 @@ def test_surrounding_truncation_is_deterministic_and_uses_the_exact_limit() -> N
     )
 
 
+@pytest.mark.parametrize(
+    ("chunker", "text"),
+    [
+        ("line", "x" * 4_080 + "\nfocus\n" + "y" * 4_080),
+        ("para", "x" * 4_080 + "\n\nfocus\n\n" + "y" * 4_080),
+    ],
+)
+def test_default_context_truncation_handles_multiple_large_neighbours(
+    chunker: str, text: str
+) -> None:
+    states = chunk_input(chunker, text)
+    state = states.formed[1]
+    surrounding = state.context["surrounding"]
+
+    assert len(json.dumps(surrounding, separators=(",", ":")).encode()) <= (
+        DEFAULT_CONTEXT_FIELD_BYTES
+    )
+    assert any(SURROUNDING_TRUNCATION_MARKER in item for item in surrounding)
+
+
 def test_heading_only_paragraphs_are_not_formed() -> None:
     states = chunk_para("# Intro\n\nbody\n\n## Details\n\nmore\n")
 
@@ -411,6 +431,23 @@ def test_hunk_counts_reject_unfinished_and_excess_body_lines() -> None:
     assert "declared counts" in unfinished.rejections[0].message
     assert excess.rejections[0].reason == "input_error"
     assert "extra" in excess.rejections[0].message
+
+
+def test_hunk_accepts_no_newline_markers_on_both_sides() -> None:
+    diff = (
+        "--- a/x\n+++ b/x\n@@ -1 +1 @@\n-old\n"
+        "\\ No newline at end of file\n+new\n"
+        "\\ No newline at end of file\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert result.rejections == ()
+    assert len(result.formed) == 1
+    assert result.formed[0].focus == (
+        "@@ -1 +1 @@\n-old\n\\ No newline at end of file\n"
+        "+new\n\\ No newline at end of file"
+    )
 
 
 def test_hunk_invalid_utf8_is_not_repaired_or_judged() -> None:

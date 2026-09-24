@@ -140,6 +140,14 @@ def test_validation_requires_every_top_level_field(missing: str) -> None:
         validate_preset(data)
 
 
+def test_validation_requires_chunking_by() -> None:
+    data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
+    del data["chunking"]["by"]
+
+    with pytest.raises(PresetValidationError, match="chunking.*required"):
+        validate_preset(data)
+
+
 def test_validation_rejects_unknown_fields_and_accepts_configured_models() -> None:
     data = yaml.safe_load((PRESETS / "jgrep.yml").read_text(encoding="utf-8"))
     data["unexpected"] = True
