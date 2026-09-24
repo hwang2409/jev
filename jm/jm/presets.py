@@ -268,7 +268,9 @@ def _validate_preset(
     for field_name in validated_settings:
         if field_name in chunking:
             _nonnegative_integer(chunking[field_name], f"chunking.{field_name}")
-    limits = dict(chunking.get("limits", _DEFAULT_LIMITS))
+    limits = dict(
+        _mapping(chunking.get("limits", _DEFAULT_LIMITS), "chunking.limits")
+    )
     chunking["limits"] = limits
     _reject_unknown(
         limits,

@@ -1031,6 +1031,27 @@ def test_preset_parameters_are_validated_before_processing(argv, message) -> Non
     assert message in stderr.getvalue()
 
 
+@pytest.mark.parametrize("limits", [None, "scalar"])
+def test_preset_validate_rejects_non_object_limits_without_traceback(
+    tmp_path: Path, limits: object
+) -> None:
+    data = yaml.safe_load((ROOT / "jm" / "presets" / "jgrep.yml").read_text())
+    data["chunking"]["limits"] = limits
+    path = tmp_path / "invalid-limits.yml"
+    path.write_text(yaml.safe_dump(data), encoding="utf-8")
+    stderr = io.StringIO()
+
+    code = main(
+        ["preset", "validate", str(path)],
+        stdout=io.StringIO(),
+        stderr=stderr,
+    )
+
+    assert code == 64
+    assert "chunking.limits must be an object" in stderr.getvalue()
+    assert "traceback" not in stderr.getvalue().lower()
+
+
 def test_invalid_pretty_template_is_usage_error_before_judging(tmp_path: Path) -> None:
     preset = ROOT / "jm" / "presets" / "jgrep.yml"
     path = tmp_path / "invalid-template.yml"
