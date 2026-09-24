@@ -25,8 +25,6 @@ from .calibrate import (
 from .chunkers import _normalise_file_path, chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
-    CHUNKER_SETTINGS,
-    CHUNKING_COMMON_SETTINGS,
     SCHEMA_V2,
     SCHEMA_V3,
     Preset,
@@ -37,6 +35,7 @@ from .presets import (
     resolve_prefilter,
     resolve_preset,
     validate_preset,
+    with_chunker,
 )
 from .runner import (
     InputError,
@@ -449,7 +448,7 @@ def _judgment_command(
         parameters=parameters,
     )
 
-    effective_preset = _with_chunker(effective_preset, by)
+    effective_preset = with_chunker(effective_preset, by)
     result_filter = _result_filter(
         "keep" if args.emit == "input" and args.filter is None else args.filter,
         args.filter_policy or inline_filter_policy,
@@ -595,19 +594,6 @@ def _with_max_chunks(preset: Preset, max_chunks: int | None) -> Preset:
     data = copy.deepcopy(dict(preset.data))
     chunking = dict(data["chunking"])
     chunking["max_chunks"] = max_chunks
-    data["chunking"] = chunking
-    return Preset(validate_preset(data), preset.path, preset.diagnostics)
-
-
-def _with_chunker(preset: Preset, chunker: str) -> Preset:
-    if chunker == preset.default_chunker:
-        return preset
-    data = copy.deepcopy(dict(preset.data))
-    chunking = dict(data["chunking"])
-    chunking["by"] = chunker
-    supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[chunker]
-    for setting in set(chunking) - supported:
-        del chunking[setting]
     data["chunking"] = chunking
     return Preset(validate_preset(data), preset.path, preset.diagnostics)
 

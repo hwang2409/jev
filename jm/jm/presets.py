@@ -561,6 +561,20 @@ def check_chunker_compatibility(
     return resolve_chunker(preset, by)
 
 
+def with_chunker(preset: Preset, chunker: str) -> Preset:
+    """Return a preset with settings unsupported by its chunker removed."""
+    if chunker == preset.default_chunker:
+        return preset
+    data = deepcopy(dict(preset.data))
+    chunking = dict(data["chunking"])
+    chunking["by"] = chunker
+    supported = CHUNKING_COMMON_SETTINGS | CHUNKER_SETTINGS[chunker]
+    for setting in set(chunking) - supported:
+        del chunking[setting]
+    data["chunking"] = chunking
+    return Preset(validate_preset(data), preset.path, preset.diagnostics)
+
+
 def resolve_prefilter(
     preset: Preset,
     *,

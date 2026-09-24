@@ -155,8 +155,17 @@ def test_help_audits_v8_options_and_version(capsys: pytest.CaptureFixture[str]) 
         main(["run", "--help"])
     assert help_exit.value.code == 0
     help_text = capsys.readouterr().out
-    for option in ("--by", "--max-chunks", "--format", "--filter", "--query"):
+    normalized_help = " ".join(help_text.split())
+    descriptions = {
+        "--by": "form states by line, paragraph, hunk, file, record, or state",
+        "--max-chunks": "cap formed states; excess states become scan-cap skips",
+        "--format": "write canonical JSONL, or also render results as pretty text",
+        "--filter": "select visible results with the preset threshold or a policy",
+        "--query": "supply the preset's query parameter",
+    }
+    for option, description in descriptions.items():
         assert option in help_text
+        assert description in normalized_help
 
     with pytest.raises(SystemExit) as version_exit:
         main(["--version"])
