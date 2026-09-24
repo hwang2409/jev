@@ -164,6 +164,10 @@ class ChildApprovalPolicy:
         self,
         tool_call: ToolCall,
         abort_signal: AbortSignal,
+        *,
+        persist_request: bool = True,
+        force_ask: bool = False,
+        label: str | None = None,
     ) -> ApprovalDecision | None:
         state = self.child_store.approval_states().get(tool_call.id)
         if state is not None:
@@ -174,18 +178,28 @@ class ChildApprovalPolicy:
             if state[1] == ApprovalDecision.DENY.value:
                 return ApprovalDecision.DENY
         else:
-            decision = self.decide(tool_call.name, tool_call.arguments)
+            decision = (
+                ApprovalDecision.ASK
+                if force_ask
+                else self.decide(tool_call.name, tool_call.arguments)
+            )
             if decision is not ApprovalDecision.ASK:
                 return decision
-            self.child_store.append_message_with_approval_requests(
-                Message(MessageRole.ASSISTANT, [ToolUseContent(tool_call)]),
-                [(tool_call.id, tool_call)],
-            )
+            if persist_request:
+                self.child_store.append_message_with_approval_requests(
+                    Message(MessageRole.ASSISTANT, [ToolUseContent(tool_call)]),
+                    [(tool_call.id, tool_call, label)],
+                )
 
+        request_label = (
+            label
+            if label is not None
+            else f"{self.description}: {tool_call.name}"
+        )
         request = ApprovalRequest(
             tool_call.id,
             tool_call,
-            label=f"{self.description}: {tool_call.name}",
+            label=request_label,
         )
         self.parent.register_delegated(
             request,
