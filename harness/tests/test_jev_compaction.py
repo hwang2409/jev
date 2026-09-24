@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
 import pytest
+from jm import client as jm_client
+from jm.answers import NoulAnswer
+from jm.client import CacheStore as JmCacheStore
 
 from zeta.cli.main import build_parser
 from zeta.config.settings import Settings, resolve
@@ -21,6 +25,11 @@ from zeta.protocol.types import (
 from zeta.providers import jev
 from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
+
+
+@pytest.fixture(autouse=True)
+def isolate_jm_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    monkeypatch.setattr(jev, "CacheStore", lambda: JmCacheStore(tmp_path))
 
 
 def user(text: str) -> Message:
@@ -888,15 +897,17 @@ async def test_triage_http_uses_route_auth_and_response_shape(
             return None
 
         async def evaluate_async(
-            self, state: dict[str, Any], questions: dict[str, Any]
+            self, state: object, questions: dict[str, Any]
         ) -> jev.JevResponse:
+            if hasattr(state, "focus"):
+                state = json.loads(state.focus)
             self.requests.append({"state": state, "questions": questions})
             return jev.JevResponse(
-                answers={"entry-1": {"type": "noul", "noul": 0.1}},
+                answers={"entry-1": NoulAnswer(0.1)},
                 usage={"input_tokens": 3},
             )
 
-    monkeypatch.setattr(jev, "JevClient", Client)
+    monkeypatch.setattr(jm_client, "JevClient", Client)
     result = await jev.triage("task", [{"id": "entry-1"}])
 
     assert result.keep_probabilities == {"entry-1": 0.1}

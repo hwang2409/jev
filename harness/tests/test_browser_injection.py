@@ -6,7 +6,9 @@ from typing import Any
 
 import httpx
 import pytest
+from jm import client as jm_client
 from jm.answers import ChoiceAnswer, NoulAnswer, ScoreAnswer
+from jm.client import CacheStore as JmCacheStore
 
 import zeta.providers.anthropic as anthropic_module
 from zeta.core.fake import FakeBackend, ScriptedTurn
@@ -49,8 +51,10 @@ class _Transport:
         return None
 
     async def evaluate_async(
-        self, state: dict[str, Any], questions: dict[str, Any]
+        self, state: object, questions: dict[str, Any]
     ) -> jev.JevResponse:
+        if hasattr(state, "focus"):
+            state = json.loads(state.focus)
         request = {"state": state, "questions": questions}
         self.requests.append(request)
         response = self.responder(request)
@@ -112,12 +116,17 @@ def _provider_response(
     return jev.JevResponse(answers=answers, usage={})
 
 
+@pytest.fixture(autouse=True)
+def isolate_jm_cache(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(jev, "CacheStore", lambda: JmCacheStore(tmp_path))
+
+
 def _install_transport(
     monkeypatch: pytest.MonkeyPatch,
     responder: Any = _provider_response,
 ) -> _Transport:
     transport = _Transport(responder)
-    monkeypatch.setattr(jev, "JevClient", lambda: transport)
+    monkeypatch.setattr(jm_client, "JevClient", lambda: transport)
     return transport
 
 

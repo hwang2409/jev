@@ -6,9 +6,12 @@ import time
 
 import pytest
 
-from jm.answers import JudgeResponse, NoulAnswer
+from jm.answers import ErrorResponse, JudgeResponse, NoulAnswer
+from jm.cache import CacheStore
+from jm.client import runtime_preset
 from jm.runner import (
     ConfigurationError,
+    FormationEvent,
     FormationReport,
     InputError,
     ResultFilter,
@@ -102,6 +105,106 @@ def test_judge_configuration_errors_raise() -> None:
                 judge_fn=lambda *_: _response(),
             )
         )
+
+
+def test_formation_event_rejects_mismatched_input_error_reason() -> None:
+    with pytest.raises(ConfigurationError, match="require reason input_error"):
+        FormationEvent(
+            "input_error",
+            "scan_cap",
+            "invalid input",
+            None,
+            "stdin:byte=0,line=1",
+            None,
+        )
+
+
+def test_public_judge_applies_503_backoff_diagnostics() -> None:
+    def fake(state, *_args):
+        if int(state.state_ref.rsplit("-", 1)[1]) < 4:
+            return ErrorResponse("temporarily unavailable", http_status=503)
+        return _response()
+
+    records = list(
+        judge(
+            "jgrep",
+            [State(f"state-{index}", "focus") for index in range(8)],
+            formation_report=FormationReport(),
+            judge_fn=fake,
+            concurrency=4,
+        )
+    )
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in records
+        if record.to_dict()["record_type"] == "diagnostic"
+    ]
+    assert any(
+        diagnostic["code"] == "concurrency_backoff"
+        and diagnostic["message"] == "status=503 consecutive=2 effective=2"
+        for diagnostic in diagnostics
+    )
+
+
+def test_public_judge_cache_hits_on_identical_typed_requests(tmp_path) -> None:
+    calls = 0
+
+    def fake(*_args):
+        nonlocal calls
+        calls += 1
+        return _response()
+
+    preset = runtime_preset({"matches_query": {"type": "noul"}})
+    store = CacheStore(tmp_path)
+    state = State("state-1", "focus")
+    for _ in range(2):
+        records = list(
+            judge(
+                preset,
+                [state],
+                formation_report=FormationReport(),
+                cache_store=store,
+                judge_fn=fake,
+            )
+        )
+    result = next(
+        record
+        for record in records
+        if record.to_dict()["record_type"] == "result"
+    )
+    assert calls == 1
+    assert result.to_dict()["meta"]["cache"] == "hit"
+
+
+def test_emit_stops_without_waiting_for_slow_pending_judgments() -> None:
+    release = threading.Event()
+
+    class BrokenStream(io.StringIO):
+        def write(self, _value: str) -> int:
+            raise BrokenPipeError
+
+    def fake(state, *_args):
+        if state.state_ref != "fast":
+            release.wait(timeout=2)
+        return _response()
+
+    started = time.monotonic()
+    try:
+        result = emit(
+            judge(
+                "jgrep",
+                [State("fast", "focus"), State("slow", "focus")],
+                formation_report=FormationReport(),
+                judge_fn=fake,
+                concurrency=2,
+            ),
+            jsonl_stream=BrokenStream(),
+            pretty_stream=io.StringIO(),
+        )
+    finally:
+        release.set()
+    assert result.broken_pipe is True
+    assert time.monotonic() - started < 1
 
 
 def test_emit_filters_results_but_keeps_terminal_coverage() -> None:

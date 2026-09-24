@@ -381,6 +381,7 @@ def runtime_preset(
         "model": _GATEWAY_MODEL,
         "chunking": {
             "by": "file",
+            "max_chunks": 512,
             "limits": {
                 "focus_bytes": 65_536,
                 "context_field_bytes": 65_536,

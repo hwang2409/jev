@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import TextIO
 
 from ._transport import _resolve_gateway_key as resolve_gateway_key
-from .answers import ResultRecord
 from .cache import CacheStore
 from .calibrate import (
     CalibrationTolerances,
@@ -20,7 +19,6 @@ from .calibrate import (
 )
 from .chunkers import chunk_file, chunk_input
 from .client import make_judge
-from .gates import compile_policy, evaluate_gate
 from .presets import (
     Preset,
     PresetError,
@@ -32,17 +30,11 @@ from .presets import (
     validate_preset,
 )
 from .runner import (
-    FormationEvent,
-    FormationReport,
     ResultFilter,
     State,
     StateLimits,
     StateRejection,
-    _admit_for_judgment,
-    _duplicate_state_ref,
-    _formation_report,
-    _judge_impl,
-    emit,
+    run_judgment,
 )
 
 
@@ -348,81 +340,27 @@ def _judgment_command(
     )
 
     effective_preset = _with_chunker(effective_preset, by)
-    duplicate_ref = _duplicate_state_ref(states)
-    if duplicate_ref is not None:
-        admission = _admit_for_judgment((), (), max_chunks=None, prefilter=None)
-        formation_report = FormationReport(
-            events=(
-                FormationEvent(
-                    "input_error",
-                    "input_error",
-                    f"duplicate state reference {duplicate_ref!r}",
-                    None,
-                    "stdin:byte=0,line=1",
-                    None,
-                ),
-            )
-        )
-    else:
-        admission = _admit_for_judgment(
-            states,
-            rejections,
-            max_chunks=effective_preset.chunking.get("max_chunks"),
-            prefilter=prefilter,
-        )
-        formation_report = _formation_report(
-            admission,
-            include_prefilter_warning=args.command == "jgrep",
-        )
     result_filter = _result_filter(args.filter, effective_preset)
-    policy = None
-    if args.command == "gate":
-        policy = compile_policy(args.policy, effective_preset)
-
-    records: list[object] = []
-
-    def record_stream():
-        for record in _judge_impl(
-            effective_preset,
-            admission.admitted,
-            formation_report=formation_report,
-            cache_store=cache_store or CacheStore(),
-            concurrency=args.concurrency,
-            judge_fn=judge_fn,
-            consistency=args.consistency,
-            consistency_sigma=args.consistency_sigma,
-            ordered=True,
-        ):
-            records.append(record)
-            yield record
-
-    emitted = emit(
-        record_stream(),
-        format=args.format or effective_preset.data["output"]["default_format"],
+    return run_judgment(
+        effective_preset,
+        states,
+        rejections=rejections,
+        max_chunks=effective_preset.chunking.get("max_chunks"),
+        prefilter=prefilter,
+        include_prefilter_warning=args.command == "jgrep",
+        cache_store=cache_store or CacheStore(),
+        concurrency=args.concurrency,
+        judge_fn=judge_fn,
+        consistency=args.consistency,
+        consistency_sigma=args.consistency_sigma,
+        output_format=args.format or effective_preset.data["output"]["default_format"],
         jsonl_stream=stdout,
         pretty_stream=stderr,
         result_filter=result_filter,
         pretty_template=effective_preset.data["output"]["pretty_template"],
+        policy=args.policy if args.command == "gate" else None,
+        require_states=getattr(args, "require_states", 1),
     )
-    if emitted.broken_pipe:
-        return 0
-    if emitted.coverage is None:
-        raise _OperationalError("judgment did not produce coverage")
-    coverage = emitted.coverage
-    if policy is None:
-        return 2 if coverage.coverage == "partial" else 0
-    result_records = tuple(
-        record for record in records if isinstance(record, ResultRecord)
-    )
-    gate_result = evaluate_gate(
-        policy,
-        result_records,
-        judged_states=coverage.coverage_counts["judged"],
-        coverage_reasons=coverage.coverage_reasons,
-        required_states=args.require_states,
-        consistency_sigma=args.consistency_sigma,
-    )
-    return gate_result.exit_code
 
 
 def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> None:
