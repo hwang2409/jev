@@ -1198,7 +1198,7 @@ def test_stdin_invalid_utf8_matches_file_input(tmp_path: Path) -> None:
     assert stdin_states[0].focus == file_states[0].focus == "ok\ufffd"
 
 
-def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) -> None:
+def test_concurrency_bounds_requests_and_emits_completion_order(tmp_path: Path) -> None:
     lock = threading.Lock()
     active = 0
     max_active = 0
@@ -1222,12 +1222,12 @@ def test_concurrency_bounds_requests_and_preserves_output_order(tmp_path: Path) 
 
     assert code == 0
     assert max_active == 2
-    assert [record["state_ref"] for record in records[:-1]] == [
+    assert {record["state_ref"] for record in records[:-1]} == {
         "stdin#L1",
         "stdin#L2",
         "stdin#L3",
         "stdin#L4",
-    ]
+    }
 
 
 def test_cli_routes_concurrency_diagnostics_to_stderr(tmp_path: Path) -> None:

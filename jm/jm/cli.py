@@ -34,7 +34,7 @@ from .runner import (
     State,
     StateLimits,
     StateRejection,
-    run_judgment,
+    _run_pipeline,
 )
 
 
@@ -341,7 +341,7 @@ def _judgment_command(
 
     effective_preset = _with_chunker(effective_preset, by)
     result_filter = _result_filter(args.filter, effective_preset)
-    return run_judgment(
+    outcome = _run_pipeline(
         effective_preset,
         states,
         rejections=rejections,
@@ -361,6 +361,16 @@ def _judgment_command(
         policy=args.policy if args.command == "gate" else None,
         require_states=getattr(args, "require_states", 1),
     )
+    if outcome.emitted.broken_pipe:
+        return 0
+    if outcome.gate_result is not None:
+        return outcome.gate_result.exit_code
+    if (
+        outcome.emitted.coverage is not None
+        and outcome.emitted.coverage.coverage == "partial"
+    ):
+        return 2
+    return 0
 
 
 def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> None:

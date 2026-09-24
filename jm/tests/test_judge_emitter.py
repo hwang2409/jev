@@ -121,7 +121,7 @@ def test_formation_event_rejects_mismatched_input_error_reason() -> None:
 
 def test_public_judge_applies_503_backoff_diagnostics() -> None:
     def fake(state, *_args):
-        if int(state.state_ref.rsplit("-", 1)[1]) < 4:
+        if int(state.state_ref.rsplit("-", 1)[1]) < 6:
             return ErrorResponse("temporarily unavailable", http_status=503)
         return _response()
 
@@ -139,11 +139,15 @@ def test_public_judge_applies_503_backoff_diagnostics() -> None:
         for record in records
         if record.to_dict()["record_type"] == "diagnostic"
     ]
-    assert any(
-        diagnostic["code"] == "concurrency_backoff"
-        and diagnostic["message"] == "status=503 consecutive=2 effective=2"
+    backoffs = {
+        diagnostic["message"]
         for diagnostic in diagnostics
-    )
+        if diagnostic["code"] == "concurrency_backoff"
+    }
+    assert backoffs >= {
+        "status=503 consecutive=2 effective=2",
+        "status=503 consecutive=2 effective=1",
+    }
 
 
 def test_public_judge_cache_hits_on_identical_typed_requests(tmp_path) -> None:

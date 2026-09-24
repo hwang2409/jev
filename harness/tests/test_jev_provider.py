@@ -210,6 +210,32 @@ async def test_typed_provider_path_reuses_the_cache_on_identical_judgments(
     assert len(Client.requests) == 1
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["missing", "partial"])
+async def test_provider_rejects_missing_or_partial_terminal_coverage(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    class Record:
+        def __init__(self, payload: dict[str, Any], answers: dict[str, Any] | None = None):
+            self.payload = payload
+            self.answers = answers or {}
+            self.usage = {}
+
+        def to_dict(self) -> dict[str, Any]:
+            return self.payload
+
+    async def broken_judge_async(*_args: Any, **_kwargs: Any):
+        if failure == "partial":
+            yield Record({"record_type": "result"}, {"q": NoulAnswer(0.8)})
+            yield Record({"record_type": "coverage", "coverage": "partial"})
+
+    monkeypatch.setattr(jev, "judge_async", broken_judge_async)
+    with pytest.raises(jev.JevRouterError, match="coverage"):
+        await jev._evaluate(
+            {"state": {}, "questions": {"q": {"type": "noul"}}}
+        )
+
+
 def auto_response() -> jev.JevResponse:
     return jev.JevResponse(
         answers={
