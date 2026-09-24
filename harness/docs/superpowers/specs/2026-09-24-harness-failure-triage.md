@@ -1,0 +1,316 @@
+# harness failure triage and fix ladder
+
+date: 2026-09-24
+baseline commit: f78d8840817045bc7af25ec1cba630492467e27a
+scope: 21 reproduced harness failures, one known nondeterministic probe, and 6 router failures
+
+## executive result
+
+The known baseline has 22 harness failure nodes and 6 router failure nodes. This run reproduced 21 harness failures. The argument-scoped headless probe passed and remains a known nondeterministic, not reproduced this run.
+
+The failures fall into seven fix themes:
+
+1. child approval protocol drift, including the server approval regression;
+2. headless print-mode routing and hard-deny probe status;
+3. import-boundary policy after the stage-4 reorganization;
+4. router schema text persistence in stored user messages;
+5. completion scripts and module-size limits;
+6. router fixture paths that depend on the current directory;
+7. three queued realistic-eval calibrations.
+
+The first implementation lane should fix the child approval protocol. It blocks meaningful validation of delegated approvals, automation allow-list behavior, and the server parent-mode test. The print-mode timeout needs a router-default fix shape. TUI decoupling remains an import-boundary concern.
+
+## reproduction contract
+
+No full harness suite was run. Harness commands used the locked project environment through harness/.venv via uv run --project harness --frozen. Router commands used the project environment and ran from the repository root.
+
+The router working directory matters. Running pytest from router/ makes all 54 tests pass because relative fixture paths happen to resolve. The gate shape from the repository root exposes the six failures listed below.
+
+The harness family collection found 397 tests in the selected files. The non-approval family run produced 13 failures. Separate targeted runs produced six agent approval failures, one server approval failure, and one print-mode failure. The known baseline arithmetic is 13 + 6 + 1 + 2 = 22 nodes: the first three terms and the print-mode node reproduced 21 failures; the argument-scoped node passed and is the 22nd known node, not a reproduced failure.
+
+## harness failures
+
+### agent approval composition: 6 failures
+
+All six nodes fail in the child approval wrapper.
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_parallel_delegated_approvals_resolve_by_child_instance | expected two pending requests, got zero | ChildApprovalPolicy.authorize rejects the new keyword arguments before it registers the delegated request | code wrong | add keyword-only persist_request, force_ask, and label arguments, then apply the parent policy contract |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_child_loop_inherits_argument_scoped_approval_rules | authorize rejects keyword force_ask | core ApprovalGate passes persist_request, force_ask, and label; the child wrapper accepts only tool_call and abort_signal | code wrong | add the keyword-only arguments and apply them when creating the delegated request |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_child_approval_uses_parent_policy | expected parent pending request child-bash, got none | the missing keyword arguments raise before the delegated request can remain visible to the parent | code wrong | match the parent authorize signature; keep the existing parent registration and child store resolution |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_grandchild_approval_composes_with_parent_policy[approve-nested] | expected one pending request, got zero | the missing keyword arguments stop grandchild-to-parent composition before registration | code wrong | match the parent authorize signature; retain the existing nested delegation path |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_grandchild_approval_composes_with_parent_policy[deny-tool execution denied] | expected one pending request, got zero | the missing keyword arguments stop the delegated request before the parent can deny it | code wrong | match the parent authorize signature; verify the existing child store denial path |
+| harness/src/zeta/tools/agent/tests/test_agent.py::test_grandchild_approval_composes_with_parent_policy[abort-tool execution canceled] | expected one pending request, got zero | the missing keyword arguments stop the delegated request before the parent can abort it | code wrong | match the parent authorize signature; verify the existing child store abort path |
+
+The relevant code is harness/src/zeta/tools/agent/__init__.py, harness/src/zeta/agent/runner.py, and harness/src/zeta/core/approval.py. ApprovalPolicy.authorize accepts persist_request, force_ask, and label. ChildApprovalPolicy.authorize does not. Child identity handling already exists: core approval keys delegated requests by child plus request id, and test_agent.py covers duplicate request ids. The automation receipt disappears because the TypeError is reported as approval failed instead of a denial. Do not add identity or receipt work unless failures remain after the API fix.
+
+### automation allow-list: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_automations_integration.py::test_unattended_allow_list_gates_even_exempt_and_internal_calls | expected denied tools forbidden, permitted, forbidden; got forbidden, permitted | ChildApprovalPolicy.authorize raises the missing-keyword TypeError. Tool execution reports approval failed, so the parent sees no final denial receipt | code wrong | fix the child authorize API first; keep the existing policy propagation and receipt behavior unless the dependent test still fails |
+
+This is a dependent check for the child approval lane. Do not patch the assertion to accept two entries.
+
+### import boundaries: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_import_boundaries.py::test_import_boundaries | seven forbidden imports are reported | the test has fixed architectural buckets. Current source still imports provider code from core and tools, and runtime/headless.py imports zeta.tui.app | decoupling required | move shared/runtime code behind framework-neutral modules and remove every forbidden import; any policy change belongs in a separate proposal |
+
+The exact observed violations are:
+
+    core/context.py:14: zeta.providers
+    core/safety.py:18: zeta.providers
+    runtime/headless.py:82: zeta.tui.app
+    tools/route/__init__.py:9: zeta.providers.jev
+    tools/browser/catalog.py:20: zeta.providers.jev
+    tools/browser/__init__.py:18: zeta.providers
+    tools/browser/gates.py:8: zeta.providers
+
+The addendum calls out four post-reorganization violations. The most direct example is runtime/headless.py:82. The scanner currently reports seven, so the fix lane must first separate the four stage-4 relocation cases from the older provider imports. Headless must be decoupled from tui, and every forbidden import must be removed. Any policy change belongs in a separate proposal, not this ladder.
+
+### attachments: 3 failures
+
+All three failures have the same compatibility cause.
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_attachments.py::test_cancelled_image_token_removes_staged_file_on_send | expected user content send; got an extra routed tool schemas text block | router auto mode persists routing schema text into the latest user message | needs a product decision | decide whether routing text is durable user content. Then either keep it out of the store, or make the test use router_mode=False and assert only attachment blocks |
+| harness/tests/test_attachments.py::test_missing_path_preserves_pending_paste_for_retry | expected three attachment paths; got an extra None block | persisted routing schema is counted as another content block | needs a product decision | use the same persistence decision and make the assertion inspect attachment content only |
+| harness/tests/test_attachments.py::test_deleted_pending_paste_is_dropped_once | first user message has routing schema text; the next provider turn fails with list index out of range | router schema persistence changes the fake backend turn sequence and the test assumes the old stored message shape | needs a product decision | pin router mode in this attachment test or change the runtime persistence contract, then restore the scripted turn budget |
+
+The source path is harness/src/zeta/runtime/loop.py. The relevant behavior is _persist_auto_schema_text, called by the default router_mode=True and router_style="auto" path.
+
+### cli completion: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_cli.py::test_completion_scripts_are_deterministic_and_cover_cli_surface | zsh and bash output omit --safety-tier and --no-safety-tier | harness/src/zeta/core/commands/completion.py does not list the two parser flags in either generated script | code wrong | add both flags to zsh argument output and bash top-level flag/value handling, then regenerate or snapshot the expected scripts |
+
+### headless: 1 reproduced failure and one nondeterministic probe
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_headless.py::test_print_mode_runs_session_hook_inside_async_activation | subprocess exceeded its 10-second test timeout | the subprocess does not inherit the stock_router_mode fixture, so router mode defaults to auto. AgentLoop calls auto_route and its Jev judgment path before the fake backend. create_app is not the timeout source: direct timing took about 0.06 seconds, while --no-router completed the same fake print path in under one second | code wrong | set the print-mode path to the intended offline router mode before AgentLoop runs, or make the fake provider path bypass auto_route. Keep TUI decoupling in the import-boundary lane |
+| harness/tests/test_headless.py::test_headless_hard_denies_argument_scoped_ask_rules | known nondeterministic standalone hang; this run passed in 53.91 seconds | the hard-deny behavior passed in this run. The node remains a known nondeterministic probe, not a reproduced failure | known nondeterministic, not reproduced this run | do not change the hard-deny contract; rerun only under the bounded probe rule when a later fix needs evidence |
+
+The argument-scoped probe was run exactly once under timeout 120s. It passed in 53.91 seconds. A separate always-ask hard-deny probe also passed in 53.72 seconds. These passes do not reproduce failures. The argument-scoped node must not be looped while debugging.
+
+The headless source is harness/src/zeta/runtime/headless.py. It imports zeta.tui.app at line 82 and changes the policy to a deny-all headless mode at lines 96-104. The TUI import is an import-boundary finding, not the print-mode timeout root cause. Do not increase the test timeout as the fix.
+
+### module limits: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_module_limits.py::test_module_limits | seven file or directory limits exceed the caps | production modules and two source directories have grown past the architectural limits | code wrong | split the large modules by responsibility and move crowded test modules into narrower packages; keep the caps unless an owner approves a policy change |
+
+Observed limits are MAX_FILE_LINES=1250 and MAX_FILES_PER_DIRECTORY=17. The offenders are:
+
+    tools/registry.py: 1392 lines
+    core/store.py: 1281 lines
+    core/safety.py: 1278 lines
+    runtime/loop.py: 2143 lines
+    tools/agent/tests/test_agent.py: 3256 lines
+    core: 18 files
+    tui: 18 files
+
+### server approval: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_server.py::test_parent_mode_resolves_live_delegated_approvals_independently | approve responses return error -32006, then the test has no result key | both child calls fail first with ChildApprovalPolicy.authorize() got an unexpected keyword argument force_ask; the server then finds no live request to resolve | code wrong | fix the child approval protocol first. Keep the server regression test because its distinct wire keys and tuple mapping are the required collision check |
+
+The server maps child_instance_id plus provider_request_id to distinct wire approval ids in harness/src/zeta/server/server.py. The observed error is a dependency failure in the child wrapper, not evidence that the wire ids collide.
+
+### slash status: 1 failure
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_slash.py::test_status_counts_compaction_usage | expected tokens_used_this_session: 70; output has no usage and the fake provider reports summary source is too large: 4275 tokens exceeds 40 | the direct AgentLoop test leaves router auto mode enabled. Persisted routing schema text inflates the context and changes the compaction path | test wrong for the current product contract | pass router_mode=False for this compaction unit, or change the product contract so routing schemas stay out of durable user content |
+
+### steering: 5 failures
+
+All five nodes fail because the stored user message contains routing schema text in addition to the submitted steer text.
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| harness/tests/test_steering.py::test_steer_delivers_between_tool_pair_and_next_provider_call | expected steer text only; got an extra routed tool schemas block | auto router schema persistence changes the durable message shape | needs a product decision | either make routing schema text ephemeral, or set router mode explicitly in this storage-focused test |
+| harness/tests/test_steering.py::test_multiple_steers_deliver_in_order_at_one_boundary | expected the two steer texts only; got routing schema text too | same | needs a product decision | same |
+| harness/tests/test_steering.py::test_pipeline_routes_default_submission_as_steer | expected the routed submission only; got routing schema text too | same | needs a product decision | same |
+| harness/tests/test_steering.py::test_backslash_prefix_defers_to_after_turn_end | expected deferred text only; got routing schema text too | same | needs a product decision | same |
+| harness/tests/test_steering.py::test_toolless_turn_drops_orphan_steer_and_notifies | expected no orphan steer content; got routing schema text | same | needs a product decision | same |
+
+## router failures
+
+The six failures appear only when the gate runs from the repository root. Both test files use paths such as Path("evalset.jsonl") instead of paths anchored to the router package.
+
+| node | observed error | root cause | verdict | minimal fix shape |
+| --- | --- | --- | --- | --- |
+| router/tests/test_evalset.py::test_size_and_schema | FileNotFoundError: evalset.jsonl | fixture path depends on process cwd | code wrong in test helper | resolve from Path(__file__).parents[1], or make one shared fixture-path helper |
+| router/tests/test_evalset.py::test_composition | FileNotFoundError: evalset.jsonl | fixture path depends on process cwd | code wrong in test helper | same |
+| router/tests/test_phase2_data.py::test_curve_evalset_has_schema_count_and_subset_coverage | FileNotFoundError: evalset_curve.jsonl | fixture path depends on process cwd | code wrong in test helper | same |
+| router/tests/test_phase2_data.py::test_curve_6_describes_a_foreground_command | FileNotFoundError: evalset_curve.jsonl | fixture path depends on process cwd | code wrong in test helper | same |
+| router/tests/test_phase2_data.py::test_full_evalset_has_exact_coverage_and_hard_cases | FileNotFoundError: evalset_full.jsonl | fixture path depends on process cwd | code wrong in test helper | same |
+| router/tests/test_phase2_data.py::test_hard_steps_do_not_copy_expected_description_phrases | FileNotFoundError: evalset_full.jsonl | fixture path depends on process cwd | code wrong in test helper | same |
+
+The six nodes are in only router/tests/test_evalset.py and router/tests/test_phase2_data.py. Running uv run --frozen pytest -q from router/ produced 54 passes, which confirms that the fixtures exist.
+
+## ordered fix ladder
+
+Each lane is sized for one focused PR. The order reflects dependencies, not severity alone.
+
+### lane 1: converge child approval protocol
+
+Scope: make ChildApprovalPolicy.authorize accept the persist_request, force_ask, and label keyword arguments used by ApprovalPolicy. Keep the existing child-plus-request identity keys and delegated store resolution. Add identity or receipt changes only if failures remain after the API fix.
+
+Files: harness/src/zeta/tools/agent/__init__.py, harness/src/zeta/agent/runner.py, harness/src/zeta/core/approval.py, plus the six agent tests.
+
+Risk: high. This is permission and delegation code.
+
+Verify with the six exact agent nodes, then the automation allow-list node. Run the server parent-mode node after this lane.
+
+The tests already require parent authority, labels, child instance ids, and delegated visibility. Treat those as fixed contracts. No Henry decision remains in this lane.
+
+### lane 2: restore server delegated approval coverage
+
+Scope: validate the server wire mapping after lane 1. Only change server code if the collision test still fails after child approval is fixed.
+
+Files: harness/src/zeta/server/server.py and its server tests, only if needed.
+
+Risk: high. Wire changes affect native clients.
+
+Verify the exact parent-mode node and the existing approval protocol tests.
+
+Henry decision: approve the current opaque wire-id shape, or require the client protocol to expose child instance ids directly.
+
+### lane 3: fix print-mode router defaults
+
+Scope: fix the print-mode subprocess path so its fake backend does not enter the default auto-route judgment before the provider turn. Keep the existing hard-deny behavior as a verified contract. Track the runtime/headless.py dependency on zeta.tui.app under lane 8.
+
+Files: harness/src/zeta/runtime/headless.py, runtime composition/config files that set router defaults, and the print-mode test.
+
+Risk: high. This changes subprocess startup and safety behavior.
+
+Verify the print-mode node and compare the fake path with --no-router. The argument-scoped node is a bounded nondeterministic probe, not a reproduced lane-3 failure. Run it only as timeout 120s ... when needed; do not loop it. Check for orphan workers after any timeout with ps ax -o pid,ppid,etime,command | grep "[p]ausanias.worker".
+
+The tests already require headless hard-deny behavior. No Henry decision remains on that contract. TUI decoupling belongs to lane 8 and the import-boundary policy.
+
+### lane 4: choose and enforce the router schema persistence contract
+
+Scope: resolve the shared behavior behind three attachment failures, the slash status failure, and five steering failures.
+
+Files: harness/src/zeta/runtime/loop.py and the affected attachment, slash, and steering tests.
+
+Risk: medium to high. Durable message content affects replay, compaction, and provider context.
+
+Verify the three exact attachment nodes, the slash node, and the five exact steering nodes.
+
+Henry decision: should auto-router schema text be durable user content? If no, make it ephemeral in the loop. If yes, pin tests that inspect user content to the intended router mode and filter non-user routing blocks.
+
+### lane 5: fix completion coverage
+
+Scope: add --safety-tier and --no-safety-tier to both generated completion scripts.
+
+Files: harness/src/zeta/core/commands/completion.py and the CLI test.
+
+Risk: low.
+
+Verify the exact completion node and compare generated bash and zsh output.
+
+### lane 6: restore module-limit compliance
+
+Each sub-lane gets one focused PR. Keep MAX_FILE_LINES=1250 and MAX_FILES_PER_DIRECTORY=17 unless a later test-backed policy review changes them.
+
+#### lane 6a: split tools/registry.py
+
+Scope: split registry responsibilities without changing registration or close behavior.
+
+Files: harness/src/zeta/tools/registry.py and its direct tests.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits and the focused registry/tool tests that cover registration, execution, and shutdown.
+
+#### lane 6b: split core/store.py and core/safety.py
+
+Scope: split persistence and safety responsibilities while preserving approval, session, and safety decisions.
+
+Files: harness/src/zeta/core/store.py, harness/src/zeta/core/safety.py, and direct store, approval, and safety tests.
+
+Verify with the module-limit node, harness/tests/test_store.py, harness/tests/test_approval.py, and the focused safety tests.
+
+#### lane 6c: split runtime/loop.py
+
+Scope: split turn orchestration from routing, persistence, and compaction helpers without changing turn order.
+
+Files: harness/src/zeta/runtime/loop.py and direct loop, router, attachment, slash, and steering tests.
+
+Verify with the module-limit node and focused tests for loop activation, router persistence, attachments, slash status, and steering.
+
+#### lane 6d: reduce the core file count
+
+Scope: reduce the number of files directly under harness/src/zeta/core/ from 18 to at most 17 without changing production behavior or imports.
+
+Files: harness/src/zeta/core/.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits, harness/tests/test_import_boundaries.py::test_import_boundaries, harness/tests/test_store.py, harness/tests/test_safety.py, and harness/tests/test_context.py.
+
+#### lane 6e: reduce the tui file count
+
+Scope: reduce the number of files directly under harness/src/zeta/tui/ from 18 to at most 17 without changing production behavior or imports.
+
+Files: harness/src/zeta/tui/.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits, harness/tests/test_import_boundaries.py::test_import_boundaries, harness/tests/test_tui.py, harness/tests/test_transcript_paint.py, harness/tests/test_theme_and_keys.py, and harness/tests/test_todo_tui.py.
+
+#### lane 6f: split the agent test module
+
+Scope: split harness/src/zeta/tools/agent/tests/test_agent.py into narrower test modules by behavior, reducing it from 3256 lines without changing test coverage or production imports.
+
+Files: harness/src/zeta/tools/agent/tests/test_agent.py and the new test modules beside it.
+
+Verify with harness/tests/test_module_limits.py::test_module_limits and every resulting test module under harness/src/zeta/tools/agent/tests/.
+
+### lane 7: make router fixture paths cwd-independent
+
+Scope: anchor evalset paths to the router package.
+
+Files: router/tests/test_evalset.py, router/tests/test_phase2_data.py, and a shared test helper if useful.
+
+Risk: low.
+
+Verify both files from the repository root and from router/.
+
+### lane 8: import-boundary policy after stage 4
+
+Scope: decouple every forbidden import reported by the boundary test, including runtime -> tui, after stage 4.
+
+Files: harness/tests/test_import_boundaries.py, harness/src/zeta/runtime/headless.py, core provider seams, and browser/route tool modules.
+
+Risk: high. Import direction is a system-wide architecture constraint.
+
+Verify the exact import-boundary node and fresh-process imports for headless, core, route, and browser code.
+
+The test policy in harness/tests/test_import_boundaries.py:10-18,135-142 already forbids runtime -> tui. Decoupling is required for that case. The other reported imports are also forbidden by the test's buckets; no exception decision is open in this ladder. Any policy change belongs in a separate proposal, not this ladder. This lane may depend on lane 3.
+
+### appendix lane: realistic-eval calibration
+
+Scope only; do not investigate deeply in this triage. The queued calibrations are:
+
+- corpus-relative check path;
+- slot format tolerance;
+- case-insensitive calendar equality.
+
+Treat these as a later evaluation-data lane. First state the intended grading semantics, then update the smallest task or evaluator fixture. No live Jev or gateway calls are needed.
+
+## exact reproduction commands and outcomes
+
+The following commands were run during this triage.
+
+1. `uv run --project harness --frozen pytest --collect-only -q harness/tests/test_approval.py harness/tests/test_agent_integration.py harness/tests/test_automations_integration.py harness/tests/test_import_boundaries.py harness/tests/test_attachments.py harness/tests/test_cli.py harness/tests/test_composer_completion.py harness/tests/test_headless.py harness/tests/test_module_limits.py harness/tests/test_server.py harness/tests/test_slash.py harness/tests/test_steering.py`. Outcome: collection succeeded; 397 selected-file tests were collected.
+2. `uv run --project harness --frozen pytest -q --tb=short harness/tests/test_approval.py harness/tests/test_automations_integration.py harness/tests/test_import_boundaries.py harness/tests/test_attachments.py harness/tests/test_cli.py harness/tests/test_composer_completion.py harness/tests/test_module_limits.py harness/tests/test_slash.py harness/tests/test_steering.py`. Outcome: 13 failed, 162 passed, 1 warning. The 13 failures are the automation, import-boundary, attachment, completion, module-limit, slash, and steering nodes listed above.
+3. `uv run --project harness --frozen pytest -q --tb=short harness/src/zeta/tools/agent/tests/test_agent.py -k 'approval'`. Outcome: 6 failed, 2 passed, 88 deselected.
+4. `uv run --project harness --frozen pytest -q --tb=short harness/tests/test_server.py -k 'approval'`. Outcome: 1 failed, 10 passed, 189 deselected.
+5. `uv run --project harness --frozen pytest -q --tb=short --maxfail=1 harness/tests/test_headless.py::test_print_mode_runs_session_hook_inside_async_activation`. Outcome: 1 failed in 10.38 seconds because the embedded subprocess exceeded its 10-second timeout. The failure is in the auto-route path before the fake backend.
+6. `timeout 120s uv run --project harness --frozen pytest -q --tb=short harness/tests/test_headless.py::test_headless_hard_denies_argument_scoped_ask_rules`. Outcome: passed in 53.91 seconds. This was the only run of the required nondeterministic probe; it is known nondeterministic, not reproduced this run.
+7. `uv run --project router --frozen pytest -q --tb=short router/tests/test_evalset.py router/tests/test_phase2_data.py`. Outcome from the repository root: 6 failed, 4 passed. These are the two affected files; the same files from router/ pass because of cwd-dependent paths.
