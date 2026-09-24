@@ -1612,7 +1612,7 @@ def _emit_core(
                     else:
                         payload = value
                     record_sink = sink
-                    if isinstance(payload, str) and not isinstance(value, Path):
+                    if isinstance(payload, str):
                         record_sink.write(payload.rstrip("\r\n") + "\n")
                     else:
                         record_sink.write(
