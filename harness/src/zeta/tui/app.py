@@ -23,6 +23,9 @@ from rich.console import Console, RenderableType
 from rich.padding import Padding
 from rich.text import Text
 
+from ..config.settings import (
+    load_settings,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_settings
+)
 from ..core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRequest
 from ..core.project_context import (
     discover_repo_root,
@@ -36,16 +39,6 @@ from ..core.slash import (
     context_window,
     create_slash_registry,
 )
-from ..runtime.loop import AgentLoop
-from .persistence import DraftPersistence, history_for
-from ..providers.factory import build_backend as build_network_backend
-from ..runtime.cleanup import close_session
-from ..config.settings import (
-    load_settings,  # noqa: F401 — monkey-patched by tests via zeta.tui.app.load_settings
-)
-from ..submission.pipeline import SubmissionPipeline
-from ..tools._shared.user_discovery import ExternalToolDiscovery
-from ..tools.exec import trusted_macro_display
 from ..protocol.types import (
     CompletionBackend,
     Message,
@@ -55,6 +48,12 @@ from ..protocol.types import (
     ThinkingContent,
     assistant_text,
 )
+from ..runtime.backend import build_backend as build_runtime_backend
+from ..runtime.cleanup import close_session
+from ..runtime.loop import AgentLoop
+from ..submission.pipeline import SubmissionPipeline
+from ..tools._shared.user_discovery import ExternalToolDiscovery
+from ..tools.exec import trusted_macro_display
 from . import theme
 from .agent_card import AgentRunCommandMixin
 from .checkpoints import CheckpointTranscriptMixin
@@ -80,6 +79,7 @@ from .layout import (
 )
 from .models import MODEL_CATALOGS
 from .models import load_model_catalog as _load_model_catalog
+from .persistence import DraftPersistence, history_for
 from .render import (
     format_status,
     render_approval_card,
@@ -111,12 +111,9 @@ def build_backend(
     stall_seconds: float | None = None,
     stall_retries: int | None = None,
 ) -> tuple[CompletionBackend, str]:
-    """Build the selected provider without loading network credentials for fake."""
+    """Compatibility wrapper for the shared backend builder."""
 
-    if provider == "fake":
-        selected_model = model or "offline"
-        return FakeInteractiveBackend(model=selected_model), selected_model
-    return build_network_backend(
+    return build_runtime_backend(
         provider,
         model,
         home=home,

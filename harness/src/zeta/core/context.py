@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .store import ConversationEntry, ConversationStore
-from ..providers import jev
+from ..protocol import jev
 from ..protocol.types import (
     CompletionBackend,
     ContentBlock,

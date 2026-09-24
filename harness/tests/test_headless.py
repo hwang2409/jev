@@ -17,11 +17,11 @@ from zeta.core.approval import ApprovalDecision, ApprovalPolicy, ApprovalRule
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.session import SessionManager, env_home
 from zeta.core.store import ConversationStore
+from zeta.protocol.types import TextContent, ToolCall
 from zeta.runtime.headless import DENIAL_MARKER, drive_turn, run_headless
 from zeta.runtime.loop import AgentLoop
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.protocol.types import TextContent, ToolCall
 
 pytestmark = pytest.mark.usefixtures("stock_router_mode")
 
@@ -269,12 +269,13 @@ def test_headless_run_headless_hard_denies_always_ask_tools(
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured: list[Any] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         policy = app.approval_policy
         assert policy is not None
@@ -282,7 +283,7 @@ def test_headless_run_headless_hard_denies_always_ask_tools(
         captured.append(policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -315,18 +316,19 @@ def test_headless_respects_settings_yolo_without_cli_flag(
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
     assert args.yolo is None
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         assert app.approval_policy is not None
         captured_policies.append(app.approval_policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -357,18 +359,19 @@ def test_headless_no_yolo_flag_beats_settings_yolo(
     args = build_parser().parse_args(["--provider", "fake", "--no-yolo", "-p", "hi"])
     assert args.yolo is False
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         assert app.approval_policy is not None
         captured_policies.append(app.approval_policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()
@@ -400,12 +403,13 @@ def test_headless_hard_denies_argument_scoped_ask_rules(
     monkeypatch.chdir(tmp_path)
     args = build_parser().parse_args(["--provider", "fake", "-p", "hi"])
 
-    import zeta.tui.app as tui_app
+    import zeta.runtime.bootstrap as runtime_bootstrap
+    from zeta.runtime import headless
 
-    original_create_app = tui_app.create_app
+    original_create_app = runtime_bootstrap.create_headless_app
     captured_policies: list[ApprovalPolicy] = []
 
-    def _wrapped_create_app(parsed: argparse.Namespace) -> tui_app.TUIApp:
+    def _wrapped_create_app(parsed: argparse.Namespace) -> runtime_bootstrap.HeadlessApp:
         app = original_create_app(parsed)
         policy = app.approval_policy
         assert policy is not None
@@ -414,7 +418,7 @@ def test_headless_hard_denies_argument_scoped_ask_rules(
         captured_policies.append(policy)
         return app
 
-    monkeypatch.setattr(tui_app, "create_app", _wrapped_create_app)
+    monkeypatch.setattr(headless, "create_headless_app", _wrapped_create_app)
 
     code = run_headless(args, args.prompt)
     capsys.readouterr()

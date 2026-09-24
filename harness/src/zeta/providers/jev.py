@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import sys
+from dataclasses import asdict
 from typing import Any
 
 from jm.client import (
@@ -16,6 +17,18 @@ from jm.client import (
     runtime_preset,
 )
 
+from ..protocol.jev import (
+    AutoRouteResult,
+    BrowserElementChoiceResult,
+    BrowserPageStateResult,
+    JevRouterError,
+    MemoryRelevanceResult,
+    RouteResult,
+    SafetyScoreResult,
+    SearchResultScoreResult,
+    TriageResult,
+    register_provider,
+)
 from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 
 
@@ -144,101 +157,6 @@ _BROWSER_GATE_CRITERIA = {
         },
     },
 }
-
-
-class JevRouterError(RuntimeError):
-    """Raised when Jev cannot classify an agent step."""
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        status_code: int | None = None,
-        gate: str | None = None,
-    ) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.gate = gate
-
-
-@dataclass(frozen=True, slots=True)
-class RouteResult:
-    tool: str
-    probabilities: dict[str, float]
-    confidence: float
-    needs_tool: float
-    step_clarity: float
-    usage: dict[str, int]
-    call_confidence: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class AutoRouteResult:
-    tool: str
-    probabilities: dict[str, float]
-    confidence: float
-    needs_tool: float
-    usage: dict[str, int]
-    call_confidence: float | None = None
-    memory_relevance: dict[str, float] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class MemoryRelevanceResult:
-    scores: dict[str, float]
-    usage: dict[str, int]
-
-
-@dataclass(frozen=True, slots=True)
-class TriageResult:
-    keep_probabilities: dict[str, float]
-    usage: dict[str, int]
-    call_confidence: float | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class SafetyScoreResult:
-    score: int
-    probabilities: dict[str, float]
-    confidence: float
-    touches_outside_cwd: float
-    plausibly_irreversible: float
-    usage: dict[str, int]
-    call_confidence: float
-
-
-@dataclass(frozen=True, slots=True)
-class BrowserElementChoiceResult:
-    element_id: str | None
-    affordance: str | None
-    candidate_ids: tuple[str, ...]
-    probabilities: dict[str, float]
-    confidence: float
-    goal_element_present: float
-    page_loaded_and_stable: float
-    action_is_the_next_step: float
-    usage: dict[str, int]
-    call_confidence: float
-
-
-@dataclass(frozen=True, slots=True)
-class SearchResultScoreResult:
-    scores: dict[str, float]
-    confidence: float
-    usage: dict[str, int]
-    call_confidence: float
-
-
-@dataclass(frozen=True, slots=True)
-class BrowserPageStateResult:
-    page_loaded_and_stable: float
-    goal_element_present: float
-    action_is_the_next_step: float
-    action_succeeded: float | None
-    dead_end: float
-    needs_different_approach: float
-    usage: dict[str, int]
-    call_confidence: float
 
 
 def _element_description(item: dict[str, object]) -> str:
@@ -1239,6 +1157,9 @@ async def triage(
         recent_tool_actions=recent_tool_actions,
     )
     return parse_triage_response(await _evaluate(body), [item["id"] for item in items])
+
+
+register_provider(sys.modules[__name__])
 
 
 __all__ = [

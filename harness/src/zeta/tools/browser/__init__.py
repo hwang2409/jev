@@ -14,8 +14,8 @@ from ...core.safety import (
     SafetyOutcome,
     browser_action_requires_safety,
 )
+from ...protocol import jev
 from ...protocol.types import StructuredToolResult
-from ...providers import jev
 from ...routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block

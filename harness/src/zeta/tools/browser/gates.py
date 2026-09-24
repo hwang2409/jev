@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
-from zeta.providers import jev
+from ...protocol import jev
 
 PAGE_LOADED_AND_STABLE_THRESHOLD = 0.5
 GOAL_ELEMENT_PRESENT_THRESHOLD = 0.5
