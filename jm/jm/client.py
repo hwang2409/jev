@@ -4,6 +4,7 @@ import time as _time
 from collections.abc import Callable as _Callable
 from collections.abc import Mapping as _Mapping
 from dataclasses import replace as _replace
+from pathlib import Path as _Path
 from typing import TYPE_CHECKING as _TYPE_CHECKING
 from typing import Any as _Any
 
@@ -27,6 +28,20 @@ from .answers import (
 )
 from .answers import (
     score_legend_for_question as _score_legend_for_question,
+)
+from .cache import CacheStore
+from .runner import (
+    ConfigurationError,
+    EmitResult,
+    FormationEvent,
+    FormationReport,
+    InputError,
+    InputSidecar,
+    ResultFilter,
+    State,
+    emit,
+    judge,
+    judge_async,
 )
 
 if _TYPE_CHECKING:
@@ -330,6 +345,60 @@ def _successful_attempt(attempt: _Mapping[str, _Any]) -> bool:
     return True
 
 
+async def evaluate_async(
+    state: _Mapping[str, _Any],
+    questions: _Mapping[str, _Any],
+    *,
+    model: str = _GATEWAY_MODEL,
+) -> JevResponse:
+    """Evaluate one request through a short-lived async client."""
+
+    client = JevClient()
+    try:
+        return await client.evaluate_async(state, questions, model=model)
+    finally:
+        await client.aclose()
+
+
+def make_judge() -> tuple[_Callable[..., _Any], _Callable[[], None]]:
+    """Return a callable client and its close hook for legacy batch adapters."""
+
+    client = JevClient()
+    return client, client.close
+
+
+def runtime_preset(
+    questions: _Mapping[str, _Any], *, name: str = "harness"
+) -> _Any:
+    """Build a validated in-process preset for an arbitrary question battery."""
+
+    from .presets import Preset
+
+    data = {
+        "schema": "jm.preset/v1",
+        "name": name,
+        "version": "1",
+        "model": _GATEWAY_MODEL,
+        "chunking": {
+            "by": "file",
+            "limits": {
+                "focus_bytes": 65_536,
+                "context_field_bytes": 65_536,
+                "state_bytes": 131_072,
+            },
+        },
+        "compatible_chunkers": ["file"],
+        "questions": dict(questions),
+        "thresholds": {},
+        "output": {
+            "default_format": "jsonl",
+            "pretty_template": "{state_ref}",
+            "fields": ["record_type", "state_ref", "answers", "meta"],
+        },
+    }
+    return Preset(data, _Path("<runtime>"))
+
+
 def _normalize_usage(usage: _Any) -> dict[str, _Any] | None:
     if usage is None:
         return None
@@ -347,4 +416,23 @@ def _normalize_usage(usage: _Any) -> dict[str, _Any] | None:
     return {known.get(key, key): value for key, value in usage.items()}
 
 
-__all__ = ["JevClient", "JevError", "JevResponse"]
+__all__ = [
+    "ConfigurationError",
+    "CacheStore",
+    "EmitResult",
+    "FormationEvent",
+    "FormationReport",
+    "InputError",
+    "InputSidecar",
+    "JevClient",
+    "JevError",
+    "JevResponse",
+    "ResultFilter",
+    "State",
+    "emit",
+    "evaluate_async",
+    "judge",
+    "judge_async",
+    "make_judge",
+    "runtime_preset",
+]

@@ -6,7 +6,17 @@ import json
 from dataclasses import asdict, dataclass
 from typing import Any
 
-from jm.client import JevClient, JevError, JevResponse
+from jm.client import (
+    CacheStore,
+    FormationReport,
+    JevClient,
+    JevError,
+    JevResponse,
+    State,
+    judge_async,
+    runtime_preset,
+)
+from jm.client import evaluate_async as jm_evaluate_async
 
 from ..routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
 
@@ -157,6 +167,8 @@ _SEARCH_RESULT_SCORE_CRITERIA = [
     "The result is not relevant to the user goal.",
     "The result is relevant to the user goal.",
 ]
+
+_ORIGINAL_JEV_CLIENT = JevClient
 
 
 def _bounded_search_results(items: list[dict[str, str]]) -> list[dict[str, str]]:
@@ -942,7 +954,62 @@ async def auto_route(
 async def _evaluate(
     body: dict[str, Any], *, gate: str | None = None
 ) -> dict[str, Any]:
-    client = JevClient()
+    # Keep the old client only as a test seam for pre-v2 fakes. Production
+    # calls use the shared judge adapter below.
+    if JevClient is not _ORIGINAL_JEV_CLIENT:
+        return await _legacy_evaluate(body, gate=gate)
+
+    questions = body["questions"]
+    preset = runtime_preset(questions)
+    state = State(
+        "harness",
+        json.dumps(body["state"], ensure_ascii=False, sort_keys=True),
+    )
+
+    async def send(
+        _state: State, request_questions: dict[str, Any], model: str
+    ) -> JevResponse:
+        return await jm_evaluate_async(
+            body["state"], request_questions, model=model
+        )
+
+    records = [
+        record
+        async for record in judge_async(
+            preset,
+            (state,),
+            formation_report=FormationReport(),
+            cache_store=CacheStore(),
+            judge_fn=send,
+        )
+    ]
+    result = next(
+        (record for record in records if record.to_dict()["record_type"] == "result"),
+        None,
+    )
+    if result is None:
+        error = next(
+            (record for record in records if record.to_dict()["record_type"] == "error"),
+            None,
+        )
+        raise JevRouterError(
+            str(error.to_dict()["error"]) if error is not None else "Jev judgment failed",
+            gate=gate,
+        )
+    return {
+        "answers": {
+            question_id: asdict(answer)
+            for question_id, answer in result.answers.items()
+        },
+        "usage": dict(result.usage or {}),
+    }
+
+
+async def _legacy_evaluate(
+    body: dict[str, Any], *, gate: str | None = None
+) -> dict[str, Any]:
+    client_type = JevClient
+    client = client_type()
     try:
         response = await client.evaluate_async(
             body["state"], body["questions"]

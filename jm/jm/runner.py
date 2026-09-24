@@ -6,12 +6,20 @@ import math
 import re
 import string
 import time as _time
-from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import (
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field, replace
 from os import PathLike
+from pathlib import Path
 from threading import Lock
-from typing import Any, Protocol, TextIO
+from typing import Any, Literal, Protocol, TextIO
 from uuid import uuid4
 
 from ._transport import _GATEWAY_MODEL as GATEWAY_MODEL
@@ -36,7 +44,15 @@ from .answers import (
     TypedResponse,
 )
 from .cache import CACHE_SCHEMA, CacheStore, build_cache_preimage, cache_key
-from .gates import GateResult, Policy, PolicyError, compile_policy, evaluate_gate
+from .gates import (
+    GateResult,
+    Policy,
+    PolicyError,
+    compile_policy,
+    evaluate_gate,
+    evaluate_policy,
+    parse_policy,
+)
 from .presets import (
     SCHEMA_V2,
     Preset,
@@ -115,6 +131,107 @@ class StateInputError(ValueError):
     """A formed input cannot be judged safely."""
 
     exit_code = 2
+
+
+class ConfigurationError(ValueError):
+    """A preset or judgment option is invalid."""
+
+    exit_code = 64
+
+
+class InputError(ValueError):
+    """Input data cannot be judged safely."""
+
+    exit_code = 2
+
+
+@dataclass(frozen=True, slots=True)
+class FormationEvent:
+    kind: Literal["skip", "input_error"]
+    reason: Literal["scan_cap", "context_limit", "prefiltered", "input_error"]
+    message: str
+    state_ref: str | None
+    source_ref: str | None
+    boundary: str | None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"skip", "input_error"}:
+            raise ConfigurationError(f"unknown formation event kind: {self.kind}")
+        if self.reason not in {
+            "scan_cap",
+            "context_limit",
+            "prefiltered",
+            "input_error",
+        }:
+            raise ConfigurationError(f"unknown formation event reason: {self.reason}")
+        if self.kind == "skip":
+            if self.state_ref is None or self.reason == "input_error":
+                raise ConfigurationError("skip events require a state reference")
+        elif self.source_ref is None or self.state_ref is not None:
+            raise ConfigurationError(
+                "input_error events require a source reference only"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class FormationReport:
+    events: tuple[FormationEvent, ...] = ()
+    diagnostics: tuple[Diagnostic, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "events", tuple(self.events))
+        object.__setattr__(self, "diagnostics", tuple(self.diagnostics))
+        if any(not isinstance(event, FormationEvent) for event in self.events):
+            raise ConfigurationError("formation events must be typed records")
+        if any(not isinstance(item, Diagnostic) for item in self.diagnostics):
+            raise ConfigurationError("formation diagnostics must be typed records")
+
+
+@dataclass(frozen=True, slots=True)
+class ResultFilter:
+    kind: Literal["keep", "policy"]
+    question_id: str | None = None
+    operator: Literal["<", "<=", ">", ">=", "==", "!="] | None = None
+    threshold: float | int | None = None
+    expression: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind == "keep":
+            if (
+                not self.question_id
+                or self.operator != ">="
+                or isinstance(self.threshold, bool)
+                or not isinstance(self.threshold, (int, float))
+                or self.expression is not None
+            ):
+                raise ConfigurationError(
+                    "keep filters require question_id, operator >=, and threshold"
+                )
+        elif self.kind == "policy":
+            if not self.expression or any(
+                value is not None
+                for value in (self.question_id, self.operator, self.threshold)
+            ):
+                raise ConfigurationError(
+                    "policy filters require expression and no threshold fields"
+                )
+        else:
+            raise ConfigurationError(f"unknown result filter kind: {self.kind}")
+
+
+@dataclass(frozen=True, slots=True)
+class InputSidecar:
+    values: Mapping[str, Mapping[str, Any] | Path]
+
+
+@dataclass(frozen=True, slots=True)
+class EmitResult:
+    records_written: int
+    records_suppressed: int
+    diagnostics_written: int
+    coverage: CoverageRecord | None
+    passthrough: bool
+    broken_pipe: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -978,6 +1095,741 @@ class Runner:
         return self.run(states, questions, **kwargs)
 
 
+def judge(
+    preset: Preset | str,
+    states: Iterable[State],
+    *,
+    formation_report: FormationReport,
+    cache_store: CacheStore | None = None,
+    concurrency: int = 4,
+    judge_fn: JudgeFn | None = None,
+) -> Iterator[CanonicalRecord]:
+    """Return the pure judgment iterator."""
+
+    return _judge_impl(
+        preset,
+        states,
+        formation_report=formation_report,
+        cache_store=cache_store,
+        concurrency=concurrency,
+        judge_fn=judge_fn,
+    )
+
+
+def _judge_impl(
+    preset: Preset | str,
+    states: Iterable[State],
+    *,
+    formation_report: FormationReport,
+    cache_store: CacheStore | None = None,
+    concurrency: int = 4,
+    judge_fn: JudgeFn | None = None,
+    consistency: int | None = None,
+    consistency_sigma: float = 2.0,
+    ordered: bool = False,
+) -> Iterator[CanonicalRecord]:
+    """Yield typed judgment records without writing to process streams."""
+
+    loaded_preset = _public_preset(preset)
+    if (
+        isinstance(concurrency, bool)
+        or not isinstance(concurrency, int)
+        or concurrency <= 0
+    ):
+        raise ConfigurationError("concurrency must be a positive integer")
+    if not isinstance(formation_report, FormationReport):
+        raise ConfigurationError("formation_report must be a FormationReport")
+
+    # This function is intentionally a generator. The body starts only when
+    # the caller consumes the iterator, which keeps construction side-effect free.
+    state_values = tuple(states)
+    runtime_limits = StateLimits(**loaded_preset.chunking["limits"])
+    seen_refs: set[str] = set()
+    for state in state_values:
+        if not isinstance(state, State):
+            raise InputError("states must contain State values")
+        try:
+            validate_state(state, runtime_limits)
+        except (StateLimitError, TypeError, ValueError) as exc:
+            raise InputError(str(exc)) from exc
+        if state.state_ref in seen_refs:
+            raise InputError(f"duplicate state reference {state.state_ref!r}")
+        seen_refs.add(state.state_ref)
+
+    active_judge = judge_fn
+    client = None
+    if active_judge is None:
+        from .client import JevClient
+
+        client = JevClient()
+        active_judge = client
+
+    runtime_name = loaded_preset.name
+    runtime_version = loaded_preset.version
+    runtime_model = loaded_preset.model
+    runtime_chunker = loaded_preset.default_chunker
+    runtime_schema = loaded_preset.schema if loaded_preset.schema == SCHEMA_V2 else None
+    runtime_questions = loaded_preset.questions
+    runtime_chunking = dict(loaded_preset.chunking)
+    try:
+        _validate_consistency(consistency, consistency_sigma, runtime_questions)
+    except PresetUsageError as exc:
+        raise ConfigurationError(str(exc)) from exc
+    base_meta = RecordMeta(
+        runtime_name,
+        runtime_version,
+        runtime_model,
+        runtime_chunker,
+        "not_applicable",
+        preset_schema=runtime_schema,
+    )
+    diagnostics = list(formation_report.diagnostics)
+    effective_concurrency = min(concurrency, 8)
+    if concurrency > 8:
+        diagnostics.append(
+            Diagnostic(
+                "warning",
+                "concurrency_capped",
+                f"requested={concurrency} effective={effective_concurrency} cap=8",
+            )
+        )
+
+    state_records: list[CanonicalRecord] = []
+    formation_records = _formation_records(formation_report.events, base_meta)
+    reasons: set[str] = {
+        event.reason for event in formation_report.events
+    }
+    failed = 0
+
+    consistency_usage: dict[str, int | float] = {}
+    consistency_cache_hits = 0
+    consistency_live_calls = 0
+    consistency_stats_lock = Lock()
+
+    def records_for_state(
+        state: State,
+    ) -> ResultRecord | PartialResultRecord | ErrorRecord:
+        def one_call(call_state: State) -> tuple[TypedResponse, bool]:
+            preimage = None
+            if cache_store is not None:
+                preimage = build_cache_preimage(
+                    model=runtime_model,
+                    preset=runtime_name,
+                    preset_version=runtime_version,
+                    chunking=runtime_chunking,
+                    questions=runtime_questions,
+                    state=call_state,
+                    cache_schema=CACHE_SCHEMA,
+                    preset_schema=runtime_schema,
+                )
+                cached = cache_store.get(cache_key(preimage), runtime_questions)
+                if cached is not None:
+                    nonlocal consistency_cache_hits
+                    if consistency is not None:
+                        with consistency_stats_lock:
+                            consistency_cache_hits += 1
+                    return cached.response, True
+            response = _call_public_judge(
+                active_judge, call_state, runtime_questions, runtime_model
+            )
+            nonlocal consistency_live_calls
+            if consistency is not None:
+                with consistency_stats_lock:
+                    consistency_live_calls += 1
+            if (
+                cache_store is not None
+                and preimage is not None
+                and isinstance(response, JudgeResponse)
+                and response.complete
+            ):
+                try:
+                    cache_store.publish(preimage, response, usage=response.usage)
+                except (OSError, TypeError, ValueError):
+                    pass
+            return response, False
+
+        cache_state = "not_applicable"
+        if consistency is None:
+            response, cache_hit = one_call(state)
+            cache_state = (
+                "hit"
+                if cache_hit
+                else "miss"
+                if cache_store
+                else "not_applicable"
+            )
+        else:
+            responses: list[JudgeResponse] = []
+            failure: ErrorResponse | None = None
+            hits = 0
+            for _ in range(consistency):
+                response, cache_hit = one_call(_repeat_state(state))
+                hits += int(cache_hit)
+                if isinstance(response, JudgeResponse):
+                    _add_usage(consistency_usage, response.usage)
+                if failure is not None:
+                    continue
+                if not isinstance(response, JudgeResponse):
+                    failure = ErrorResponse("consistency repeat failed")
+                elif not _complete_for_questions(response, runtime_questions):
+                    failure = ErrorResponse(
+                        "consistency repeat returned incomplete answers"
+                    )
+                else:
+                    responses.append(response)
+            cache_state = (
+                "hit" if hits == consistency else "miss"
+            ) if cache_store is not None else "not_applicable"
+            if failure is not None:
+                response = failure
+            else:
+                try:
+                    response = _aggregate_responses(
+                        responses, runtime_questions, consistency
+                    )
+                except (TypeError, ValueError):
+                    response = ErrorResponse(
+                        "consistency repeat returned malformed answers"
+                    )
+        meta = replace(base_meta, cache=cache_state)
+        if isinstance(response, JudgeResponse) and response.served_model:
+            meta = replace(meta, served_model=response.served_model)
+        return _response_record(state.state_ref, response, meta)
+
+    try:
+        for diagnostic in diagnostics:
+            yield DiagnosticRecord(diagnostic)
+
+        if state_values:
+            with ThreadPoolExecutor(max_workers=effective_concurrency) as executor:
+                futures = {
+                    executor.submit(records_for_state, state): state
+                    for state in state_values
+                }
+                completed = as_completed(futures)
+                completed_records: dict[str, CanonicalRecord] = {}
+                for future in completed:
+                    try:
+                        record = future.result()
+                    except Exception:
+                        state = futures[future]
+                        record = _response_record(
+                            state.state_ref,
+                            ErrorResponse("request failed"),
+                            replace(base_meta, cache="not_applicable"),
+                        )
+                    completed_records[futures[future].state_ref] = record
+                    if not ordered:
+                        state_records.append(record)
+                        if isinstance(record, (ErrorRecord, PartialResultRecord)):
+                            failed += 1
+                        if isinstance(record, ErrorRecord):
+                            reasons.add(record.error.kind)
+                        elif isinstance(record, PartialResultRecord):
+                            reasons.add("partial_answer")
+                        yield record
+                if ordered:
+                    for state in state_values:
+                        record = completed_records[state.state_ref]
+                        state_records.append(record)
+                        if isinstance(record, (ErrorRecord, PartialResultRecord)):
+                            failed += 1
+                        if isinstance(record, ErrorRecord):
+                            reasons.add(record.error.kind)
+                        elif isinstance(record, PartialResultRecord):
+                            reasons.add("partial_answer")
+                        yield record
+
+        yield from formation_records
+        if consistency is not None:
+            yield DiagnosticRecord(
+                Diagnostic(
+                    "info",
+                    "consistency",
+                    f"{len(state_values)} states * {consistency} = "
+                    f"{len(state_values) * consistency} attempted calls; "
+                    f"cache hits: {consistency_cache_hits}; "
+                    f"live calls: {consistency_live_calls}; "
+                    "total normalized token usage: "
+                    f"{json.dumps(consistency_usage, sort_keys=True)}",
+                )
+            )
+
+        skipped = sum(event.kind == "skip" for event in formation_report.events)
+        discovered = len(state_values) + skipped
+        judged = len(state_records)
+        ordered_reasons = tuple(
+            reason
+            for reason in (
+                "prefiltered",
+                "scan_cap",
+                "input_error",
+                "context_limit",
+                "api_error",
+                "malformed_answer",
+                "partial_answer",
+            )
+            if reason in reasons
+        )
+        coverage = "partial" if ordered_reasons else "complete"
+        coverage_meta = replace(base_meta, cache="not_applicable")
+        yield CoverageRecord(
+            coverage=coverage,
+            coverage_counts={
+                "discovered": discovered,
+                "judged": judged,
+                "emitted": judged,
+                "skipped": skipped,
+                "failed": failed,
+            },
+            coverage_reasons=ordered_reasons,
+            meta=coverage_meta,
+        )
+    finally:
+        if client is not None:
+            client.close()
+
+
+def judge_async(
+    preset: Preset | str,
+    states: Iterable[State],
+    *,
+    formation_report: FormationReport,
+    cache_store: CacheStore | None = None,
+    concurrency: int = 4,
+    judge_fn: JudgeFn | None = None,
+) -> AsyncIterator[CanonicalRecord]:
+    """Adapt the synchronous judgment iterator to async callers."""
+
+    async def stream() -> AsyncIterator[CanonicalRecord]:
+        import asyncio
+        import inspect
+        import queue
+        import threading
+
+        active_judge_fn = judge_fn
+        if active_judge_fn is not None and inspect.iscoroutinefunction(
+            active_judge_fn
+        ):
+            async_fn = active_judge_fn
+
+            def sync_judge(
+                state: State, questions: Mapping[str, Any], model: str
+            ) -> TypedResponse:
+                return asyncio.run(async_fn(state, questions, model))
+
+            active_judge_fn = sync_judge
+
+        sentinel = object()
+        records: queue.Queue[object] = queue.Queue()
+
+        def produce() -> None:
+            try:
+                for record in judge(
+                    preset,
+                    states,
+                    formation_report=formation_report,
+                    cache_store=cache_store,
+                    concurrency=concurrency,
+                    judge_fn=active_judge_fn,
+                ):
+                    records.put(record)
+            except BaseException as exc:
+                records.put(exc)
+            finally:
+                records.put(sentinel)
+
+        threading.Thread(target=produce, daemon=True).start()
+        while True:
+            item = await asyncio.to_thread(records.get)
+            if item is sentinel:
+                return
+            if isinstance(item, BaseException):
+                raise item
+            yield item  # type: ignore[misc]
+
+    return stream()
+
+
+def emit(
+    records: Iterable[CanonicalRecord],
+    *,
+    format: Literal["jsonl", "pretty"] = "jsonl",
+    emit_mode: Literal["judgment", "input"] = "judgment",
+    jsonl_stream: TextIO,
+    pretty_stream: TextIO,
+    output_path: Path | None = None,
+    result_filter: ResultFilter | None = None,
+    input_sidecar: InputSidecar | None = None,
+    pretty_template: str | None = None,
+) -> EmitResult:
+    """Render canonical records. This is the only judgment output writer."""
+
+    if format not in {"jsonl", "pretty"}:
+        raise ConfigurationError("format must be jsonl or pretty")
+    if emit_mode not in {"judgment", "input"}:
+        raise ConfigurationError("emit_mode must be judgment or input")
+    if emit_mode == "input" and input_sidecar is None:
+        raise ConfigurationError("input_sidecar is required for input emission")
+    if result_filter is not None and not isinstance(result_filter, ResultFilter):
+        raise ConfigurationError("result_filter must be a ResultFilter")
+    compiled_filter_policy = None
+    if result_filter is not None and result_filter.kind == "policy":
+        try:
+            compiled_filter_policy = parse_policy(result_filter.expression or "")
+        except PolicyError as exc:
+            raise ConfigurationError(str(exc)) from exc
+
+    sink = jsonl_stream
+    close_sink = False
+    if output_path is not None:
+        sink = output_path.open("w", encoding="utf-8")
+        close_sink = True
+    records_written = 0
+    records_suppressed = 0
+    diagnostics_written = 0
+    coverage: CoverageRecord | None = None
+    pending_diagnostics: list[Diagnostic] = []
+    has_prefilter_warning = False
+    try:
+        for record in records:
+            try:
+                if isinstance(record, DiagnosticRecord):
+                    pending_diagnostics.append(record.diagnostic)
+                    has_prefilter_warning |= (
+                        record.diagnostic.code == "prefilter_recall"
+                    )
+                    continue
+                if isinstance(record, CoverageRecord):
+                    coverage = record
+                visible = _record_visible(record, result_filter, compiled_filter_policy)
+                if isinstance(record, ResultRecord) and not visible:
+                    records_suppressed += 1
+                    continue
+                if emit_mode == "input" and isinstance(record, ResultRecord):
+                    assert input_sidecar is not None
+                    value = input_sidecar.values.get(record.state_ref)
+                    if value is None:
+                        raise ConfigurationError(
+                            f"input sidecar has no state {record.state_ref!r}"
+                        )
+                    payload: Any = str(value) if isinstance(value, Path) else value
+                    record_sink = sink
+                    record_sink.write(
+                        json.dumps(
+                            payload,
+                            ensure_ascii=False,
+                            sort_keys=isinstance(payload, Mapping),
+                            separators=(",", ":")
+                            if isinstance(payload, Mapping)
+                            else None,
+                        )
+                        + "\n"
+                    )
+                else:
+                    record_sink = (
+                        pretty_stream
+                        if emit_mode == "input"
+                        and isinstance(record, (ErrorRecord, CoverageRecord))
+                        else sink
+                    )
+                    record_sink.write(
+                        json.dumps(
+                            record.to_dict(),
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        + "\n"
+                    )
+                record_sink.flush()
+                for diagnostic in pending_diagnostics:
+                    _emit_diagnostic(diagnostic, pretty_stream)
+                    diagnostics_written += 1
+                pending_diagnostics.clear()
+                records_written += 1
+                if (
+                    isinstance(record, ErrorRecord)
+                    and record.state_ref is None
+                    and record.error.kind != "prefiltered"
+                ):
+                    pretty_stream.write(f"jm: warning: {record.error.message}\n")
+                    pretty_stream.flush()
+                if (
+                    isinstance(record, CoverageRecord)
+                    and record.coverage == "partial"
+                    and not has_prefilter_warning
+                ):
+                    pretty_stream.write(
+                        "jm: warning: results are partial; coverage reasons: "
+                        f"{', '.join(record.coverage_reasons)}\n"
+                    )
+                    pretty_stream.flush()
+                if (
+                    format == "pretty"
+                    and isinstance(record, ResultRecord)
+                    and emit_mode == "judgment"
+                ):
+                    emit_pretty(record, pretty_stream, pretty_template)
+            except BrokenPipeError:
+                try:
+                    sink.close()
+                except OSError:
+                    pass
+                return EmitResult(
+                    records_written,
+                    records_suppressed,
+                    diagnostics_written,
+                    None,
+                    emit_mode == "input",
+                    True,
+                )
+    finally:
+        if close_sink:
+            sink.close()
+    for diagnostic in pending_diagnostics:
+        _emit_diagnostic(diagnostic, pretty_stream)
+        diagnostics_written += 1
+    return EmitResult(
+        records_written,
+        records_suppressed,
+        diagnostics_written,
+        coverage,
+        emit_mode == "input",
+        False,
+    )
+
+
+def _public_preset(preset: Preset | str) -> Preset:
+    try:
+        if isinstance(preset, Preset):
+            if preset.path == Path("<runtime>"):
+                return preset
+            return Preset(validate_preset(preset.data), preset.path)
+        if not isinstance(preset, str):
+            raise ConfigurationError("preset must be a Preset or name")
+        return Runner._load_preset(preset)  # type: ignore[return-value]
+    except ConfigurationError:
+        raise
+    except Exception as exc:
+        raise ConfigurationError(str(exc)) from exc
+
+
+def _call_public_judge(
+    judge_fn: JudgeFn,
+    state: State,
+    questions: Mapping[str, Any],
+    model: str,
+) -> TypedResponse:
+    try:
+        response = judge_fn(state, questions, model)
+    except Exception:
+        return ErrorResponse("request failed")
+    if isinstance(response, (JudgeResponse, ErrorResponse)):
+        return response
+    return ErrorResponse("malformed answer")
+
+
+def _formation_records(
+    events: Sequence[FormationEvent], meta: RecordMeta
+) -> tuple[ErrorRecord, ...]:
+    grouped: dict[tuple[str, str], list[FormationEvent]] = {}
+    order: list[tuple[str, str] | FormationEvent] = []
+    for event in events:
+        if event.kind == "input_error":
+            order.append(event)
+            continue
+        key = (event.reason, event.boundary or event.reason)
+        if key not in grouped:
+            grouped[key] = []
+            order.append(key)
+        grouped[key].append(event)
+    error_meta = replace(meta, cache="not_applicable")
+    result: list[ErrorRecord] = []
+    for item in order:
+        if isinstance(item, FormationEvent):
+            result.append(
+                ErrorRecord(
+                    None,
+                    ErrorDetail("input_error", item.message),
+                    error_meta,
+                    source_ref=item.source_ref,
+                )
+            )
+            continue
+        reason, boundary = item
+        grouped_events = grouped[item]
+        result.append(
+            ErrorRecord(
+                None,
+                ErrorDetail(
+                    reason,  # type: ignore[arg-type]
+                    grouped_events[0].message,
+                    skip_summary=SkipSummary(
+                        boundary,
+                        len(grouped_events),
+                        tuple(
+                            event.state_ref
+                            for event in grouped_events
+                            if event.state_ref is not None
+                        ),
+                    ),
+                ),
+                error_meta,
+            )
+        )
+    return tuple(result)
+
+
+def _admit_for_judgment(
+    states: tuple[State, ...],
+    rejections: tuple[StateRejection, ...],
+    *,
+    max_chunks: int | None,
+    prefilter: Mapping[str, object] | None,
+) -> StateAdmission:
+    if prefilter is None:
+        return admit_states(states, max_chunks, rejections)
+    _validate_runtime_prefilter(prefilter)
+    return _admit_prefiltered_states(
+        states,
+        top=prefilter["top"],  # type: ignore[arg-type]
+        max_chunks=max_chunks,
+        rejections=rejections,
+        query=prefilter["query"],  # type: ignore[arg-type]
+        fields=prefilter["fields"],  # type: ignore[arg-type]
+    )
+
+
+def _duplicate_state_ref(states: tuple[State, ...]) -> str | None:
+    seen: set[str] = set()
+    for state in states:
+        if state.state_ref in seen:
+            return state.state_ref
+        seen.add(state.state_ref)
+    return None
+
+
+def _formation_report(
+    admission: StateAdmission,
+    *,
+    include_prefilter_warning: bool,
+) -> FormationReport:
+    events: list[FormationEvent] = []
+    for rejection in admission.rejections:
+        if rejection.reason == "input_error":
+            events.append(
+                FormationEvent(
+                    "input_error",
+                    "input_error",
+                    rejection.message,
+                    None,
+                    rejection.source_ref,
+                    rejection.boundary,
+                )
+            )
+        elif rejection.state_ref is not None:
+            events.append(
+                FormationEvent(
+                    "skip",
+                    rejection.reason,
+                    rejection.message,
+                    rejection.state_ref,
+                    rejection.source_ref,
+                    rejection.boundary,
+                )
+            )
+    if admission.skip_rejections:
+        for rejection in admission.skip_rejections:
+            events.append(
+                FormationEvent(
+                    "skip",
+                    rejection.reason,
+                    rejection.message,
+                    rejection.state_ref,
+                    rejection.source_ref,
+                    rejection.boundary,
+                )
+            )
+    elif admission.skipped and admission.max_chunks is not None:
+        events.extend(
+            FormationEvent(
+                "skip",
+                "scan_cap",
+                "scan cap reached before visit",
+                state.state_ref,
+                None,
+                f"max_chunks={admission.max_chunks}",
+            )
+            for state in admission.skipped
+        )
+    diagnostics: list[Diagnostic] = []
+    if include_prefilter_warning:
+        count = sum(
+            rejection.reason == "prefiltered"
+            for rejection in admission.skip_rejections
+        )
+        if count:
+            diagnostics.append(
+                Diagnostic(
+                    "warning",
+                    "prefilter_recall",
+                    f"BM25 prefilter skipped {count} of {admission.discovered} states; "
+                    "recall is bounded by the shortlist; rerun without "
+                    "--prefilter for full recall",
+                )
+            )
+    if not admission.formed and not events:
+        events.append(
+            FormationEvent(
+                "input_error",
+                "input_error",
+                "input is empty",
+                None,
+                "stdin:byte=0,line=1",
+                None,
+            )
+        )
+    return FormationReport(tuple(events), tuple(diagnostics))
+
+
+def _record_visible(
+    record: CanonicalRecord,
+    result_filter: ResultFilter | None,
+    policy: Policy | None = None,
+) -> bool:
+    if not isinstance(record, ResultRecord) or result_filter is None:
+        return True
+    if result_filter.kind == "policy":
+        if policy is None:
+            return False
+        try:
+            return evaluate_policy(policy, [record])
+        except PolicyError as exc:
+            raise ConfigurationError(str(exc)) from exc
+    answer = record.answers.get(result_filter.question_id or "")
+    value = getattr(answer, "noul", None)
+    if value is None:
+        value = getattr(answer, "score", None)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return False
+    return value >= result_filter.threshold  # type: ignore[operator]
+
+
+def _emit_diagnostic(diagnostic: Diagnostic, stream: TextIO) -> None:
+    if diagnostic.code == "prefilter_recall":
+        stream.write(f"jm: warning: {diagnostic.message}\n")
+    elif diagnostic.code == "consistency":
+        stream.write(f"jm: consistency: {diagnostic.message}\n")
+    else:
+        stream.write(
+            "jm: diagnostic: "
+            f"code={diagnostic.code} severity={diagnostic.severity} "
+            f"{diagnostic.message}\n"
+        )
+    stream.flush()
+
+
 def _validate_consistency(
     consistency: int | None,
     sigma: float,
@@ -1291,9 +2143,20 @@ def _response_record(
             meta,
         )
     if response.complete:
-        return ResultRecord(state_ref, response.answers, meta)
+        return ResultRecord(
+            state_ref,
+            response.answers,
+            meta,
+            usage=response.usage,
+            latency_ms=response.latency_ms,
+        )
     return PartialResultRecord(
-        state_ref, response.answers, response.missing_questions, meta
+        state_ref,
+        response.answers,
+        response.missing_questions,
+        meta,
+        usage=response.usage,
+        latency_ms=response.latency_ms,
     )
 
 

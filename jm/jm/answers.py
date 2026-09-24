@@ -216,6 +216,8 @@ class ResultRecord:
     state_ref: str
     answers: Mapping[str, Answer]
     meta: RecordMeta
+    usage: Mapping[str, Any] | None = None
+    latency_ms: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -232,6 +234,8 @@ class PartialResultRecord:
     answers: Mapping[str, Answer]
     missing_questions: tuple[str, ...]
     meta: RecordMeta
+    usage: Mapping[str, Any] | None = None
+    latency_ms: int | None = None
 
     def __post_init__(self) -> None:
         if not self.missing_questions:
