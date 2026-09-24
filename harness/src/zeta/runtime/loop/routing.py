@@ -34,7 +34,7 @@ from . import (
 )
 
 if TYPE_CHECKING:
-    from ..tools.browser.catalog import BrowserCatalog
+    from ...tools.browser.catalog import BrowserCatalog
 
 
 class RoutingMixin:

@@ -140,3 +140,14 @@ def test_import_boundaries() -> None:
         for violation in _forbidden_imports(file_path)
     ]
     assert not violations, "\n".join(violations)
+
+
+def test_runtime_loop_preserves_legacy_exports() -> None:
+    from zeta.loop import (
+        RoutingSchemaContent as legacy_routing_schema_content,
+        ToolStreamPublisher as legacy_tool_stream_publisher,
+    )
+    from zeta.runtime.loop import RoutingSchemaContent, ToolStreamPublisher
+
+    assert legacy_routing_schema_content is RoutingSchemaContent
+    assert legacy_tool_stream_publisher is ToolStreamPublisher

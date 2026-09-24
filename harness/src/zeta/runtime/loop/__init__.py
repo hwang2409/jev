@@ -4,15 +4,31 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json  # noqa: F401 - preserve the legacy module surface
 import logging
 import os
 import shlex
+import warnings  # noqa: F401 - preserve the legacy module surface
 from collections import deque
-from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from dataclasses import replace
+from collections.abc import (  # noqa: F401 - preserve the legacy module surface
+    AsyncIterator,
+    Callable,
+    Coroutine,
+    Mapping,
+    Sequence,
+)
+from dataclasses import (  # noqa: F401 - preserve the legacy module surface
+    asdict,
+    replace,
+)
+from datetime import UTC, datetime  # noqa: F401 - preserve the legacy module surface
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import (  # noqa: F401 - preserve the legacy module surface
+    TYPE_CHECKING,
+    Any,
+    TypeVar,
+)
 
 import httpx
 
@@ -32,9 +48,21 @@ from ...agent.plan_mode import (
 from ...agent.presets import (
     compose_system_prompt,
 )
+from ...agent.receipt import (  # noqa: F401 - preserve the legacy module surface
+    MAX_AGENT_RESULT_BYTES,
+    TerminalState,
+    finalize_agent_results,
+    terminal_state,
+)
+from ...agent.runner import (
+    run_agent_tool,  # noqa: F401 - preserve the legacy module surface
+)
 from ...core.abort import AbortSignal as ToolAbortSignal
 from ...core.approval import ApprovalPolicy
-from ...core.context import ContextAssembler
+from ...core.context import (  # noqa: F401 - preserve the legacy module surface
+    MEMORY_INJECTION_PREFIX,
+    ContextAssembler,
+)
 from ...core.hooks import HookManager
 from ...core.store import ConversationStore
 from ...core.tool_dispatch import dispatch_tool_calls
@@ -60,15 +88,19 @@ from ...mcp.commands import (
 )
 from ...mcp.prompt_commands import SlashModelInput
 from ...prompts import load_identity
-from ...protocol.types import (
+from ...protocol.types import (  # noqa: F401 - preserve the legacy module surface
+    FAILED_TURN_ERROR,
+    FAILED_TURN_MARKER,
     CompletionBackend,
     ContentBlock,
     ErrorInfo,
     Message,
     MessageRole,
+    RoutingSchemaContent,
     StreamEvent,
     StreamEventType,
     TextContent,
+    ThinkingContent,
     ToolCall,
     ToolResult,
     ToolSchema,
@@ -79,11 +111,23 @@ from ...providers.jev import auto_route as auto_route
 from ...providers.jev import memory_relevance as memory_relevance
 from ...skills import SkillCatalog
 from ...skills.agent_catalog import AgentCatalog
-from ...tools import ToolHandler, ToolRegistry
+from ...tools import (  # noqa: F401 - preserve the legacy module surface
+    ToolHandler,
+    ToolRegistry,
+    ToolStreamPublisher,
+)
+from ...tools.agent import (
+    agent_result,  # noqa: F401 - preserve the legacy module surface
+)
 from ...tools.memory import _memory_search as _memory_search
-from ...tools.registry import (
+from ...tools.registry import (  # noqa: F401 - preserve the legacy module surface
+    ToolExecutionContext,
     _validate_unique_tool_call_ids,
     validate_tool_result,
+)
+from ...tools.route import (  # noqa: F401 - preserve the legacy module surface
+    ROUTE_TOPK_CONFIDENCE,
+    build_catalog,
 )
 from ..tool_setup import select_tool_registry
 
@@ -1136,3 +1180,21 @@ class AgentLoop(RoutingMixin, AgentChildMixin, PersistenceMixin):
             error=ErrorInfo("max_turns", f"maximum turns reached: {self.max_turns}"),
         )
         yield StreamEvent(StreamEventType.AGENT_END)
+
+
+_LEGACY_EXPORT_EXCLUSIONS = frozenset(
+    {
+        "annotations",
+        "agent",
+        "persistence",
+        "routing",
+        "AgentChildMixin",
+        "PersistenceMixin",
+        "RoutingMixin",
+    }
+)
+__all__ = [
+    name
+    for name in globals()
+    if not name.startswith("_") and name not in _LEGACY_EXPORT_EXCLUSIONS
+]
