@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json as _json
 import time as _time
 from collections.abc import Callable as _Callable
 from collections.abc import Mapping as _Mapping
+from dataclasses import dataclass as _dataclass
 from dataclasses import replace as _replace
 from pathlib import Path as _Path
 from typing import TYPE_CHECKING as _TYPE_CHECKING
@@ -12,6 +14,7 @@ from ._transport import (
     _GATEWAY_MODEL,
     _GatewayTransport,
     _resolve_gateway_key,
+    _transport_identity,
     _TransportResponse,
 )
 from .answers import (
@@ -75,15 +78,43 @@ class JevError(RuntimeError):
 JevResponse = _JudgeResponse
 
 
+@_dataclass(frozen=True, slots=True)
+class CanonicalRequest:
+    payload: dict[str, _Any]
+    request_bytes: bytes
+    transport_identity: dict[str, str]
+
+
+def build_canonical_request(
+    state: _State | _Mapping[str, _Any],
+    questions: _Mapping[str, _Any],
+    *,
+    model: str = _GATEWAY_MODEL,
+) -> CanonicalRequest:
+    """Build the one request object used for sends and cache keys."""
+    _validate_model(model)
+    if isinstance(state, _Mapping):
+        state_payload = dict(state)
+    else:
+        state_payload = state.api_payload
+    payload = {
+        "providerOptions": {"gateway": {"zeroDataRetention": True}},
+        "state": state_payload,
+        "questions": _gateway_questions(questions),
+    }
+    request_bytes = _json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return CanonicalRequest(payload, request_bytes, _transport_identity(model))
+
+
 class JevClient:
     """Synchronous and asynchronous client for the Jev evaluation service."""
 
     def __init__(self, *, _transport: _GatewayTransport | None = None) -> None:
         self._transport = _transport or _GatewayTransport()
 
-    def set_response_observer(
-        self, observer: _Callable[[int], None] | None
-    ) -> None:
+    def set_response_observer(self, observer: _Callable[[int], None] | None) -> None:
         self._transport.set_response_observer(observer)
 
     def evaluate(
@@ -95,9 +126,11 @@ class JevClient:
     ) -> JevResponse:
         _validate_model(model)
         api_key = _require_gateway_key()
-        payload = _request_payload(state, questions)
+        request = build_canonical_request(state, questions, model=model)
         started = _time.monotonic()
-        response, attempts = self._transport.post(payload, api_key, model=model)
+        response, attempts = self._transport.post(
+            request.request_bytes, api_key, model=model
+        )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
 
@@ -106,7 +139,7 @@ class JevClient:
             return parsed
 
         response, retry_attempts = self._transport.post(
-            payload, api_key, attempts, model=model
+            request.request_bytes, api_key, attempts, model=model
         )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
@@ -121,10 +154,10 @@ class JevClient:
     ) -> JevResponse:
         _validate_model(model)
         api_key = _require_gateway_key()
-        payload = _request_payload(state, questions)
+        request = build_canonical_request(state, questions, model=model)
         started = _time.monotonic()
         response, attempts = await self._transport.apost(
-            payload, api_key, model=model
+            request.request_bytes, api_key, model=model
         )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
@@ -134,7 +167,7 @@ class JevClient:
             return parsed
 
         response, retry_attempts = await self._transport.apost(
-            payload, api_key, attempts, model=model
+            request.request_bytes, api_key, attempts, model=model
         )
         if isinstance(response, _ErrorResponse):
             raise _as_jev_error(response)
@@ -233,15 +266,7 @@ def _as_jev_error(response: _ErrorResponse) -> JevError:
 def _request_payload(
     state: _State | _Mapping[str, _Any], questions: _Mapping[str, _Any]
 ) -> dict[str, _Any]:
-    if isinstance(state, _Mapping):
-        state_payload = dict(state)
-    else:
-        state_payload = state.api_payload
-    return {
-        "providerOptions": {"gateway": {"zeroDataRetention": True}},
-        "state": state_payload,
-        "questions": _gateway_questions(questions),
-    }
+    return build_canonical_request(state, questions).payload
 
 
 def _gateway_questions(questions: _Mapping[str, _Any]) -> dict[str, _Any]:
@@ -265,9 +290,7 @@ def _normalize_gateway_response(
     normalized_answers: dict[str, _Any] = {}
     for question_id, raw_answer in answers.items():
         question = questions.get(question_id)
-        question_type = (
-            question.get("type") if isinstance(question, _Mapping) else None
-        )
+        question_type = question.get("type") if isinstance(question, _Mapping) else None
         if question_type == "noul":
             if not isinstance(raw_answer, _Mapping):
                 raise ValueError("boolean answer must be an object")
@@ -367,9 +390,7 @@ def make_judge() -> tuple[_Callable[..., _Any], _Callable[[], None]]:
     return client, client.close
 
 
-def runtime_preset(
-    questions: _Mapping[str, _Any], *, name: str = "harness"
-) -> _Any:
+def runtime_preset(questions: _Mapping[str, _Any], *, name: str = "harness") -> _Any:
     """Build a validated in-process preset for an arbitrary question battery."""
 
     from .presets import Preset

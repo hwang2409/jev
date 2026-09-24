@@ -6,7 +6,6 @@ import random as _random
 import re as _re
 import time as _time
 from collections.abc import Callable as _Callable
-from collections.abc import Mapping as _Mapping
 from dataclasses import dataclass as _dataclass
 from datetime import UTC as _UTC
 from email.utils import parsedate_to_datetime as _parsedate_to_datetime
@@ -80,9 +79,7 @@ class _GatewayTransport:
         self.backoff_base = backoff_base
         self._response_observer: _Callable[[int], None] | None = None
 
-    def set_response_observer(
-        self, observer: _Callable[[int], None] | None
-    ) -> None:
+    def set_response_observer(self, observer: _Callable[[int], None] | None) -> None:
         self._response_observer = observer
 
     def _observe_response(self, status_code: int) -> None:
@@ -91,7 +88,7 @@ class _GatewayTransport:
 
     def post(
         self,
-        payload: _Mapping[str, _Any],
+        payload: bytes | dict[str, _Any],
         api_key: str,
         attempts_used: int = 0,
         *,
@@ -104,12 +101,17 @@ class _GatewayTransport:
         while attempts < self.max_attempts:
             attempts += 1
             try:
+                request_options = (
+                    {"content": payload}
+                    if isinstance(payload, bytes)
+                    else {"json": payload}
+                )
                 with self._http_client.stream(
                     "POST",
                     _GATEWAY_ENDPOINT,
                     headers=headers,
-                    json=payload,
                     timeout=self.timeout,
+                    **request_options,
                 ) as response:
                     self._observe_response(response.status_code)
                     if response.status_code in _RETRYABLE_STATUSES:
@@ -141,7 +143,7 @@ class _GatewayTransport:
 
     async def apost(
         self,
-        payload: _Mapping[str, _Any],
+        payload: bytes | dict[str, _Any],
         api_key: str,
         attempts_used: int = 0,
         *,
@@ -156,11 +158,16 @@ class _GatewayTransport:
         while attempts < self.max_attempts:
             attempts += 1
             try:
+                request_options = (
+                    {"content": payload}
+                    if isinstance(payload, bytes)
+                    else {"json": payload}
+                )
                 response = await self._async_http_client.post(
                     _GATEWAY_ENDPOINT,
                     headers=headers,
-                    json=payload,
                     timeout=self.timeout,
+                    **request_options,
                 )
                 self._observe_response(response.status_code)
                 if response.status_code in _RETRYABLE_STATUSES:
@@ -214,6 +221,16 @@ async def _async_sleep(delay: float) -> None:
     await asyncio.sleep(delay)
 
 
+def _transport_identity(model: str) -> dict[str, str]:
+    return {
+        "endpoint": _GATEWAY_ENDPOINT,
+        "ai-evaluation-model-specification-version": "4",
+        "ai-gateway-auth-method": "api-key",
+        "ai-gateway-protocol-version": "0.0.1",
+        "ai-model-id": model,
+    }
+
+
 def _request_headers(api_key: str, model: str) -> dict[str, str]:
     return {
         "Authorization": f"Bearer {api_key}",
@@ -242,9 +259,7 @@ def _resolve_gateway_key() -> str | None:
     return None
 
 
-def _read_response(
-    response: _httpx.Response, max_response_bytes: int
-) -> bytes | None:
+def _read_response(response: _httpx.Response, max_response_bytes: int) -> bytes | None:
     content_length = response.headers.get("Content-Length")
     if content_length is not None:
         try:

@@ -83,7 +83,7 @@ def test_v3_raw_state_preserves_ref_and_context(tmp_path: Path) -> None:
         '{"state_ref":"case-17","focus":"evidence","context":{"heading":"release"}}\n',
         "--param",
         "query=launch",
-        judge_fn=lambda state, *_args: (calls.append(state) or _answer()),
+        judge_fn=lambda state, *_args: calls.append(state) or _answer(),
     )
 
     assert code == 0
@@ -135,7 +135,7 @@ def test_v3_duplicate_refs_fail_before_judge_or_cache(tmp_path: Path) -> None:
         '{"state_ref":"same","focus":"two","context":{}}\n',
         "--param",
         "query=q",
-        judge_fn=lambda *args: (calls.append(args) or _answer()),
+        judge_fn=lambda *args: calls.append(args) or _answer(),
         cache_store=cache,
     )
 
@@ -198,9 +198,7 @@ def test_v3_alias_duplicates_fail_before_judge_or_cache(
     monkeypatch.setattr(
         cache,
         "publish",
-        lambda *args, **kwargs: cache_calls.append(
-            ("publish", args, kwargs)
-        ),
+        lambda *args, **kwargs: cache_calls.append(("publish", args, kwargs)),
     )
 
     code, records, stderr = _invoke(
@@ -256,7 +254,7 @@ def test_v3_cache_projection_includes_declared_context_only() -> None:
 
     assert cache_key(base) == cache_key(ignored_change)
     assert cache_key(base) != cache_key(declared_change)
-    assert base["state"]["context"] == {"query": "one"}
+    assert base["wire_request"]["state"]["context"] == {"query": "one"}
 
 
 def test_v3_preset_requires_the_parameter_block(tmp_path: Path) -> None:

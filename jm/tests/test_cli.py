@@ -121,8 +121,7 @@ def test_state_input_rejects_invalid_utf8_and_keeps_valid_lines(tmp_path: Path) 
     assert code == 2
     assert {record.get("state_ref") for record in records} >= {"first", "last"}
     assert any(
-        record.get("error", {}).get("kind") == "input_error"
-        for record in records
+        record.get("error", {}).get("kind") == "input_error" for record in records
     )
     assert records[-1]["coverage"] == "partial"
     assert records[-1]["coverage_counts"] == {
@@ -147,9 +146,7 @@ def test_v3_raw_state_unavailable_field_emits_warning_and_continues(
     stderr = io.StringIO()
     code = main(
         ["run", "--preset", str(preset), "--by", "state", "--param", "query=needle"],
-        stdin=io.StringIO(
-            '{"state_ref":"case-1","focus":"ok","context":{}}\n'
-        ),
+        stdin=io.StringIO('{"state_ref":"case-1","focus":"ok","context":{}}\n'),
         stdout=stdout,
         stderr=stderr,
         judge_fn=_judge,
@@ -178,9 +175,7 @@ def test_v2_prefilter_migration_to_v3_state_preset_runs(tmp_path: Path) -> None:
     stdout = io.StringIO()
     code = main(
         ["run", "--preset", str(preset), "--by", "state", "--param", "query=needle"],
-        stdin=io.StringIO(
-            '{"state_ref":"case-1","focus":"needle","context":{}}\n'
-        ),
+        stdin=io.StringIO('{"state_ref":"case-1","focus":"needle","context":{}}\n'),
         stdout=stdout,
         stderr=io.StringIO(),
         judge_fn=_judge,
@@ -217,9 +212,7 @@ def test_v2_prefilter_migration_uses_parameter_query_source(
             "--param",
             "query=needle",
         ],
-        stdin=io.StringIO(
-            '{"state_ref":"case-1","focus":"needle","context":{}}\n'
-        ),
+        stdin=io.StringIO('{"state_ref":"case-1","focus":"needle","context":{}}\n'),
         stdout=stdout,
         stderr=io.StringIO(),
         judge_fn=_judge,
@@ -499,7 +492,7 @@ def test_main_serializes_consistency_retries(tmp_path: Path, monkeypatch) -> Non
     calls: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        state_ref = json.loads(request.content)["state"]["context"]["uid"]
         with active_lock:
             attempt = attempts_by_state.get(state_ref, 0) + 1
             attempts_by_state[state_ref] = attempt
@@ -512,9 +505,7 @@ def test_main_serializes_consistency_retries(tmp_path: Path, monkeypatch) -> Non
         return httpx.Response(
             200,
             json={
-                "answers": {
-                    "matches_query": {"type": "boolean", "probability": 0.9}
-                }
+                "answers": {"matches_query": {"type": "boolean", "probability": 0.9}}
             },
             request=request,
         )
@@ -554,7 +545,7 @@ def test_main_serializes_consistency_retries(tmp_path: Path, monkeypatch) -> Non
     assert code == 0
     assert len(calls) == 4
     assert max_active == 1
-    assert retry_active == [1, 1]
+    assert retry_active == [1, 1, 1, 1]
     assert len(records) == 3
 
 
@@ -1268,8 +1259,7 @@ def test_repeated_record_identity_emits_error_and_partial_coverage(
     code = main(
         ["jfilter", "--predicate", "needle"],
         stdin=io.StringIO(
-            '{"id":"same","value":"needle"}\n'
-            '{"id":"same","value":"other"}\n'
+            '{"id":"same","value":"needle"}\n{"id":"same","value":"other"}\n'
         ),
         stdout=stdout,
         stderr=stderr,
