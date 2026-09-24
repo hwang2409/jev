@@ -19,7 +19,7 @@ from .calibrate import (
     run_calibration,
     tolerances_for_preset,
 )
-from .chunkers import chunk_file, chunk_input
+from .chunkers import _normalise_file_path, chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
     CHUNKER_SETTINGS,
@@ -37,6 +37,7 @@ from .presets import (
 )
 from .runner import (
     InputError,
+    InputSidecar,
     ResultFilter,
     State,
     StateLimits,
@@ -156,6 +157,22 @@ def _add_judgment_options(
         help="maximum in-flight requests",
     )
     parser.add_argument("--format", choices=("jsonl", "pretty"))
+    parser.add_argument(
+        "--emit",
+        choices=("judgment", "input"),
+        default="judgment",
+        help="emit canonical judgment records or matching input values",
+    )
+    parser.add_argument(
+        "--metrics",
+        action="store_true",
+        help="include usage and latency metrics in JSONL output",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        help="write canonical JSONL to PATH; pretty output stays on stderr",
+    )
     parser.add_argument("--filter", choices=("keep", "policy"))
     parser.add_argument("--filter-policy")
     parser.add_argument("--consistency", type=_consistency_count)
@@ -308,7 +325,20 @@ def _judgment_command(
     preset_name = getattr(args, "short_preset", None) or args.preset
     preset = resolve_preset_or_path(preset_name)
     _validate_consistency_options(args, preset)
+    if (
+        args.emit == "input"
+        and args.command == "jfilter"
+        and args.by == "file"
+        and "file" not in preset.compatible_chunkers
+    ):
+        data = copy.deepcopy(dict(preset.data))
+        data["compatible_chunkers"] = [*preset.compatible_chunkers, "file"]
+        preset = Preset(validate_preset(data), preset.path)
     by = resolve_chunker(preset, args.by)
+    if args.emit == "input" and (
+        args.command != "jfilter" or by not in {"record", "file"}
+    ):
+        raise _UsageError("--emit=input requires jfilter with --by record or --by file")
     if args.metadata_fields is not None and by != "record":
         raise _UsageError("--metadata-fields requires --by record")
     paths = tuple(getattr(args, "paths", ()))
@@ -378,7 +408,7 @@ def _judgment_command(
             "judgment command"
         )
     limits = StateLimits(**effective_preset.chunking["limits"])
-    states, rejections = _form_states(
+    states, rejections, input_sidecar = _form_states(
         args,
         stdin,
         by,
@@ -416,6 +446,10 @@ def _judgment_command(
             or effective_preset.data["output"]["default_format"],
             jsonl_stream=stdout,
             pretty_stream=stderr,
+            output_path=args.output,
+            metrics=args.metrics,
+            emit_mode=args.emit,
+            input_sidecar=input_sidecar,
             result_filter=result_filter,
             pretty_template=effective_preset.data["output"]["pretty_template"],
             policy=args.policy if args.command == "gate" else None,
@@ -433,6 +467,9 @@ def _judgment_command(
             or effective_preset.data["output"]["default_format"],
             stdout=stdout,
             stderr=stderr,
+            emit_mode=args.emit,
+            output_path=args.output,
+            metrics=args.metrics,
         )
     if outcome.emitted.broken_pipe:
         return 0
@@ -455,6 +492,9 @@ def _emit_input_error(
     output_format: str,
     stdout: TextIO,
     stderr: TextIO,
+    emit_mode: str = "judgment",
+    output_path: Path | None = None,
+    metrics: bool = False,
 ) -> int:
     meta = RecordMeta(
         preset.name,
@@ -489,8 +529,12 @@ def _emit_input_error(
     emitted = emit(
         records,
         format=output_format,  # type: ignore[arg-type]
+        emit_mode=emit_mode,  # type: ignore[arg-type]
         jsonl_stream=stdout,
         pretty_stream=stderr,
+        output_path=output_path,
+        metrics=metrics,
+        input_sidecar=InputSidecar({}),
     )
     return 0 if emitted.broken_pipe else 2
 
@@ -548,7 +592,7 @@ def _form_states(
     query: str | None,
     predicate: str | None,
     parameters: Mapping[str, str] | None = None,
-) -> tuple[tuple[State, ...], tuple[StateRejection, ...]]:
+) -> tuple[tuple[State, ...], tuple[StateRejection, ...], InputSidecar]:
     rejections: list[StateRejection] = []
     paths = tuple(getattr(args, "paths", ()))
     if paths:
@@ -564,9 +608,11 @@ def _form_states(
                     _rejections=rejections,
                 )
             )
-        return tuple(states), tuple(rejections)
+        return tuple(states), tuple(rejections), InputSidecar(
+            {_normalise_file_path(path): _normalise_file_path(path) for path in paths}
+        )
 
-    if args.input is not None:
+    if args.input is not None and str(args.input) != "-":
         value: str | bytes = args.input.read_bytes()
     else:
         value = _read_stdin_bytes(stdin)
@@ -587,7 +633,47 @@ def _form_states(
         chunk_kwargs["predicate"] = predicate
     chunk_kwargs["parameters"] = parameters or {}
     result = chunk_input(by, value, **chunk_kwargs)
-    return result.formed, result.rejections
+    sidecar: dict[str, str | bytes] = {}
+    if by == "record":
+        sidecar.update(_record_input_sidecar(value, args.state_ref))
+    elif by == "file":
+        sidecar.update(_file_input_sidecar(value))
+    return result.formed, result.rejections, InputSidecar(sidecar)
+
+
+def _input_bytes(value: str | bytes) -> bytes:
+    return value if isinstance(value, bytes) else value.encode("utf-8")
+
+
+def _record_input_sidecar(value: str | bytes, state_ref_field: str) -> dict[str, bytes]:
+    sidecar: dict[str, bytes] = {}
+    for raw_line in _input_bytes(value).splitlines(keepends=True):
+        raw_object = raw_line.rstrip(b"\r\n")
+        if not raw_object.strip():
+            continue
+        try:
+            record = json.loads(raw_object)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if not isinstance(record, Mapping):
+            continue
+        identity = record.get(state_ref_field)
+        if type(identity) in (str, int) and (not isinstance(identity, str) or identity):
+            sidecar[str(identity)] = raw_object
+    return sidecar
+
+
+def _file_input_sidecar(value: str | bytes) -> dict[str, str]:
+    sidecar: dict[str, str] = {}
+    for raw_line in _input_bytes(value).splitlines():
+        try:
+            record = json.loads(raw_line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(record, Mapping) and isinstance(record.get("path"), str):
+            path = _normalise_file_path(record["path"])
+            sidecar[path] = path
+    return sidecar
 
 
 def _parse_metadata_fields(value: str | None) -> tuple[str, ...]:

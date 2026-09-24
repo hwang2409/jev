@@ -333,6 +333,150 @@ def _filter_judge(*_args) -> JudgeResponse:
     return JudgeResponse({"satisfies_predicate": NoulAnswer(0.9)})
 
 
+def test_jfilter_input_emission_preserves_original_json_bytes(tmp_path: Path) -> None:
+    raw = (
+        b'{"id":"one",  "value":"\\u0061", "nested": {"b": 2, "a": 1}}\n'
+        b'{"id":"two", "value":"other"}\n'
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    code = main(
+        ["jfilter", "--predicate", "needle", "--emit=input"],
+        stdin=BinaryStdin(raw),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=_filter_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert set(stdout.getvalue().splitlines()) == set(raw.decode().splitlines())
+    assert [
+        json.loads(line)["record_type"] for line in stderr.getvalue().splitlines()
+    ] == ["coverage"]
+
+
+def test_jfilter_file_input_emission_uses_normalized_paths(tmp_path: Path) -> None:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jfilter",
+            "--predicate",
+            "needle",
+            "--by",
+            "file",
+            "--emit=input",
+        ],
+        stdin=io.StringIO(
+            '{"path":"./src/entry.txt", "content":"needle"}\n'
+        ),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=_filter_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == "src/entry.txt\n"
+    assert json.loads(stderr.getvalue().splitlines()[-1])["record_type"] == "coverage"
+
+
+def test_metrics_are_opt_in_and_coverage_totals_include_filtered_results(
+    tmp_path: Path,
+) -> None:
+    def judge(*_args: object) -> JudgeResponse:
+        return JudgeResponse(
+            {"matches_query": NoulAnswer(0.9)},
+            usage={"input_tokens": 4, "output_tokens": 2, "ignored": "x"},
+            latency_ms=7,
+        )
+
+    default_code, default_records, _ = _invoke(
+        ["jgrep", "--query", "launch", "--filter", "keep"],
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "default"),
+    )
+    assert default_code == 0
+    assert "usage" not in default_records[0]["meta"]
+    assert "latency_ms" not in default_records[0]["meta"]
+    assert "usage_totals" not in default_records[-1]
+
+    metrics_stdout = io.StringIO()
+    metrics_code = main(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--filter",
+            "keep",
+            "--metrics",
+        ],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=metrics_stdout,
+        stderr=io.StringIO(),
+        judge_fn=judge,
+        cache_store=CacheStore(tmp_path / "metrics"),
+    )
+    metrics_records = [
+        json.loads(line) for line in metrics_stdout.getvalue().splitlines()
+    ]
+    assert metrics_code == 0
+    assert metrics_records[0]["meta"]["usage"] == {
+        "input_tokens": 4,
+        "output_tokens": 2,
+    }
+    assert metrics_records[0]["meta"]["latency_ms"] == 7
+    assert metrics_records[-1]["usage_totals"] == {
+        "input_tokens": 4,
+        "output_tokens": 2,
+    }
+    assert metrics_records[-1]["latency_ms_total"] == 7
+
+
+def test_output_path_keeps_pretty_rows_on_stderr(tmp_path: Path) -> None:
+    output_path = tmp_path / "results.jsonl"
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--format",
+            "pretty",
+            "--output",
+            str(output_path),
+        ],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=stdout,
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path / "cache"),
+    )
+
+    assert code == 0
+    assert stdout.getvalue() == ""
+    assert stderr.getvalue() == "stdin#P1\t0.9\n"
+    assert [
+        json.loads(line)["record_type"]
+        for line in output_path.read_text().splitlines()
+    ] == ["result", "coverage"]
+
+
+def test_input_dash_reads_stdin(tmp_path: Path) -> None:
+    code, records, _ = _invoke(
+        ["jgrep", "--query", "launch", "--input", "-"],
+        input_text="launch decision\n",
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert records[-1]["coverage"] == "complete"
+
+
 def test_short_and_explicit_jgrep_commands_are_equivalent(tmp_path: Path) -> None:
     short_cache = CacheStore(tmp_path / "short")
     explicit_cache = CacheStore(tmp_path / "explicit")
