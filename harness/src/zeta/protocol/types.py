@@ -41,6 +41,7 @@ FAILED_TURN_ERROR = "turn_error"
 
 class ContentType(StrEnum):
     TEXT = "text"
+    ROUTING_SCHEMA = "routing_schema"
     IMAGE = "image"
     THINKING = "thinking"
     REDACTED_THINKING = "redacted_thinking"
@@ -64,6 +65,18 @@ class TextContent:
         if self.size is not None:
             result["size"] = self.size
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class RoutingSchemaContent:
+    text: str
+
+    @property
+    def type(self) -> ContentType:
+        return ContentType.ROUTING_SCHEMA
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"type": self.type.value, "text": self.text}
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +173,7 @@ class ToolUseContent:
 ContentBlock = (
     ImageContent
     | TextContent
+    | RoutingSchemaContent
     | ThinkingContent
     | RedactedThinkingContent
     | ToolUseContent
@@ -485,6 +499,11 @@ def content_from_dict(value: Mapping[str, Any]) -> ContentBlock:
         if (path is None) != (size is None):
             raise ValueError("text content path and size must be provided together")
         return TextContent(text, path, size)
+    if content_type is ContentType.ROUTING_SCHEMA:
+        text = value.get("text")
+        if type(text) is not str:
+            raise ValueError("routing schema content text must be a string")
+        return RoutingSchemaContent(text)
     if content_type is ContentType.IMAGE:
         data = value.get("data")
         mime_type = value.get("mimeType")

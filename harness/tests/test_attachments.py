@@ -13,6 +13,12 @@ from prompt_toolkit.output import DummyOutput
 from zeta.core.fake import FakeBackend, ScriptedTurn
 from zeta.core.loop import AgentLoop
 from zeta.core.store import ConversationStore
+from zeta.protocol.types import (
+    ImageContent,
+    MessageRole,
+    RoutingSchemaContent,
+    TextContent,
+)
 from zeta.providers.anthropic_payload import build_messages_payload
 from zeta.providers.codex_payload import build_responses_payload
 from zeta.skills import SkillCatalog
@@ -25,7 +31,6 @@ from zeta.tui.composer import (
     build_key_bindings,
     build_user_message,
 )
-from zeta.protocol.types import ImageContent, MessageRole, TextContent
 
 PNG = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c489"
@@ -413,7 +418,9 @@ async def test_cancelled_image_token_removes_staged_file_on_send(
     await app._active_task
 
     assert not staged.exists()
-    assert store.messages()[0].content == [TextContent("send")]
+    message = store.messages()[0]
+    assert isinstance(message.content[1], RoutingSchemaContent)
+    assert message.content == [TextContent("send"), message.content[1]]
     await app.loop.close()
 
 
@@ -655,9 +662,12 @@ async def test_deleted_pending_paste_is_dropped_once(tmp_path: Path) -> None:
     users = [
         message for message in store.messages() if message.role is MessageRole.USER
     ]
+    assert all(
+        isinstance(message.content[1], RoutingSchemaContent) for message in users
+    )
     assert [message.content for message in users] == [
-        [TextContent("first")],
-        [TextContent("second")],
+        [TextContent("first"), users[0].content[1]],
+        [TextContent("second"), users[1].content[1]],
     ]
     assert len(notices) == 1
     assert notices[0].startswith("pending attachment dropped:")

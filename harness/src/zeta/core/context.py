@@ -21,6 +21,7 @@ from ..protocol.types import (
     ImageContent,
     Message,
     MessageRole,
+    RoutingSchemaContent,
     StreamEvent,
     StreamEventType,
     TextContent,
@@ -81,6 +82,12 @@ def _message_token_count(message: Message) -> int:
     image_count = 0
     content = value.get("content")
     if isinstance(content, list):
+        content = [
+            block
+            for block, source_block in zip(content, message.content)
+            if not isinstance(source_block, RoutingSchemaContent)
+        ]
+        value["content"] = content
         for index, block in enumerate(content):
             if isinstance(block, dict) and block.get("type") == "image":
                 content[index] = {
@@ -144,18 +151,22 @@ def _summary_message(message: Message) -> dict[str, Any]:
     value = message.to_dict()
     content = value.get("content")
     if isinstance(content, list):
-        for index, block in enumerate(message.content):
-            if not isinstance(block, ImageContent):
+        summary_content: list[dict[str, Any]] = []
+        for block, serialized in zip(message.content, content):
+            if isinstance(block, RoutingSchemaContent):
                 continue
-            filename = Path(block.path).name if block.path else "clipboard image"
-            size = block.size if block.size is not None else "unknown"
-            content[index] = {
-                "type": "text",
-                "text": (
-                    f"[image attachment] filename={filename} "
-                    f"media_type={block.mime_type} bytes={size}"
-                ),
-            }
+            if isinstance(block, ImageContent):
+                filename = Path(block.path).name if block.path else "clipboard image"
+                size = block.size if block.size is not None else "unknown"
+                serialized = {
+                    "type": "text",
+                    "text": (
+                        f"[image attachment] filename={filename} "
+                        f"media_type={block.mime_type} bytes={size}"
+                    ),
+                }
+            summary_content.append(serialized)
+        value["content"] = summary_content
     tool_result = value.get("tool_result")
     if not isinstance(tool_result, dict):
         return value

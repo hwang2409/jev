@@ -86,6 +86,7 @@ __all__ = [
     "OpenedSession",
     "OAuthTokens",
     "RedactedThinkingContent",
+    "RoutingSchemaContent",
     "ScriptedTurn",
     "SessionError",
     "SessionManager",

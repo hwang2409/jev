@@ -77,6 +77,7 @@ from ..protocol.types import (
     ErrorInfo,
     Message,
     MessageRole,
+    RoutingSchemaContent,
     StreamEvent,
     StreamEventType,
     TextContent,
@@ -1177,13 +1178,13 @@ class AgentLoop:
             else self._schema_text(schemas)
         )
         if any(
-            isinstance(block, TextContent) and block.text == text
+            isinstance(block, RoutingSchemaContent) and block.text == text
             for block in target.content
         ):
             return
         self.store.append_message_revision(
             target_entry.id,
-            replace(target, content=[*target.content, TextContent(text)]),
+            replace(target, content=[*target.content, RoutingSchemaContent(text)]),
         )
 
     def _expand_auto_invoke(self, call: ToolCall) -> ToolCall:

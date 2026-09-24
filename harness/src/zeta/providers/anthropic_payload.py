@@ -18,6 +18,7 @@ from ..protocol.types import (
     Message,
     MessageRole,
     RedactedThinkingContent,
+    RoutingSchemaContent,
     TextContent,
     ThinkingContent,
     ToolImageBlock,
@@ -85,7 +86,7 @@ def _image_wire_block(
 def _wire_content(blocks: Sequence[ContentBlock]) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     for block in blocks:
-        if isinstance(block, TextContent):
+        if isinstance(block, (TextContent, RoutingSchemaContent)):
             result.append({"type": "text", "text": block.text})
         elif isinstance(block, ImageContent):
             image = _image_block_from_content(block)
