@@ -8,6 +8,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..config.settings import ResolvedConfig
+from ..config.settings import resolve as resolve_settings
 from ..core.project_context import (
     ProjectContext,
     PromptArgumentError,
@@ -23,8 +25,6 @@ from ..core.session import (
     format_relative_age,
 )
 from ..runtime import compose_runtime
-from ..config.settings import ResolvedConfig
-from ..config.settings import resolve as resolve_settings
 from ..skills import (
     SkillCatalog,
     discover_session_skills,
@@ -96,26 +96,15 @@ def _create_app_with_root(
     repo_root = discover_repo_root(Path.cwd())
     project_dir = repo_root / ".zeta"
     loaded_settings = _app.load_settings(home=home, project_dir=project_dir)
-    config: ResolvedConfig = resolve_settings(
-        loaded_settings.settings,
-        cli_provider=getattr(args, "provider", None),
-        cli_model=getattr(args, "model", None),
-        cli_router=getattr(args, "router", None),
-        cli_router_style=getattr(args, "router_style", None),
-        cli_jev_compaction=getattr(args, "jev_compaction", None),
-        cli_memory_injection=getattr(args, "memory_injection", None),
-        cli_yolo=getattr(args, "yolo", None),
-        cli_safety_tier=getattr(args, "safety_tier", None),
-        cli_token_budget=getattr(args, "token_budget", None),
-        cli_memory_config=getattr(args, "memory_config", None),
-    )
+    cli_provider = getattr(args, "provider", None)
+    cli_model = getattr(args, "model", None)
     continue_session = getattr(args, "continue_session", False)
     resume_id = getattr(args, "resume", None)
     force_provider = getattr(args, "force_provider", False)
     resuming = continue_session or resume_id is not None
     if force_provider and not resuming:
         raise SessionError("--force-provider requires --continue or --resume")
-    if force_provider and config.model is None:
+    if force_provider and cli_model is None and loaded_settings.settings.model is None:
         raise SessionError("--force-provider requires --model")
 
     override_on_resume = False
@@ -149,8 +138,6 @@ def _create_app_with_root(
         metadata = opened.metadata
         skill_catalog = _session_skill_catalog(metadata, home, manager)
         agent_catalog = _session_agent_catalog(metadata, home, manager)
-        cli_provider = getattr(args, "provider", None)
-        cli_model = getattr(args, "model", None)
         provider_override = cli_provider or loaded_settings.settings.provider
         model_override = cli_model or loaded_settings.settings.model
         mismatches = []
@@ -203,8 +190,7 @@ def _create_app_with_root(
                 project_context.notices,
             )
     else:
-        provider = config.provider
-        model = config.model
+        provider = cli_provider or loaded_settings.settings.provider or "fake"
         skill_catalog = discover_session_skills(home=home, project_dir=repo_root)
         agent_catalog = discover_session_agents(home=home, project_dir=repo_root)
         project_context = _app.load_project_context(
@@ -215,6 +201,30 @@ def _create_app_with_root(
             system_append=system_prompt_append,
             catalog=skill_catalog,
         )
+
+    cli_router = getattr(args, "router", None)
+    if (
+        getattr(args, "headless", False)
+        and cli_router is None
+        and loaded_settings.settings.router is None
+        and provider == "fake"
+    ):
+        cli_router = False
+    config: ResolvedConfig = resolve_settings(
+        loaded_settings.settings,
+        cli_provider=cli_provider,
+        cli_model=cli_model,
+        cli_router=cli_router,
+        cli_router_style=getattr(args, "router_style", None),
+        cli_jev_compaction=getattr(args, "jev_compaction", None),
+        cli_memory_injection=getattr(args, "memory_injection", None),
+        cli_yolo=getattr(args, "yolo", None),
+        cli_safety_tier=getattr(args, "safety_tier", None),
+        cli_token_budget=getattr(args, "token_budget", None),
+        cli_memory_config=getattr(args, "memory_config", None),
+    )
+    if not resuming:
+        model = config.model
     pending_override = None
     if resuming and mismatches:
         pending_override = (

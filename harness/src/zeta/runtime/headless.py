@@ -79,6 +79,7 @@ def run_headless(args: argparse.Namespace, prompt: str) -> int:
         print("zeta: prompt must be a nonempty string", file=sys.stderr)
         return 2
 
+    args.headless = True
     from ..tui.app import create_app
 
     try:
