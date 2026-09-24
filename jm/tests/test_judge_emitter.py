@@ -3,10 +3,17 @@ from __future__ import annotations
 import io
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from jm.answers import ErrorResponse, JudgeResponse, NoulAnswer
+from jm.answers import (
+    ErrorResponse,
+    JudgeResponse,
+    NoulAnswer,
+    RecordMeta,
+    ResultRecord,
+)
 from jm.cache import CacheStore
 from jm.client import runtime_preset
 from jm.runner import (
@@ -14,6 +21,7 @@ from jm.runner import (
     FormationEvent,
     FormationReport,
     InputError,
+    InputSidecar,
     ResultFilter,
     State,
     emit,
@@ -235,3 +243,20 @@ def test_emit_filters_results_but_keeps_terminal_coverage() -> None:
         '{"coverage":"complete","coverage_counts":{"discovered":1,"emitted":1,"failed":0,"judged":1,"skipped":0},"coverage_reasons":[],"meta":{"cache":"not_applicable","chunker":"para","model":"typesafe-ai/jev","preset":"jgrep","preset_version":"1","served_model":"unknown"},"record_type":"coverage"}'
     ]
     assert stderr.getvalue() == ""
+
+
+def test_emit_writes_path_sidecars_as_raw_input() -> None:
+    record = ResultRecord(
+        "src/a.txt",
+        {"matches_query": NoulAnswer(0.9)},
+        RecordMeta("jgrep", "1", "typesafe-ai/jev", "para", "not_applicable"),
+    )
+    out = io.StringIO()
+    emit(
+        [record],
+        emit_mode="input",
+        jsonl_stream=out,
+        pretty_stream=io.StringIO(),
+        input_sidecar=InputSidecar({"src/a.txt": Path("src/a.txt")}),
+    )
+    assert out.getvalue() == "src/a.txt\n"

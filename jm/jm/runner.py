@@ -382,7 +382,7 @@ class ResultFilter:
 
 @dataclass(frozen=True, slots=True)
 class InputSidecar:
-    values: Mapping[str, Mapping[str, Any] | Path]
+    values: Mapping[str, Mapping[str, Any] | Path | str | bytes]
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,6 +645,10 @@ class Runner:
         stdout: TextIO | None = None,
         stderr: TextIO | None = None,
         output_format: str = "jsonl",
+        output_path: Path | None = None,
+        metrics: bool = False,
+        emit_mode: Literal["judgment", "input"] = "judgment",
+        input_sidecar: InputSidecar | None = None,
         concurrency: int = 4,
         result_filter: Callable[[ResultRecord], bool] | None = None,
         rejections: Sequence[StateRejection] = (),
@@ -792,6 +796,10 @@ class Runner:
             output_format=output_format,
             jsonl_stream=stdout,
             pretty_stream=stderr,
+            output_path=output_path,
+            metrics=metrics,
+            emit_mode=emit_mode,
+            input_sidecar=input_sidecar,
             result_filter=(
                 result_filter if isinstance(result_filter, ResultFilter) else None
             ),
@@ -951,6 +959,10 @@ def _run_pipeline(
     output_format: str = "jsonl",
     jsonl_stream: TextIO | None = None,
     pretty_stream: TextIO | None = None,
+    output_path: Path | None = None,
+    metrics: bool = False,
+    emit_mode: Literal["judgment", "input"] = "judgment",
+    input_sidecar: InputSidecar | None = None,
     result_filter: ResultFilter | None = None,
     legacy_filter: Callable[[ResultRecord], bool] | None = None,
     pretty_template: str | None = None,
@@ -997,8 +1009,12 @@ def _run_pipeline(
         format=output_format,  # type: ignore[arg-type]
         jsonl_stream=jsonl_stream or io.StringIO(),
         pretty_stream=pretty_stream or io.StringIO(),
+        output_path=output_path,
+        metrics=metrics,
+        emit_mode=emit_mode,
         result_filter=result_filter,
         filter_policy=filter_policy,
+        input_sidecar=input_sidecar,
         pretty_template=pretty_template,
     )
     gate_result = None
@@ -1257,7 +1273,7 @@ def _judge_core(
                         if consistency is not None:
                             with consistency_stats_lock:
                                 consistency_cache_hits += 1
-                        return cached.response, True
+                        return replace(cached.response, latency_ms=0), True
                 response = _call_public_judge(
                     active_judge,
                     wire_state,
@@ -1523,6 +1539,7 @@ def _emit_core(
     jsonl_stream: TextIO,
     pretty_stream: TextIO,
     output_path: Path | None = None,
+    metrics: bool = False,
     result_filter: ResultFilter | None = None,
     filter_policy: Policy | None = None,
     input_sidecar: InputSidecar | None = None,
@@ -1557,6 +1574,8 @@ def _emit_core(
     coverage: CoverageRecord | None = None
     pending_diagnostics: list[Diagnostic] = []
     has_prefilter_warning = False
+    usage_totals: dict[str, int | float] = {}
+    latency_ms_total = 0
     try:
         for record in records:
             try:
@@ -1568,6 +1587,13 @@ def _emit_core(
                     continue
                 if isinstance(record, CoverageRecord):
                     coverage = record
+                if metrics and isinstance(record, (ResultRecord, PartialResultRecord)):
+                    numeric_usage = _numeric_usage(record.usage)
+                    _add_usage(usage_totals, numeric_usage)
+                    if isinstance(record.latency_ms, (int, float)) and not isinstance(
+                        record.latency_ms, bool
+                    ):
+                        latency_ms_total += record.latency_ms
                 visible = _record_visible(record, result_filter, compiled_filter_policy)
                 if isinstance(record, ResultRecord) and not visible:
                     records_suppressed += 1
@@ -1579,29 +1605,62 @@ def _emit_core(
                         raise ConfigurationError(
                             f"input sidecar has no state {record.state_ref!r}"
                         )
-                    payload: Any = str(value) if isinstance(value, Path) else value
+                    if isinstance(value, Path):
+                        payload: Any = str(value)
+                    elif isinstance(value, bytes):
+                        payload = value.decode("utf-8")
+                    else:
+                        payload = value
                     record_sink = sink
-                    record_sink.write(
-                        json.dumps(
-                            payload,
-                            ensure_ascii=False,
-                            sort_keys=isinstance(payload, Mapping),
-                            separators=(",", ":")
-                            if isinstance(payload, Mapping)
-                            else None,
+                    if isinstance(payload, str):
+                        record_sink.write(payload.rstrip("\r\n") + "\n")
+                    else:
+                        record_sink.write(
+                            json.dumps(
+                                payload,
+                                ensure_ascii=False,
+                                sort_keys=isinstance(payload, Mapping),
+                                separators=(",", ":")
+                                if isinstance(payload, Mapping)
+                                else None,
+                            )
+                            + "\n"
                         )
-                        + "\n"
-                    )
                 else:
+                    if emit_mode == "input" and isinstance(record, PartialResultRecord):
+                        record = ErrorRecord(
+                            record.state_ref,
+                            ErrorDetail(
+                                "partial_answer",
+                                "incomplete judgment cannot be emitted as input",
+                            ),
+                            record.meta,
+                        )
                     record_sink = (
                         pretty_stream
                         if emit_mode == "input"
-                        and isinstance(record, (ErrorRecord, CoverageRecord))
+                        and not isinstance(record, ResultRecord)
                         else sink
                     )
+                    payload = record.to_dict()
+                    if metrics and isinstance(
+                        record, (ResultRecord, PartialResultRecord)
+                    ):
+                        meta = dict(payload["meta"])
+                        numeric_usage = _numeric_usage(record.usage)
+                        if numeric_usage:
+                            meta["usage"] = numeric_usage
+                        if isinstance(
+                            record.latency_ms, (int, float)
+                        ) and not isinstance(record.latency_ms, bool):
+                            meta["latency_ms"] = record.latency_ms
+                        payload["meta"] = meta
+                    if metrics and isinstance(record, CoverageRecord):
+                        payload["usage_totals"] = dict(usage_totals)
+                        payload["latency_ms_total"] = latency_ms_total
                     record_sink.write(
                         json.dumps(
-                            record.to_dict(),
+                            payload,
                             ensure_ascii=False,
                             sort_keys=True,
                             separators=(",", ":"),
@@ -1618,6 +1677,7 @@ def _emit_core(
                     isinstance(record, ErrorRecord)
                     and record.state_ref is None
                     and record.error.kind != "prefiltered"
+                    and emit_mode == "judgment"
                 ):
                     pretty_stream.write(f"jm: warning: {record.error.message}\n")
                     pretty_stream.flush()
@@ -1625,6 +1685,7 @@ def _emit_core(
                     isinstance(record, CoverageRecord)
                     and record.coverage == "partial"
                     and not has_prefilter_warning
+                    and emit_mode == "judgment"
                 ):
                     pretty_stream.write(
                         "jm: warning: results are partial; coverage reasons: "
@@ -1674,6 +1735,7 @@ def emit(
     jsonl_stream: TextIO,
     pretty_stream: TextIO,
     output_path: Path | None = None,
+    metrics: bool = False,
     result_filter: ResultFilter | None = None,
     input_sidecar: InputSidecar | None = None,
 ) -> EmitResult:
@@ -1684,6 +1746,7 @@ def emit(
         jsonl_stream=jsonl_stream,
         pretty_stream=pretty_stream,
         output_path=output_path,
+        metrics=metrics,
         result_filter=result_filter,
         input_sidecar=input_sidecar,
     )
@@ -2036,12 +2099,20 @@ def _aggregate_responses(
             },
         )
     usage: dict[str, int | float] = {}
+    latency_ms = 0
+    has_latency = False
     for response in responses:
         _add_usage(usage, response.usage)
+        if isinstance(response.latency_ms, (int, float)) and not isinstance(
+            response.latency_ms, bool
+        ):
+            latency_ms += response.latency_ms
+            has_latency = True
     return JudgeResponse(
         answers=answers,
         served_model=first.served_model,
         usage=usage or None,
+        latency_ms=latency_ms if has_latency else None,
     )
 
 
@@ -2255,6 +2326,19 @@ def _response_record(
         usage=response.usage,
         latency_ms=response.latency_ms,
     )
+
+
+def _numeric_usage(usage: Mapping[str, Any] | None) -> dict[str, int | float]:
+    if not isinstance(usage, Mapping):
+        return {}
+    return {
+        key: value
+        for key, value in usage.items()
+        if isinstance(key, str)
+        and isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(float(value))
+    }
 
 
 def emit_pretty(
