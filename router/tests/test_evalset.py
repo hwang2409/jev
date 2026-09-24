@@ -6,7 +6,9 @@ from catalog import CATALOG
 
 
 def load():
-    lines = Path("evalset.jsonl").read_text().strip().splitlines()
+    lines = (
+        Path(__file__).parents[1] / "evalset.jsonl"
+    ).read_text().strip().splitlines()
     return [json.loads(line) for line in lines]
 
 
