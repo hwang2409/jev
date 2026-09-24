@@ -8,6 +8,7 @@ from jm.chunkers import (
     DEFAULT_CONTEXT_FIELD_BYTES,
     DEFAULT_FOCUS_BYTES,
     DEFAULT_STATE_BYTES,
+    SURROUNDING_TRUNCATION_MARKER,
     StateLimitError,
     chunk_file,
     chunk_hunk,
@@ -319,17 +320,62 @@ def test_chunk_input_applies_scan_cap_after_complete_discovery() -> None:
 
 
 def test_context_and_complete_state_limits_are_enforced() -> None:
-    with pytest.raises(StateLimitError, match="surrounding"):
-        chunk_line(
-            "one\n" + "x" * 20,
-            source="s",
-            limits=StateLimits(context_field_bytes=10),
+    state = chunk_line(
+        "one\n" + "x" * 100,
+        source="s",
+        limits=StateLimits(context_field_bytes=36),
+    )[0]
+    assert SURROUNDING_TRUNCATION_MARKER in state.context["surrounding"]
+    assert (
+        len(
+            json.dumps(state.context["surrounding"], separators=(",", ":")).encode()
         )
+        <= 36
+    )
     with pytest.raises(StateLimitError, match="state"):
         chunk_record(
             json.dumps({"id": "x", "payload": "abcdefgh"}) + "\n",
             limits=StateLimits(context_field_bytes=100, state_bytes=20),
         )
+
+
+def test_surrounding_truncation_is_deterministic_and_uses_the_exact_limit() -> None:
+    limits = StateLimits(context_field_bytes=64)
+    first = chunk_para("small\n\n" + "x" * 500, limits=limits)[0]
+    second = chunk_para("small\n\n" + "x" * 500, limits=limits)[0]
+
+    assert first.context["surrounding"] == second.context["surrounding"]
+    assert SURROUNDING_TRUNCATION_MARKER in first.context["surrounding"]
+    assert (
+        len(
+            json.dumps(first.context["surrounding"], separators=(",", ":")).encode()
+        )
+        <= 64
+    )
+
+
+def test_heading_only_paragraphs_are_not_formed() -> None:
+    states = chunk_para("# Intro\n\nbody\n\n## Details\n\nmore\n")
+
+    assert [state.state_ref for state in states] == ["stdin#P1", "stdin#P2"]
+    assert states[0].context["heading"] == "# Intro"
+    assert states[1].context["heading"] == "## Details"
+
+
+def test_invalid_hunk_body_is_an_input_error_and_does_not_swallow_next_hunk() -> None:
+    diff = (
+        "--- a/one.py\n+++ b/one.py\n@@ -1,1 +1,1 @@\n-old\n"
+        "not-a-body\n"
+        "diff --git a/two.py b/two.py\n--- a/two.py\n+++ b/two.py\n"
+        "@@ -1,1 +1,1 @@\n-old\n+new\n"
+    )
+
+    result = chunk_input("hunk", diff)
+
+    assert [state.context["file"] for state in result.formed] == ["one.py", "two.py"]
+    assert result.rejections[0].reason == "input_error"
+    assert result.rejections[0].source_ref == "stdin:line=5"
+    assert result.discovered == result.judged == 2
 
 
 @pytest.mark.parametrize("field", ["state_ref", "focus", "query"])

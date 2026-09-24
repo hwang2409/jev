@@ -1057,7 +1057,7 @@ def _judge_core(
                 if not field.startswith("context."):
                     continue
                 key = field.removeprefix("context.")
-                if key in declared or key in available:
+                if key == "state_ref" or key in declared or key in available:
                     continue
                 diagnostics.append(
                     Diagnostic(
