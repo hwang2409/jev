@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from ._transport import _resolve_gateway_key as resolve_gateway_key
+from .answers import CoverageRecord, ErrorDetail, ErrorRecord, RecordMeta
 from .cache import CacheStore
 from .calibrate import (
     CalibrationTolerances,
@@ -20,6 +21,7 @@ from .calibrate import (
 from .chunkers import chunk_file, chunk_input
 from .client import make_judge
 from .presets import (
+    SCHEMA_V2,
     Preset,
     PresetError,
     PresetNotFoundError,
@@ -30,11 +32,13 @@ from .presets import (
     validate_preset,
 )
 from .runner import (
+    InputError,
     ResultFilter,
     State,
     StateLimits,
     StateRejection,
     _run_pipeline,
+    emit,
 )
 
 
@@ -341,26 +345,38 @@ def _judgment_command(
 
     effective_preset = _with_chunker(effective_preset, by)
     result_filter = _result_filter(args.filter, effective_preset)
-    outcome = _run_pipeline(
-        effective_preset,
-        states,
-        rejections=rejections,
-        max_chunks=effective_preset.chunking.get("max_chunks"),
-        prefilter=prefilter,
-        include_prefilter_warning=args.command == "jgrep",
-        cache_store=cache_store or CacheStore(),
-        concurrency=args.concurrency,
-        judge_fn=judge_fn,
-        consistency=args.consistency,
-        consistency_sigma=args.consistency_sigma,
-        output_format=args.format or effective_preset.data["output"]["default_format"],
-        jsonl_stream=stdout,
-        pretty_stream=stderr,
-        result_filter=result_filter,
-        pretty_template=effective_preset.data["output"]["pretty_template"],
-        policy=args.policy if args.command == "gate" else None,
-        require_states=getattr(args, "require_states", 1),
-    )
+    try:
+        outcome = _run_pipeline(
+            effective_preset,
+            states,
+            rejections=rejections,
+            max_chunks=effective_preset.chunking.get("max_chunks"),
+            prefilter=prefilter,
+            include_prefilter_warning=args.command == "jgrep",
+            cache_store=cache_store or CacheStore(),
+            concurrency=args.concurrency,
+            judge_fn=judge_fn,
+            consistency=args.consistency,
+            consistency_sigma=args.consistency_sigma,
+            output_format=args.format
+            or effective_preset.data["output"]["default_format"],
+            jsonl_stream=stdout,
+            pretty_stream=stderr,
+            result_filter=result_filter,
+            pretty_template=effective_preset.data["output"]["pretty_template"],
+            policy=args.policy if args.command == "gate" else None,
+            require_states=getattr(args, "require_states", 1),
+        )
+    except InputError as exc:
+        return _emit_input_error(
+            effective_preset,
+            by,
+            str(exc),
+            output_format=args.format
+            or effective_preset.data["output"]["default_format"],
+            stdout=stdout,
+            stderr=stderr,
+        )
     if outcome.emitted.broken_pipe:
         return 0
     if outcome.gate_result is not None:
@@ -371,6 +387,52 @@ def _judgment_command(
     ):
         return 2
     return 0
+
+
+def _emit_input_error(
+    preset: Preset,
+    chunker: str,
+    message: str,
+    *,
+    output_format: str,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    meta = RecordMeta(
+        preset.name,
+        preset.version,
+        preset.model,
+        chunker,
+        "not_applicable",
+        preset_schema=preset.schema if preset.schema == SCHEMA_V2 else None,
+    )
+    records = (
+        ErrorRecord(
+            None,
+            ErrorDetail("input_error", message),
+            meta,
+            source_ref="stdin:byte=0,line=1",
+        ),
+        CoverageRecord(
+            coverage="partial",
+            coverage_counts={
+                "discovered": 0,
+                "judged": 0,
+                "emitted": 0,
+                "skipped": 0,
+                "failed": 0,
+            },
+            coverage_reasons=("input_error",),
+            meta=meta,
+        ),
+    )
+    emitted = emit(
+        records,
+        format=output_format,  # type: ignore[arg-type]
+        jsonl_stream=stdout,
+        pretty_stream=stderr,
+    )
+    return 0 if emitted.broken_pipe else 2
 
 
 def _validate_consistency_options(args: argparse.Namespace, preset: Preset) -> None:

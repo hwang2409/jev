@@ -10,7 +10,6 @@ from typing import Any
 from .runner import (
     State,
     StateAdmission,
-    StateInputError,
     StateLimitError,
     StateLimits,
     StateRejection,
@@ -524,7 +523,6 @@ def chunk_record(
             values.append((value, source_ref))
 
     states: list[State] = []
-    seen_refs: set[str] = set()
     selected_fields = tuple(metadata_fields or ())
     for record_index, (record, source_ref) in enumerate(values, start=1):
         if state_ref_field not in record:
@@ -550,9 +548,6 @@ def chunk_record(
             )
             continue
         state_ref = str(identity)
-        if state_ref in seen_refs:
-            raise StateInputError(f"duplicate record identity {state_ref!r}")
-        seen_refs.add(state_ref)
         focus = _canonical_json(record)
         metadata = {key: record[key] for key in selected_fields if key in record}
         context: dict[str, Any] = {"unit": "record", "metadata": metadata}

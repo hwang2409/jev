@@ -236,6 +236,41 @@ async def test_provider_rejects_missing_or_partial_terminal_coverage(
         )
 
 
+@pytest.mark.asyncio
+async def test_provider_preserves_http_status_from_error_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Record:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self.payload = payload
+
+        def to_dict(self) -> dict[str, Any]:
+            return self.payload
+
+    async def failed_judge_async(*_args: Any, **_kwargs: Any):
+        yield Record(
+            {
+                "record_type": "error",
+                "state_ref": "harness",
+                "error": {
+                    "kind": "api_error",
+                    "message": "request failed",
+                    "http_status": 503,
+                    "attempts": 3,
+                },
+            }
+        )
+        yield Record({"record_type": "coverage", "coverage": "partial"})
+
+    monkeypatch.setattr(jev, "judge_async", failed_judge_async)
+    with pytest.raises(jev.JevRouterError) as raised:
+        await jev._evaluate(
+            {"state": {}, "questions": {"q": {"type": "noul"}}}
+        )
+
+    assert raised.value.status_code == 503
+
+
 def auto_response() -> jev.JevResponse:
     return jev.JevResponse(
         answers={

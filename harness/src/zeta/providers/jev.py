@@ -997,9 +997,15 @@ async def _evaluate(
                 error_message = "invalid Jev search result score response"
         elif any(question_id.startswith("result-") for question_id in questions):
             error_message = "invalid Jev search result score response"
-        detail = str(error.to_dict()["error"]) if error is not None else error_message
+        error_detail = error.to_dict()["error"] if error is not None else {}
+        detail = str(error_detail) if error is not None else error_message
         raise JevRouterError(
             error_message if error_message != "Jev judgment failed" else detail,
+            status_code=(
+                error_detail.get("http_status")
+                if isinstance(error_detail.get("http_status"), int)
+                else None
+            ),
             gate=gate,
         )
     if coverage.to_dict()["coverage"] != "complete":

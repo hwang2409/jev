@@ -66,7 +66,7 @@ def test_judge_yields_a_completed_result_before_a_slow_state() -> None:
 
     records = judge(
         "jgrep",
-        [State("fast", "one"), State("slow", "two")],
+        [State("slow", "one"), State("fast", "two")],
         formation_report=FormationReport(),
         judge_fn=fake,
         concurrency=2,
@@ -75,6 +75,7 @@ def test_judge_yields_a_completed_result_before_a_slow_state() -> None:
     first = next(records)
     elapsed = time.monotonic() - started
     assert first.to_dict()["record_type"] == "result"
+    assert first.to_dict()["state_ref"] == "fast"
     assert elapsed < 1
     release_slow.set()
     assert next(records).to_dict()["record_type"] == "result"
