@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from zeta.providers import jev
@@ -10,6 +12,36 @@ from zeta.tools.browser.gates import (
     evaluate_page_state,
     evaluate_page_state_with_provider,
 )
+
+
+class _JudgeRecord:
+    def __init__(self, payload: dict[str, Any]) -> None:
+        self.payload = payload
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.payload
+
+
+def _failed_judge(error_kind: str):
+    message = {
+        "timeout": "timed out",
+        "malformed": "malformed answer",
+        "api_error": "backend error",
+    }[error_kind]
+    error = {
+        "kind": error_kind,
+        "message": message,
+        "http_status": 500 if error_kind == "api_error" else None,
+        "attempts": 1,
+    }
+
+    async def judge_async(*_args: Any, **_kwargs: Any):
+        yield _JudgeRecord(
+            {"record_type": "error", "state_ref": "harness", "error": error}
+        )
+        yield _JudgeRecord({"record_type": "coverage", "coverage": "partial"})
+
+    return judge_async
 
 
 @pytest.mark.parametrize(
@@ -177,20 +209,19 @@ def test_action_failure_or_uncertainty_requests_a_fresh_state(
 async def test_real_provider_errors_follow_the_failed_gate(
     monkeypatch: pytest.MonkeyPatch, gate: str, error_kind: str
 ) -> None:
-    class Client:
-        async def evaluate_async(
-            self, _state: dict[str, object], _questions: dict[str, object]
-        ) -> jev.JevResponse:
-            if error_kind == "timeout":
-                raise jev.JevError("timed out")
-            if error_kind == "malformed":
-                raise jev.JevError("malformed answer")
-            raise jev.JevError("backend error", http_status=500)
+    seen_errors: list[jev.JevRouterError] = []
 
-        async def aclose(self) -> None:
-            return None
+    def observe_provider_error(
+        active_gate: str | None, error: jev.JevRouterError
+    ) -> PageStateDecision:
+        seen_errors.append(error)
+        return conservative_provider_error_decision(active_gate, error)
 
-    monkeypatch.setattr(jev, "JevClient", Client)
+    monkeypatch.setattr(jev, "judge_async", _failed_judge(error_kind))
+    monkeypatch.setattr(
+        "zeta.tools.browser.gates.conservative_provider_error_decision",
+        observe_provider_error,
+    )
 
     expected = {
         "page_loaded_and_stable": PageStateDecision(
@@ -222,22 +253,17 @@ async def test_real_provider_errors_follow_the_failed_gate(
         )
         == expected
     )
+    assert len(seen_errors) == 1
+    assert seen_errors[0].status_code == (
+        500 if error_kind == "api_error" else None
+    )
 
 
 @pytest.mark.asyncio
 async def test_malformed_non_active_gate_uses_active_gate_for_routing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class Client:
-        async def evaluate_async(
-            self, _state: dict[str, object], _questions: dict[str, object]
-        ) -> jev.JevResponse:
-            raise jev.JevError("malformed answer")
-
-        async def aclose(self) -> None:
-            return None
-
-    monkeypatch.setattr(jev, "JevClient", Client)
+    monkeypatch.setattr(jev, "judge_async", _failed_judge("malformed"))
 
     assert await evaluate_page_state_with_provider(
         goal="continue",
