@@ -313,6 +313,151 @@ def test_clean_minute_restores_one_concurrency_step(monkeypatch) -> None:
     assert diagnostics[-1]["message"] == "clean_seconds=60 effective=3"
 
 
+def test_transport_503_retries_feed_runner_backoff() -> None:
+    statuses = iter((503, 503, 200))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        status = next(statuses)
+        if status == 200:
+            return httpx.Response(
+                status,
+                json={
+                    "answers": {
+                        "matches": {"type": "boolean", "probability": 0.9}
+                    }
+                },
+                request=request,
+            )
+        return httpx.Response(status, request=request)
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        result = Runner(gateway).run(
+            [State("state-0", "focus")],
+            {"matches": {"type": "noul"}},
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert result.stats.discovered == result.stats.judged == 1
+    assert result.stats.failed == 0
+
+
+@pytest.mark.parametrize("boundary", [59.0, 60.0])
+def test_transport_restore_boundary_uses_observation_time(
+    boundary: float, monkeypatch
+) -> None:
+    clock = 0.0
+    finished_retries = threading.Event()
+    attempts_by_state: dict[str, int] = {}
+
+    def success(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "matches": {"type": "boolean", "probability": 0.9}
+                }
+            },
+            request=request,
+        )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal clock
+        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        if state_ref == "state-0":
+            attempt = attempts_by_state.get(state_ref, 0) + 1
+            attempts_by_state[state_ref] = attempt
+            clock = 0.0
+            if attempt < 3:
+                return httpx.Response(503, request=request)
+            finished_retries.set()
+            return success(request)
+        finished_retries.wait(timeout=1.0)
+        clock = boundary
+        return success(request)
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        monkeypatch.setattr("jm.runner._time.monotonic", lambda: clock)
+        result = Runner(gateway).run(
+            [
+                State("state-0", "focus"),
+                State("state-1", "focus"),
+                State("state-2", "focus"),
+            ],
+            {"matches": {"type": "noul"}},
+            concurrency=2,
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert diagnostics[0]["code"] == "concurrency_backoff"
+    assert (diagnostics[-1]["code"] == "concurrency_restored") is (boundary == 60.0)
+
+
+def test_transport_backoff_reduces_repeated_bursts_to_one() -> None:
+    attempts_by_state: dict[str, int] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        state_ref = json.loads(request.content)["state"]["context"]["state_ref"]
+        attempt = attempts_by_state.get(state_ref, 0) + 1
+        attempts_by_state[state_ref] = attempt
+        if attempt < 3:
+            return httpx.Response(503, request=request)
+        return httpx.Response(
+            200,
+            json={
+                "answers": {
+                    "matches": {"type": "boolean", "probability": 0.9}
+                }
+            },
+            request=request,
+        )
+
+    gateway = GatewayClient(
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+        sleep=lambda _delay: None,
+    )
+    try:
+        result = Runner(gateway).run(
+            [State("state-0", "focus"), State("state-1", "focus")],
+            {"matches": {"type": "noul"}},
+            concurrency=4,
+        )
+    finally:
+        gateway.close()
+
+    diagnostics = [
+        record.to_dict()["diagnostic"]
+        for record in result.records
+        if isinstance(record, DiagnosticRecord)
+    ]
+    assert [diagnostic["message"] for diagnostic in diagnostics] == [
+        "status=503 consecutive=2 effective=2",
+        "status=503 consecutive=2 effective=1",
+    ]
+    assert result.stats.discovered == result.stats.judged == 2
+    assert result.stats.failed == 0
+
+
 @pytest.mark.parametrize("noul", [0.5, 0.9])
 def test_runner_gate_sets_failure_exit_for_complete_typed_results(noul: float) -> None:
     def judge(*_):

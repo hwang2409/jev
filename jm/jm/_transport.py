@@ -78,6 +78,16 @@ class _GatewayTransport:
         self.async_sleep = async_sleep
         self.jitter = jitter or (lambda: _random.uniform(0.0, backoff_base))
         self.backoff_base = backoff_base
+        self._response_observer: _Callable[[int], None] | None = None
+
+    def set_response_observer(
+        self, observer: _Callable[[int], None] | None
+    ) -> None:
+        self._response_observer = observer
+
+    def _observe_response(self, status_code: int) -> None:
+        if self._response_observer is not None:
+            self._response_observer(status_code)
 
     def post(
         self,
@@ -101,6 +111,7 @@ class _GatewayTransport:
                     json=payload,
                     timeout=self.timeout,
                 ) as response:
+                    self._observe_response(response.status_code)
                     if response.status_code in _RETRYABLE_STATUSES:
                         if attempts < self.max_attempts:
                             self._wait(attempts, _retry_after(response))
@@ -151,6 +162,7 @@ class _GatewayTransport:
                     json=payload,
                     timeout=self.timeout,
                 )
+                self._observe_response(response.status_code)
                 if response.status_code in _RETRYABLE_STATUSES:
                     if attempts < self.max_attempts:
                         await self._await_wait(attempts, _retry_after(response))

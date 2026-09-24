@@ -365,6 +365,8 @@ def _judgment_command(
             run_kwargs["policy"] = args.policy
             run_kwargs["require_states"] = args.require_states
         result = runner.run(states, **run_kwargs)
+        if result.broken_pipe:
+            return 0
         _emit_diagnostics(result.records, stderr)
         return result.exit_code
     finally:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time as _time
+from collections.abc import Callable as _Callable
 from collections.abc import Mapping as _Mapping
 from dataclasses import replace as _replace
 from typing import TYPE_CHECKING as _TYPE_CHECKING
@@ -64,6 +65,11 @@ class JevClient:
 
     def __init__(self, *, _transport: _GatewayTransport | None = None) -> None:
         self._transport = _transport or _GatewayTransport()
+
+    def set_response_observer(
+        self, observer: _Callable[[int], None] | None
+    ) -> None:
+        self._transport.set_response_observer(observer)
 
     def evaluate(
         self,

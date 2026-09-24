@@ -22,6 +22,17 @@ from jm.runner import BM25CorpusStats, State, bm25_rank, bm25_score, tokenize
 ROOT = Path(__file__).parents[1]
 
 
+class BrokenPipeStream:
+    def write(self, _value: str) -> int:
+        raise BrokenPipeError(32, "broken pipe")
+
+    def flush(self) -> None:
+        return None
+
+    def close(self) -> None:
+        return None
+
+
 def _invoke(
     argv: list[str],
     *,
@@ -44,16 +55,6 @@ def _invoke(
 
 
 def test_sigpipe_returns_quietly_without_a_traceback(tmp_path: Path) -> None:
-    class BrokenPipeStream:
-        def write(self, _value: str) -> int:
-            raise BrokenPipeError(32, "broken pipe")
-
-        def flush(self) -> None:
-            return None
-
-        def close(self) -> None:
-            return None
-
     stderr = io.StringIO()
     code = main(
         ["jgrep", "--query", "launch"],
@@ -68,6 +69,56 @@ def test_sigpipe_returns_quietly_without_a_traceback(tmp_path: Path) -> None:
 
     assert code == 0
     assert "traceback" not in stderr.getvalue().lower()
+
+
+def test_sigpipe_gate_returns_zero_without_late_stderr(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    code = main(
+        [
+            "gate",
+            "--preset",
+            "jgrep",
+            "--policy",
+            "any(matches_query.noul >= 0.75)",
+            "--query",
+            "launch",
+        ],
+        stdin=io.StringIO("launch decision\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert stderr.getvalue() == ""
+
+
+def test_sigpipe_partial_judgment_returns_zero_without_late_stderr(
+    tmp_path: Path,
+) -> None:
+    stderr = io.StringIO()
+    code = main(
+        [
+            "jgrep",
+            "--query",
+            "launch",
+            "--prefilter",
+            "bm25",
+            "--prefilter-top",
+            "1",
+            "--prefilter-fields",
+            "focus",
+        ],
+        stdin=io.StringIO("launch decision\n\nother text\n\nthird text\n"),
+        stdout=BrokenPipeStream(),
+        stderr=stderr,
+        judge_fn=_judge,
+        cache_store=CacheStore(tmp_path),
+    )
+
+    assert code == 0
+    assert stderr.getvalue() == ""
 
 
 def _judge(*_args) -> JudgeResponse:
