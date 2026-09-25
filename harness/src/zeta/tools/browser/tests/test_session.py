@@ -16,6 +16,10 @@ from zeta.tools.browser.adapter import (
 from zeta.tools.browser.session import BrowserBudgetExhaustedError, BrowserSession
 
 
+async def _allow_navigation(_destination: str, _current: str | None) -> None:
+    return None
+
+
 class _SlowAdapter(FakeBrowserAdapter):
     def __init__(self) -> None:
         super().__init__(
@@ -252,7 +256,9 @@ async def test_browser_session_resets_page_budget_after_navigation() -> None:
     await session.call_jev(judge)
     assert session.budget.page_jev_calls == 1
 
-    await session.navigate("https://example.test/next")
+    await session.navigate(
+        "https://example.test/next", navigation_interceptor=_allow_navigation
+    )
 
     assert session.budget.page_jev_calls == 0
     assert session.budget.page_jev_tokens == 0
@@ -269,12 +275,14 @@ async def test_browser_session_resets_page_budget_after_action_navigation(
     session = BrowserSession(
         lambda: adapter, page_jev_call_budget=8, page_jev_token_budget=20
     )
-    await session.observe()
+    await session.observe(navigation_interceptor=_allow_navigation)
     session.budget.page_jev_calls = 3
     session.budget.page_jev_tokens = 7
 
     element = ElementRef(1, "e1", "button", action, "", "", None, None, False, True)
-    await session.action(action, element)
+    await session.action(
+        action, element, navigation_interceptor=_allow_navigation
+    )
 
     assert session.budget.page_jev_calls == 0
     assert session.budget.page_jev_tokens == 0
@@ -288,12 +296,14 @@ async def test_browser_session_keeps_page_budget_for_non_navigating_click() -> N
     session = BrowserSession(
         lambda: adapter, page_jev_call_budget=8, page_jev_token_budget=20
     )
-    await session.observe()
+    await session.observe(navigation_interceptor=_allow_navigation)
     session.budget.page_jev_calls = 3
     session.budget.page_jev_tokens = 7
 
     element = ElementRef(1, "e1", "button", "click", "", "", None, None, False, True)
-    await session.action("click", element)
+    await session.action(
+        "click", element, navigation_interceptor=_allow_navigation
+    )
 
     assert session.budget.page_jev_calls == 3
     assert session.budget.page_jev_tokens == 7
@@ -357,7 +367,9 @@ async def test_last_allowed_action_returns_bounded_observation_after_budget_expi
         1, "e1", "button", "click", "Continue", "Continue", None, "main", False, True
     )
 
-    _action, state = await session.action("click", element)
+    _action, state = await session.action(
+        "click", element, navigation_interceptor=_allow_navigation
+    )
 
     assert state.observation.url == "https://example.test"
     with pytest.raises(BrowserBudgetExhaustedError):

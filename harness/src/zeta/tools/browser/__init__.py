@@ -17,7 +17,7 @@ from ...core.safety import (
     normalize_origin,
 )
 from ...protocol import jev
-from ...protocol.types import StructuredToolResult
+from ...protocol.types import StructuredToolResult, ToolCall
 from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
@@ -54,6 +54,7 @@ from .session import (
     BrowserSessionClosedError,
     StaleSnapshotError,
     catalog_payload,
+    deny_all_navigation,
 )
 
 BROWSER_TOOL_NAMES = (
@@ -106,6 +107,7 @@ async def _browser_navigate(
     try:
         session = _session(registry)
         session.ensure_available()
+        operation_token = session.next_operation_token
         has_current_state = session.state is not None
         current_url = url
         if has_current_state:
@@ -128,6 +130,15 @@ async def _browser_navigate(
             download=False,
             durable_state_change=False,
             origin_allowed=origin_allowed,
+            operation_token=operation_token,
+        )
+        navigation_interceptor = _navigation_interceptor(
+            registry,
+            arguments,
+            abort_signal=abort_signal,
+            execution_context=execution_context,
+            fallback_url=current_url,
+            operation_token=operation_token,
         )
         if browser_action_requires_safety(evidence) or _is_cross_origin(evidence):
             safety_error = await _check_browser_safety(
@@ -141,13 +152,7 @@ async def _browser_navigate(
                 return safety_error
         state = await session.navigate(
             url,
-            navigation_interceptor=_navigation_interceptor(
-                registry,
-                arguments,
-                abort_signal=abort_signal,
-                execution_context=execution_context,
-                fallback_url=current_url,
-            ),
+            navigation_interceptor=navigation_interceptor,
         )
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(
@@ -162,7 +167,9 @@ async def _browser_state(
     del arguments
     try:
         _session(registry).ensure_available()
-        state = await _session(registry).observe()
+        state = await _session(registry).observe(
+            navigation_interceptor=deny_all_navigation
+        )
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
     return _state_result(state)
@@ -364,6 +371,7 @@ async def _run_element_action(
             role=selected_entry.role,
             affordance=selected_entry.affordance,
         )
+        operation_token = session.next_operation_token
         evidence = BrowserRiskEvidence(
             action=action,
             role=element.role,
@@ -378,6 +386,15 @@ async def _run_element_action(
             download=element.download,
             durable_state_change=element.durable_state_change or action == "submit",
             origin_allowed=_element_origin_allowed(registry, current_state, element),
+            operation_token=operation_token,
+        )
+        navigation_interceptor = _navigation_interceptor(
+            registry,
+            arguments,
+            abort_signal=abort_signal,
+            execution_context=execution_context,
+            fallback_url=current_state.observation.url,
+            operation_token=operation_token,
         )
         if browser_action_requires_safety(evidence) or _is_cross_origin(evidence):
             safety_error = await _check_browser_safety(
@@ -395,13 +412,7 @@ async def _run_element_action(
             text=text if isinstance(text, str) else None,
             replace=replace,
             value=value if isinstance(value, str) else None,
-            navigation_interceptor=_navigation_interceptor(
-                registry,
-                arguments,
-                abort_signal=abort_signal,
-                execution_context=execution_context,
-                fallback_url=current_state.observation.url,
-            ),
+            navigation_interceptor=navigation_interceptor,
         )
         post_payload = catalog_payload(state.catalog)
         try:
@@ -482,10 +493,17 @@ async def _browser_extract(
         limit = min(limit, session.limits.extracted_bytes)
         search_extracted = None
         if not attributes:
-            search_extracted = await session.extract_search_results(target, limit)
+            search_extracted = await session.extract_search_results(
+                target, limit, navigation_interceptor=deny_all_navigation
+            )
         extracted = None
         if search_extracted is None or search_extracted.results is None:
-            extracted = await session.extract(target, attributes, limit)
+            extracted = await session.extract(
+                target,
+                attributes,
+                limit,
+                navigation_interceptor=deny_all_navigation,
+            )
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
     triage = None
@@ -945,8 +963,24 @@ async def _check_browser_safety(
         and abort_signal is not None
         and execution_context is not None
     ):
+        destination_url = evidence.target_url or evidence.form_action_origin or ""
+        destination_origin = _origin(destination_url) or destination_url
+        source_origin = evidence.current_origin
+        nav_id = (
+            f"{execution_context.tool_call.id}"
+            f":nav:{evidence.operation_token}:{source_origin}->{destination_origin}"
+        )
+        nav_call = ToolCall(
+            nav_id,
+            execution_context.tool_call.name,
+            {
+                "destination": destination_url,
+                "source_origin": source_origin,
+                "operation": evidence.operation_token,
+            },
+        )
         gate_result, _execution_signal = await registry._approval_gate.run(
-            execution_context.tool_call,
+            nav_call,
             arguments,
             abort_signal,
             lambda current: registry._next_abort_generation(current),
@@ -970,6 +1004,7 @@ def _navigation_interceptor(
     abort_signal: AbortSignal | None,
     execution_context: ToolExecutionContext | None,
     fallback_url: str,
+    operation_token: int,
 ) -> NavigationInterceptor:
     async def inspect(destination_url: str, current_url: str | None) -> None:
         observed_url = current_url or fallback_url
@@ -987,6 +1022,7 @@ def _navigation_interceptor(
                 False,
                 False,
                 _target_origin_allowed(registry, current_origin, destination_url),
+                operation_token,
             )
         )
         if not (browser_action_requires_safety(evidence) or _is_cross_origin(evidence)):

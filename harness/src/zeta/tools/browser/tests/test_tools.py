@@ -435,7 +435,10 @@ async def test_browser_ask_uses_durable_approval_gate(
     )
     task = asyncio.create_task(registry.execute(call))
     for _ in range(100):
-        if any(request.request_id == call.id for request in policy.pending_requests()):
+        if any(
+            request.request_id.startswith(f"{call.id}:nav:")
+            for request in policy.pending_requests()
+        ):
             break
         await asyncio.sleep(0.01)
     else:
@@ -444,7 +447,7 @@ async def test_browser_ask_uses_durable_approval_gate(
     request = next(
         request
         for request in policy.pending_requests()
-        if request.request_id == call.id
+        if request.request_id.startswith(f"{call.id}:nav:")
     )
     assert request.label is not None
     assert "action=submit" in request.label
@@ -452,7 +455,7 @@ async def test_browser_ask_uses_durable_approval_gate(
     assert "destination=https://payments.example/checkout" in request.label
     assert "risk_reason=score_exceeds" in request.label
 
-    assert policy.resolve(call.id, decision) is True
+    assert policy.resolve(request.request_id, decision) is True
     result = await task
 
     assert result["isError"] is (decision is ApprovalDecision.DENY)

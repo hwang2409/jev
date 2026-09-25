@@ -10,7 +10,6 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...core.safety import normalize_origin
 from ...routing import browser_threshold_version
 from .adapter import (
     ActionObservation,
@@ -140,6 +139,10 @@ class BrowserSession:
         return self._state
 
     @property
+    def next_operation_token(self) -> int:
+        return self._operation_token + 1
+
+    @property
     def catalog(self) -> BrowserCatalog | None:
         return None if self._state is None else self._state.catalog
 
@@ -186,7 +189,7 @@ class BrowserSession:
         self,
         url: str,
         *,
-        navigation_interceptor: NavigationInterceptor | None = None,
+        navigation_interceptor: NavigationInterceptor,
     ) -> BrowserState:
         self._ensure_task_available()
         adapter = await self.adapter(check_budget=False)
@@ -201,13 +204,22 @@ class BrowserSession:
         self._record_action(f"navigate:{url}")
         return state
 
-    async def observe(self, *, check_budget: bool = True) -> BrowserState:
+    async def observe(
+        self,
+        *,
+        navigation_interceptor: NavigationInterceptor,
+        check_budget: bool = True,
+    ) -> BrowserState:
         if check_budget:
             self.ensure_available()
         adapter = self._adapter
         if adapter is None:
             adapter = await self.adapter()
-        observation = await adapter.observe(self.limits)
+        operation = self._begin_operation(navigation_interceptor)
+        try:
+            observation = await adapter.observe(self.limits)
+        finally:
+            self._expire_operation(operation)
         return self._record_observation(observation)
 
     async def action(
@@ -218,7 +230,7 @@ class BrowserSession:
         text: str | None = None,
         replace: bool = True,
         value: str | None = None,
-        navigation_interceptor: NavigationInterceptor | None = None,
+        navigation_interceptor: NavigationInterceptor,
     ) -> tuple[ActionObservation, BrowserState]:
         adapter = await self.adapter()
         self.consume_action()
@@ -241,7 +253,7 @@ class BrowserSession:
                 )
             else:
                 raise ValueError(f"unsupported browser action: {action}")
-            state = await self.observe(check_budget=False)
+            state = self._record_observation(await adapter.observe(self.limits))
             if previous_url != state.observation.url:
                 self._reset_page_budget()
         finally:
@@ -253,14 +265,14 @@ class BrowserSession:
         adapter.install_navigation_guard(self._navigation_guard_callback)
 
     def _begin_operation(
-        self, interceptor: NavigationInterceptor | None
+        self, interceptor: NavigationInterceptor
     ) -> _BrowserOperation:
         if self._active_operation is not None:
             self._expire_operation(self._active_operation)
         self._operation_token += 1
         operation = _BrowserOperation(
             self._operation_token,
-            interceptor or _same_origin_navigation,
+            interceptor,
         )
         self._active_operation = operation
         return operation
@@ -315,17 +327,31 @@ class BrowserSession:
         target: ElementRef | None,
         attributes: list[str],
         limit: int,
+        *,
+        navigation_interceptor: NavigationInterceptor,
     ) -> ExtractedData:
         self.ensure_available()
-        return await (await self.adapter()).extract(target, attributes, limit)
+        adapter = await self.adapter()
+        operation = self._begin_operation(navigation_interceptor)
+        try:
+            return await adapter.extract(target, attributes, limit)
+        finally:
+            self._expire_operation(operation)
 
     async def extract_search_results(
         self,
         target: ElementRef | None,
         limit: int,
+        *,
+        navigation_interceptor: NavigationInterceptor,
     ) -> SearchResultExtraction:
         self.ensure_available()
-        return await (await self.adapter()).extract_search_results(target, limit)
+        adapter = await self.adapter()
+        operation = self._begin_operation(navigation_interceptor)
+        try:
+            return await adapter.extract_search_results(target, limit)
+        finally:
+            self._expire_operation(operation)
 
     async def call_jev(
         self, operation: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
@@ -471,16 +497,12 @@ class BrowserSessionClosedError(BrowserError):
     """The registry closed the browser session permanently."""
 
 
-async def _same_origin_navigation(
+async def deny_all_navigation(
     destination_url: str, current_url: str | None
 ) -> None:
-    if current_url is not None and normalize_origin(
-        destination_url
-    ) == normalize_origin(current_url):
-        return
     raise NavigationBlockedError(
-        "browser navigation was blocked because no browser safety policy classified "
-        "the destination"
+        "browser navigation was blocked because this browser operation does not "
+        "perform navigation"
     )
 
 

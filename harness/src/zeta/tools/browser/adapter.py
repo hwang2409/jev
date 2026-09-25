@@ -634,7 +634,9 @@ class PlaywrightBrowserAdapter:
 
     async def _install_navigation_interception(self) -> None:
         if self._page is None or not hasattr(self._page, "route"):
-            return
+            raise BrowserError(
+                "browser page does not support navigation interception; launch aborted"
+            )
         try:
             await _maybe_await(self._page.route("**/*", self._handle_route))
         except Exception as exc:
@@ -792,6 +794,11 @@ def _raise_playwright_error(exc: Exception, message: str) -> None:
     raise BrowserError(message) from exc
 
 
+class _FakePage:
+    async def route(self, _pattern: str, _handler: object) -> None:
+        return None
+
+
 class FakeBrowserAdapter:
     """Deterministic browser adapter for offline tests."""
 
@@ -800,9 +807,11 @@ class FakeBrowserAdapter:
         observations: list[PageObservation],
         *,
         search_results: tuple[SearchResultCandidate, ...] | None = None,
+        page: object | None = None,
     ) -> None:
         self._observations = list(observations)
         self._search_results = search_results
+        self._page = page if page is not None else _FakePage()
         self._observation_index = 0
         self._detached: set[str] = set()
         self._timeouts: set[str] = set()
@@ -827,7 +836,10 @@ class FakeBrowserAdapter:
         self._races.add(action)
 
     async def launch(self) -> None:
-        return None
+        if self._page is None or not hasattr(self._page, "route"):
+            raise BrowserError(
+                "browser page does not support navigation interception; launch aborted"
+            )
 
     def install_navigation_guard(self, guard: NavigationInterceptor) -> None:
         if self._navigation_guard is not None and self._navigation_guard is not guard:

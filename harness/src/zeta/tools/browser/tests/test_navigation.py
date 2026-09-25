@@ -43,6 +43,7 @@ async def test_navigation_guard_classifies_every_destination(
         abort_signal=None,
         execution_context=None,
         fallback_url="https://example.test/",
+        operation_token=1,
     )
 
     with pytest.raises(NavigationBlockedError):
