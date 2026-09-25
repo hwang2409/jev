@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from zeta.protocol.types import ToolCall
 from zeta.skills import SkillCatalog
 from zeta.tools.browser import register
 from zeta.tools.browser.adapter import (
@@ -412,6 +413,50 @@ async def test_real_adapter_types_a_missing_browser_executable(
     )
     with pytest.raises(BrowserExecutableNotFoundError):
         await adapter.launch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "playwright"])
+async def test_launch_fails_structured_without_navigation_interception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter_kind: str
+) -> None:
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
+    if adapter_kind == "fake":
+        adapter = FakeBrowserAdapter([observation], page=object())
+    else:
+        class Page:
+            async def goto(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            async def evaluate(self, *_args: object, **_kwargs: object) -> object:
+                return None
+
+            def locator(self, _selector: str) -> object:
+                return object()
+
+        monkeypatch.setattr(
+            "zeta.tools.browser.adapter.load_playwright_page", lambda: Page()
+        )
+        adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        browser_enabled=True,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    registry.browser_adapter_factory = lambda: adapter
+    register(registry)
+
+    result = await registry.execute(ToolCall("state", "browser_state", {}))
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["kind"] == "browser_start_failed"
+    assert (
+        "browser page does not support navigation interception; launch aborted"
+        in result["structuredContent"]["error"]["message"]
+    )
 
 
 @pytest.mark.asyncio

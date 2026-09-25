@@ -35,6 +35,7 @@ from .adapter import (
 )
 from .catalog import (
     SearchResult,
+    catalog_criteria,
     prefilter_catalog,
     rank_search_result_ids,
     triage_search_results,
@@ -661,80 +662,6 @@ def _triage_receipt(triage: Mapping[str, object]) -> str:
     return f"search triage: status={status} decision={decision} warnings={warning_text}"
 
 
-def catalog_criteria() -> dict[str, dict[str, object]]:
-    """Return neutral router boundaries for browser tools."""
-
-    return {
-        "browser_navigate": {
-            "what": "Open one allowed URL in the browser session.",
-            "not_for": (
-                "Returning page state (use browser_state), extracting page content "
-                "(use browser_extract), or interacting with page elements (use "
-                "browser_click, browser_type, browser_select, or browser_submit)."
-            ),
-            "examples": ["Open https://example.test/account."],
-        },
-        "browser_state": {
-            "what": "Return the current bounded page state and element catalog.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), extracting page content "
-                "(use browser_extract), or acting on elements (use browser_click, "
-                "browser_type, browser_select, or browser_submit)."
-            ),
-            "examples": ["Show the current browser page and its available controls."],
-        },
-        "browser_click": {
-            "what": "Click one identified page element from the current snapshot.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), reading page state (use "
-                "browser_state), extracting content (use browser_extract), or using "
-                "a different element action (use browser_type, browser_select, or "
-                "browser_submit)."
-            ),
-            "examples": ["Click the Continue button in the current page snapshot."],
-        },
-        "browser_type": {
-            "what": "Replace or append text in one identified page input.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), reading page state (use "
-                "browser_state), extracting content (use browser_extract), or using "
-                "browser_click, browser_select, or browser_submit for the element "
-                "action."
-            ),
-            "examples": ["Type the email address into the current page input."],
-        },
-        "browser_select": {
-            "what": "Select one option in an identified page control.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), reading page state (use "
-                "browser_state), extracting content (use browser_extract), or using "
-                "browser_click, browser_type, or browser_submit for the element "
-                "action."
-            ),
-            "examples": ["Select March from the current page month control."],
-        },
-        "browser_extract": {
-            "what": "Extract bounded text or attributes from the page or one element.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), reading the page snapshot "
-                "(use browser_state), or changing page state with browser_click, "
-                "browser_type, browser_select, or browser_submit."
-            ),
-            "examples": ["Extract the title and price from the current product page."],
-        },
-        "browser_submit": {
-            "what": "Submit one identified form or submit control after safety approval.",
-            "not_for": (
-                "Opening a URL (use browser_navigate), reading page state (use "
-                "browser_state), extracting content (use browser_extract), or using "
-                "browser_click, browser_type, or browser_select for the element "
-                "action."
-            ),
-            "examples": ["Submit the completed form from the current page snapshot."],
-        },
-    }
-
-
 def register(registry: ToolRegistry) -> None:
     """Register the stable browser surface without opening a browser."""
 
@@ -963,15 +890,12 @@ async def _check_browser_safety(
         and abort_signal is not None
         and execution_context is not None
     ):
+        source_origin = evidence.current_origin
         destination_url = evidence.target_url or evidence.form_action_origin or ""
         destination_origin = _origin(destination_url) or destination_url
-        source_origin = evidence.current_origin
-        nav_id = (
-            f"{execution_context.tool_call.id}"
-            f":nav:{evidence.operation_token}:{source_origin}->{destination_origin}"
-        )
         nav_call = ToolCall(
-            nav_id,
+            f"{execution_context.tool_call.id}:nav:{evidence.operation_token}:"
+            f"{source_origin}->{destination_origin}",
             execution_context.tool_call.name,
             {
                 "destination": destination_url,
