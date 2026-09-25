@@ -33,15 +33,15 @@ Both remain below `MAX_FILE_LINES=1250`. The directory remains below
 | snapshot-local identity and generation invalidation | implemented | `harness/src/zeta/tools/browser/session.py:167-213,234-249` rejects stale or mismatched ids; `harness/src/zeta/tools/browser/catalog.py:160-219` builds and checks snapshots | retain; existing tests remain regression gates |
 | catalog roles, affordances, text bounds, and byte bounds | implemented | `harness/src/zeta/tools/browser/catalog.py:24-55,160-480` builds normalized entries and bounded payloads; `catalog.py:253-480` enforces byte fitting | retain |
 | cheap pre-filter and no-candidate behavior | implemented | `harness/src/zeta/tools/browser/catalog.py:457-637` defines `ELEMENT_PREFILTER_K=40`, `ELEMENT_CATALOG_MAX=24`, role and lexical scoring, diversity, prior-id retention, and empty results | retain |
-| Jev element Choice and least-confidence result | implemented | `harness/src/zeta/providers/jev.py:492-702` builds, parses, retries, and confidence-gates element choice; `harness/src/zeta/routing.py:7-12` names the top-1 and top-3 settings | retain |
+| Jev element Choice and least-confidence result | partial | `harness/src/zeta/providers/jev.py:492-702` builds, parses, retries, and confidence-gates element choice; `harness/src/zeta/routing.py:7-12` has the top-1 and top-3 constants, but named-setting configurability and threshold-version telemetry are missing | add named settings, versioned threshold telemetry, and threshold-isolation tests in lane 2 |
 | six page-state Nouls and conservative recovery | implemented | `harness/src/zeta/providers/jev_browser.py:14-325` defines and parses all six gates; `harness/src/zeta/tools/browser/gates.py:25-212` applies safe directions and the recovery cap | retain |
 | shared safety-tier handoff for risky browser actions | partial | `harness/src/zeta/core/safety/_browser.py:43-83` classifies browser evidence; `harness/src/zeta/core/safety/_tier.py:86-128` evaluates it through the shared tier; `browser/__init__.py:316-339,798-838` calls the tier | add explicit origin-allowlist enforcement and budget tests in lane 2 |
-| origin allowlist and approval-gated external navigation | partial | `browser/__init__.py:745-751` only parses an origin; `adapter.py:625-636` accepts any absolute HTTP or HTTPS URL; `_browser.py:57-68` detects cross-origin evidence but has no allowlist | add one shared policy in lane 2 |
+| origin allowlist and approval-gated external navigation | partial | `browser/__init__.py:745-751` only parses an origin; `adapter.py:625-636` accepts any absolute HTTP or HTTPS URL; `_browser.py:57-68` detects cross-origin evidence but has no allowlist; `runtime/composition.py:141-150` creates `SafetyTier` only when safety-tier and yolo are both enabled, so `_check_browser_safety()` denies instead of asking in a normal interactive run | add one shared policy in lane 2, wire browser safety independently of shell yolo, and test the flag/yolo/safety-tier/headless matrix |
 | named browser budgets | partial | `session.py:24-25` has only navigation and action timeouts; `adapter.py:18-24` has byte caps; no page Jev call, Jev token, task action, or task wall-clock budget exists | add named settings, accounting, and fail-closed exhaustion in lane 2 |
 | default-off experimental flag | missing | `harness/src/zeta/tools/_discovery.py:14-50` imports browser and calls `register`; `browser/__init__.py:627-710` registers unconditionally; `harness/src/zeta/config/settings.py:50-68,85-129` has no browser setting; `harness/src/zeta/cli/main.py:54-100` has no browser flag | make lane 1 the registration-time gate |
 | prompt-injection boundary rules | implemented | `harness/src/zeta/providers/jev.py:492-607` names state fields and neutral criteria; `harness/tests/test_browser_injection.py:201-692` covers hostile fields, URLs, hidden names, extraction, tool results, safety, and static schemas | retain; rerun as a gate regression |
-| stable structured errors and recovery hints | implemented | `harness/src/zeta/tools/browser/__init__.py:1004-1037` maps adapter and routing failures; `harness/src/zeta/tools/_results.py:134-147` supplies recovery hints | retain; add budget and origin error kinds in lane 2 |
-| search-result extraction and triage | implemented | `adapter.py:75-92,454-482` returns bounded result records; `catalog.py:55-158` applies score, tie, floor, confidence, and source diversity; `test_tools.py:1055-1112` exercises handler results | retain |
+| stable structured errors and recovery hints | partial | `harness/src/zeta/tools/browser/__init__.py:1004-1037` maps known adapter and routing failures, but navigation failures fall through to `browser_start_failed`; design section 8 requires `page_load_failed` for page-load failures | add the page-load error-kind mapping and regression in lane 2 |
+| search-result extraction and triage | partial | `adapter.py:75-92,454-482` returns bounded result records; `catalog.py:55-158` applies score, tie, floor, confidence, and source diversity; `routing.py` has constants only, without named-setting configurability or threshold-version telemetry; `test_tools.py:1055-1112` exercises handler results | add named settings, versioned threshold telemetry, and threshold-isolation tests in lane 2 |
 | headless Playwright path | partial | `adapter.py:284-324` supports headless launch; `harness/tools/browser_live_smoke.py:125-190` runs handlers, but its policy values are unset at lines 21-24 and the URL comes from an environment variable at lines 27-32 | replace the external-site smoke with the locked local fixture in lane 3 |
 | local fixture smoke site | missing | no `harness/tests/browser_fixture/` directory exists; `harness/tests/test_browser_live_smoke.py:8-16` only tests enablement and does not start a site | add the disposable localhost fixture and smoke assertions in lane 3 |
 | offline routed-versus-stock browser evaluation | missing | `harness/evals/run_evals.py` covers existing router tasks; no browser task corpus or browser-specific runner exists | add the browser eval harness in lane 4 |
@@ -51,9 +51,9 @@ Both remain below `MAX_FILE_LINES=1250`. The directory remains below
 | design section 9 family | status | current evidence | remaining work |
 | --- | --- | --- | --- |
 | 9.1 catalog and routing fixtures | implemented | `harness/src/zeta/tools/browser/tests/test_catalog.py:125-387` covers bounds, hidden entries, generations, and large inputs; `test_prefilter.py:113-239` covers 100 and 500 element pages, diversity, and empty candidates; `harness/src/zeta/tools/route/tests/test_router_auto.py:164-403` covers static schemas and unrouted elements | keep as regression coverage; add flag-off schema assertions in lane 1 |
-| 9.2 mocked Jev provider | implemented | `harness/tests/test_jev_provider.py:451-960` covers neutral Choice, page-state, search scoring, malformed responses, retries, missing keys, bounds, usage, and confidence; `harness/tests/test_safety.py:63-316` covers safety decisions and failure polarity | add named budget accounting and allowlist cases in lane 2 |
+| 9.2 mocked Jev provider | partial | `harness/tests/test_jev_provider.py:451-960` covers neutral Choice, page-state, search scoring, malformed responses, missing keys, bounds, usage, and confidence; `test_browser_choice_delegates_retries_to_client` feeds one successful response and asserts one request, so it does not test retry behavior; `harness/tests/test_safety.py:63-316` covers safety decisions and failure polarity | add real retryable responses through the client seam, request-count and usage assertions, named budget accounting, and allowlist cases in lane 2 |
 | 9.3 fake browser adapter | implemented | `harness/src/zeta/tools/browser/tests/test_adapter.py:64-465` covers action recording, bounds, failures, launch, cleanup, and contract parity; `test_session.py:46-78` covers launch failure and cancellation cleanup | keep as regression coverage |
-| 9.4 tool and loop tests | implemented | `harness/src/zeta/tools/browser/tests/test_tools.py:803-1112` covers schemas, lazy use, stale identity, cleanup, extraction, triage, and safety; `router_auto.py:238-403` covers loop routing and fail-open identity rejection | add default-off and flag-on cases in lane 1 |
+| 9.4 tool and loop tests | partial | `harness/src/zeta/tools/browser/tests/test_tools.py:803-1112` covers schemas, lazy use, stale identity, cleanup, extraction, triage, and safety; `router_auto.py:238-403` covers loop routing and fail-open identity rejection, but no test maps the design's required browser batch behavior | add a concrete multi-call browser batch test, plus default-off and flag-on cases, in lane 1 |
 | 9.5 gated live smoke | partial | `harness/tools/browser_live_smoke.py:42-79` has policy checks and a budget helper; `test_browser_live_smoke.py:8-16` checks only enablement | add local fixture, complete flow, stale recovery, low-confidence response, external approval, cleanup, and no-secret checks in lane 3 |
 
 ## locked decisions
@@ -104,6 +104,8 @@ Scope:
   adapter factory, or a session when the flag is off.
 - Keep flag-on registration byte-compatible with the existing seven schemas.
 - Allow browser unit tests to construct an explicitly enabled registry.
+- Add a browser loop test for a multi-call batch that preserves result order
+  and applies routing, identity, and safety checks to each call.
 
 Files touched:
 
@@ -134,6 +136,7 @@ Targeted test set:
 - settings and CLI precedence tests;
 - discovery default-off and explicit-enable tests;
 - browser schema and lazy-session tests;
+- browser loop batch-behavior test for multi-call dispatch and per-call results;
 - router catalog tests for hidden and enabled browser tools;
 - `harness/tests/test_module_limits.py::test_module_limits`.
 
@@ -155,6 +158,9 @@ Scope:
   token. Bound the task action count and wall clock with a monotonic clock.
 - Apply the budgets to element choice, page-state gates, search triage, and
   recovery. Preserve existing navigation and action timeout settings.
+- Promote element-selection and search-triage thresholds to named settings.
+  Emit a threshold version with each decision and keep primitive thresholds
+  separate.
 - Return one stable `browser_budget_exhausted` teaching error. Do not retry a
   risky action after exhaustion.
 - Add one origin policy that normalizes scheme, host, and effective port.
@@ -163,6 +169,15 @@ Scope:
   origin that is not allowlisted; never let a page label change the result.
 - Keep the policy in the existing browser safety path. Do not create a second
   browser risk policy.
+- Wire the browser safety tier independently of shell yolo. Interactive
+  external navigation must reach the existing approval prompt. Headless
+  external navigation must deny with a teaching error. Test every combination
+  of browser flag, yolo flag, safety-tier flag, and interactive or headless
+  mode.
+- Map adapter navigation failures to `page_load_failed` and add a regression
+  test for the structured error kind.
+- Drive provider retry tests with retryable responses followed by success
+  through the client seam. Assert request count, final result, and usage.
 
 Files touched:
 
@@ -173,11 +188,15 @@ Files touched:
 - `harness/src/zeta/tools/registry.py`
 - `harness/src/zeta/tools/browser/session.py`
 - `harness/src/zeta/tools/browser/__init__.py`
+- `harness/src/zeta/routing.py`
+- `harness/src/zeta/providers/jev.py`
+- `harness/src/zeta/tools/browser/catalog.py`
 - `harness/src/zeta/core/safety/_browser.py`
 - `harness/src/zeta/core/safety/_tier.py` only for shared origin outcome wiring
 - `harness/src/zeta/tools/_results.py`
 - `harness/tests/test_settings.py`
 - `harness/tests/test_safety.py`
+- `harness/tests/test_jev_provider.py`
 - `harness/src/zeta/tools/browser/tests/test_gates.py`
 - `harness/src/zeta/tools/browser/tests/test_tools.py`
 - `harness/tests/test_browser_injection.py`
@@ -189,9 +208,16 @@ Exit criteria:
   structured error and safe recovery hint.
 - Provider usage is charged once, including retries, with no negative or
   unbounded counter.
+- Element-selection and search-triage thresholds are named settings, remain
+  separate by primitive, and emit threshold-version telemetry.
 - The localhost fixture origin can pass the allowlist.
 - An external target cannot auto-proceed, including after an explicit user
-  request. It reaches the existing approval or headless denial path.
+  request. Browser safety reaches approval in interactive mode without shell
+  yolo, and denies with a teaching error in headless mode. The full
+  browser/yolo/safety-tier/headless matrix passes.
+- Retry tests exercise real retryable responses through the client seam and
+  assert the final result, request count, and usage.
+- Navigation failures return `page_load_failed` with a regression test.
 - Hostile page text cannot add an origin, raise a budget, or change a
   threshold.
 - Existing shell safety behavior remains unchanged.
@@ -201,8 +227,13 @@ Targeted test set:
 
 - settings defaults and CLI precedence;
 - browser call and token accounting, action cap, and wall-clock cap;
+- named threshold settings, threshold-version telemetry, and primitive
+  threshold-isolation tests;
 - origin normalization, localhost allowlist, external approval, and headless
   denial;
+- browser/yolo/safety-tier/headless matrix tests for external navigation;
+- provider retry tests with retryable responses through the client seam;
+- navigation failure mapping and `page_load_failed` regression;
 - missing-key, malformed, and low-confidence shared safety failures;
 - injection probes for hostile URLs, labels, and extracted text;
 - gate recovery at and below the budget cap;
@@ -348,7 +379,8 @@ Each lane must preserve:
 
 This revision starts from current code evidence. It does not re-plan merged
 browser modules. It places the default-off gate before every later surface
-change. It records the missing budget, origin, local-smoke, and eval work.
+change. It records the missing threshold, approval-wiring, retry, batch,
+error-kind, budget, origin, local-smoke, and eval work.
 Every lane has scope, files, exit criteria, targeted tests, and non-goals.
 The design-spec test families are mapped to existing coverage or a named gap.
 Failure paths use one conservative polarity: uncertainty stops or escalates;
