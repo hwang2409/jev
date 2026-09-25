@@ -8,6 +8,7 @@ import math
 import re
 import string
 import time as _time
+import weakref
 from collections.abc import (
     AsyncIterator,
     Callable,
@@ -17,10 +18,11 @@ from collections.abc import (
     Sequence,
 )
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import thread as _futures_thread
 from dataclasses import dataclass, field, replace
 from os import PathLike
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread
 from typing import Any, Literal, Protocol, TextIO
 from uuid import uuid4
 
@@ -161,10 +163,46 @@ class ConfigurationError(ValueError):
     exit_code = 64
 
 
+class _DaemonThreadPoolExecutor(ThreadPoolExecutor):
+    """Thread pool whose workers cannot hold interpreter shutdown."""
+
+    def _adjust_thread_count(self) -> None:
+        if self._idle_semaphore.acquire(timeout=0):
+            return
+
+        def weakref_cb(_, q=self._work_queue):
+            q.put(None)
+
+        num_threads = len(self._threads)
+        if num_threads < self._max_workers:
+            thread_name = f"{self._thread_name_prefix or self}_{num_threads}"
+            worker = Thread(
+                name=thread_name,
+                target=_futures_thread._worker,
+                args=(
+                    weakref.ref(self, weakref_cb),
+                    self._work_queue,
+                    self._initializer,
+                    self._initargs,
+                ),
+                daemon=True,
+            )
+            worker.start()
+            self._threads.add(worker)
+            # The stdlib exit hook joins every registered worker. These daemon
+            # workers must not keep interpreter shutdown waiting on user code.
+
+
 class SharedScheduler:
     """Run bounded calls with the shared 503 backoff policy."""
 
-    def __init__(self, concurrency: int, *, observer_target: object | None = None):
+    def __init__(
+        self,
+        concurrency: int,
+        *,
+        observer_target: object | None = None,
+        daemon_threads: bool = False,
+    ):
         if (
             isinstance(concurrency, bool)
             or not isinstance(concurrency, int)
@@ -173,6 +211,7 @@ class SharedScheduler:
             raise ConfigurationError("concurrency must be a positive integer")
         self.effective_concurrency = min(concurrency, 8)
         self._observer_target = observer_target
+        self._daemon_threads = daemon_threads
         self._lock = Lock()
         self._current_concurrency = self.effective_concurrency
         self._consecutive_503 = 0
@@ -252,7 +291,12 @@ class SharedScheduler:
         uses_response_observer = callable(set_response_observer)
         if uses_response_observer:
             set_response_observer(self.observe_response)
-        executor = ThreadPoolExecutor(max_workers=self.effective_concurrency)
+        executor_type = (
+            _DaemonThreadPoolExecutor
+            if self._daemon_threads
+            else ThreadPoolExecutor
+        )
+        executor = executor_type(max_workers=self.effective_concurrency)
         futures: dict[Any, int] = {}
         next_task = 0
 
@@ -1086,6 +1130,7 @@ def _judge_core(
     consistency: int | None = None,
     consistency_sigma: float = 2.0,
     validation_states: Iterable[State] | None = None,
+    daemon_threads: bool = False,
 ) -> Iterator[CanonicalRecord]:
     """Yield typed judgment records without writing to process streams."""
 
@@ -1202,7 +1247,11 @@ def _judge_core(
                         path=(f"questions.{question_id}.instructions.state_fields"),
                     )
                 )
-    scheduler = SharedScheduler(concurrency, observer_target=observer_target)
+    scheduler = SharedScheduler(
+        concurrency,
+        observer_target=observer_target,
+        daemon_threads=daemon_threads,
+    )
 
     state_records: list[CanonicalRecord] = []
     formation_records = _formation_records(formation_report.events, base_meta)
@@ -1489,13 +1538,14 @@ def judge_async(
 
         def produce() -> None:
             try:
-                for record in judge(
+                for record in _judge_core(
                     preset,
                     states,
                     formation_report=formation_report,
                     cache_store=cache_store,
                     concurrency=concurrency,
                     judge_fn=active_judge_fn,
+                    daemon_threads=True,
                 ):
                     records.put(record)
             except BaseException as exc:
