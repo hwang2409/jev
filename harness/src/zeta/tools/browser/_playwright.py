@@ -165,6 +165,7 @@ class PlaywrightBrowserAdapter:
         self._dom_generation: int | None = None
         self._url = ""
         self._navigation_origin_url: str | None = None
+        self._navigation_hop_url: str | None = None
         self._closed = False
         self._navigation_guard: NavigationInterceptor | None = None
         self._navigation_error: NavigationBlockedError | None = None
@@ -198,6 +199,7 @@ class PlaywrightBrowserAdapter:
         self._require_page()
         _validate_browser_url(url)
         self._navigation_origin_url = self._url or None
+        self._navigation_hop_url = self._url or None
         self._url = ""
         self._navigation_error = None
         try:
@@ -213,6 +215,7 @@ class PlaywrightBrowserAdapter:
             _raise_playwright_error(exc, "browser navigation failed")
         finally:
             self._navigation_origin_url = None
+            self._navigation_hop_url = None
         return await self.observe(self._limits)
 
     def install_navigation_guard(self, guard: NavigationInterceptor) -> None:
@@ -421,6 +424,7 @@ class PlaywrightBrowserAdapter:
         if self._url and hasattr(self._page, "url") and self._page.url != self._url:
             raise NavigationRaceError(element_ref.element_id)
         self._navigation_error = None
+        self._navigation_hop_url = self._url or None
         try:
             await _maybe_await(action(locator))
         except Exception as exc:
@@ -429,6 +433,8 @@ class PlaywrightBrowserAdapter:
                 self._navigation_error = None
                 raise error from exc
             _raise_playwright_error(exc, "browser action failed")
+        finally:
+            self._navigation_hop_url = None
         observation = await self.observe(self._limits)
         return ActionObservation(
             snapshot_id=observation.snapshot_id,
@@ -506,8 +512,9 @@ class PlaywrightBrowserAdapter:
                     )
                 await self._navigation_guard(
                     request.url,
-                    self._url or self._navigation_origin_url,
+                    self._redirect_source(request),
                 )
+                self._navigation_hop_url = request.url
             await _maybe_await(route.continue_())
         except BaseException as exc:  # noqa: BLE001 - route must fail closed
             if isinstance(exc, NavigationBlockedError):
@@ -521,6 +528,14 @@ class PlaywrightBrowserAdapter:
                 await _maybe_await(route.abort())
             except Exception as abort_error:
                 _logger.debug("browser route abort failed", exc_info=abort_error)
+
+    def _redirect_source(self, request: object) -> str | None:
+        redirected_from = getattr(request, "redirected_from", None)
+        if redirected_from is not None:
+            source_url = getattr(redirected_from, "url", None)
+            if isinstance(source_url, str):
+                return source_url
+        return self._navigation_hop_url or self._url or self._navigation_origin_url
 
     def _is_top_level_navigation(self, request: object) -> bool:
         try:

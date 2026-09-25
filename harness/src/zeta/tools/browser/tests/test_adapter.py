@@ -506,6 +506,61 @@ async def test_adapters_fail_closed_without_a_navigation_guard() -> None:
 
 
 @pytest.mark.asyncio
+async def test_real_adapter_uses_each_redirect_hop_as_the_source() -> None:
+    class Request:
+        def __init__(
+            self,
+            url: str,
+            frame: object,
+            redirected_from: Request | None = None,
+        ) -> None:
+            self.url = url
+            self.frame = frame
+            self.redirected_from = redirected_from
+
+        def is_navigation_request(self) -> bool:
+            return True
+
+    class Page:
+        def __init__(self) -> None:
+            self.main_frame = object()
+
+    class Route:
+        def __init__(self, request: Request) -> None:
+            self.request = request
+            self.continued = False
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+        async def abort(self) -> None:
+            raise AssertionError("redirect route should not be aborted")
+
+    page = Page()
+    first = Request("https://example.test/", page.main_frame)
+    second = Request("https://example.test/next", page.main_frame, first)
+    third = Request("https://example.test/final", page.main_frame, second)
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    adapter._page = page
+    adapter._url = first.url
+    seen: list[tuple[str, str | None]] = []
+
+    async def classify(destination: str, source: str | None) -> None:
+        seen.append((destination, source))
+
+    adapter.install_navigation_guard(classify)
+    for request in (second, third):
+        route = Route(request)
+        await adapter._handle_route(route)
+        assert route.continued is True
+
+    assert seen == [
+        (second.url, first.url),
+        (third.url, second.url),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_browser_adapters_share_the_action_contract(
     contract_adapter: FakeBrowserAdapter | PlaywrightBrowserAdapter,
 ) -> None:
