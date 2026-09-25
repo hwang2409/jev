@@ -243,6 +243,7 @@ def _create_runtime_bootstrap(
         cli_router=cli_router,
         cli_router_style=getattr(args, "router_style", None),
         cli_jev_compaction=getattr(args, "jev_compaction", None),
+        cli_browser_enabled=getattr(args, "browser", None),
         cli_memory_injection=getattr(args, "memory_injection", None),
         cli_yolo=getattr(args, "yolo", None),
         cli_safety_tier=getattr(args, "safety_tier", None),

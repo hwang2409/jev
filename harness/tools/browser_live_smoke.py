@@ -129,6 +129,7 @@ async def run_smoke(*, headless: bool) -> None:
     registry = ToolRegistry(
         Path.cwd(),
         register_builtin=False,
+        browser_enabled=True,
         safety_tier=SafetyTier(cwd=Path.cwd(), headless=True),
         skill_catalog=SkillCatalog.empty(),
     )

@@ -88,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="triage old tool results through Jev before compaction",
     )
     parser.add_argument(
+        "--browser",
+        dest="browser",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable the experimental browser tool surface",
+    )
+    parser.add_argument(
         "--memory-injection",
         action=argparse.BooleanOptionalAction,
         default=None,

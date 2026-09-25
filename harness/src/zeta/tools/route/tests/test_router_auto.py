@@ -10,6 +10,7 @@ import zeta.runtime.loop as loop_module
 import zeta.tools.route as route_module
 from zeta.core.approval import ApprovalDecision, ApprovalPolicy
 from zeta.core.fake import FakeBackend, ScriptedTurn
+from zeta.core.safety import SafetyOutcome, SafetyTier
 from zeta.core.store import ConversationStore
 from zeta.protocol.types import (
     Message,
@@ -143,6 +144,7 @@ def build_browser_loop(
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
     )
     route_module.register(registry)
@@ -284,6 +286,83 @@ async def test_auto_route_executes_browser_tool_through_loop(
     assert tool_result is not None
     assert tool_result.is_error is False
     assert '"url": "https://example.test/next"' in tool_result.content
+
+
+@pytest.mark.asyncio
+async def test_browser_batch_preserves_order_and_checks_each_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    loop = build_browser_loop(tmp_path, router_style="auto")
+    loop.set_browser_catalog(browser_catalog("current"))
+    tier = SafetyTier(cwd=tmp_path)
+    loop.tool_registry.safety_tier = tier
+    safety_calls: list[object] = []
+
+    async def deny(evidence: object) -> SafetyOutcome:
+        safety_calls.append(evidence)
+        return SafetyOutcome("deny", "layer0", reason="external_origin")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+    monkeypatch.setattr(
+        loop_module,
+        "auto_route",
+        async_result(
+            result(
+                "browser_navigate",
+                confidence=0.7,
+                probabilities={
+                    "browser_navigate": 0.4,
+                    "browser_click": 0.3,
+                    "browser_state": 0.2,
+                },
+            )
+        ),
+    )
+    loop.backend = FakeBackend(
+        [
+            ScriptedTurn(
+                tool_calls=[
+                    ToolCall(
+                        "navigate-1",
+                        "invoke",
+                        {
+                            "tool": "browser_navigate",
+                            "args": {"url": "https://external.test/checkout"},
+                        },
+                    ),
+                    ToolCall(
+                        "click-1",
+                        "invoke",
+                        {
+                            "tool": "browser_click",
+                            "args": {
+                                "snapshot_id": 999,
+                                "element_id": "current",
+                                "role": "button",
+                                "affordance": "click",
+                            },
+                        },
+                    ),
+                ]
+            ),
+            ScriptedTurn(content=[TextContent("done")]),
+        ]
+    )
+
+    await collect(loop.run_turn("open the external checkout and click the button"))
+
+    results = [
+        message.tool_result
+        for message in loop.store.messages()
+        if message.tool_result is not None
+    ]
+    assert [result.tool_call_id for result in results] == ["navigate-1", "click-1"]
+    first_error = results[0].structured_content.get("error")
+    assert isinstance(first_error, dict)
+    assert first_error["kind"] == "safety_denied"
+    assert results[1].structured_content["error_kind"] == "unrouted_element"
+    assert len(safety_calls) == 1
+    assert loop.unrouted_attempts == 1
 
 
 @pytest.mark.asyncio

@@ -39,6 +39,14 @@ def test_parser_accepts_router_style() -> None:
     assert args.router_style == "auto"
 
 
+def test_parser_accepts_browser_boolean_flags() -> None:
+    parser = build_parser()
+
+    assert parser.parse_args(["--browser"]).browser is True
+    assert parser.parse_args(["--no-browser"]).browser is False
+    assert parser.parse_args([]).browser is None
+
+
 def test_completion_parser_accepts_both_shells() -> None:
     parser = build_parser()
 

@@ -3,13 +3,43 @@ from pathlib import Path
 import pytest
 
 import zeta.tools as tools_package
+from zeta.protocol.types import ToolCall
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
-from zeta.protocol.types import ToolCall
 
 
 def _use_tool_path(monkeypatch: pytest.MonkeyPatch, path: Path) -> None:
     monkeypatch.setattr(tools_package, "__path__", [str(path)])
+
+
+def test_registry_hides_browser_surface_by_default(tmp_path: Path) -> None:
+    registry = ToolRegistry(tmp_path, skill_catalog=SkillCatalog.empty())
+
+    assert not any(name.startswith("browser_") for name in registry.registered_names)
+    assert registry.browser_adapter_factory is None
+    assert registry.browser_session is None
+
+
+def test_registry_discovers_browser_surface_when_enabled(tmp_path: Path) -> None:
+    registry = ToolRegistry(
+        tmp_path,
+        browser_enabled=True,
+        skill_catalog=SkillCatalog.empty(),
+    )
+
+    assert {
+        name for name in registry.registered_names if name.startswith("browser_")
+    } == {
+        "browser_navigate",
+        "browser_state",
+        "browser_click",
+        "browser_type",
+        "browser_select",
+        "browser_extract",
+        "browser_submit",
+    }
+    assert registry.browser_adapter_factory is not None
+    assert registry.browser_session is not None
 
 
 @pytest.mark.asyncio

@@ -147,6 +147,7 @@ def compose_runtime(
             opened.store.cwd,
             memory_config=config.memory_config,
             safety_tier=safety_tier,
+            browser_enabled=config.browser_enabled,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )

@@ -627,6 +627,9 @@ def catalog_criteria() -> dict[str, dict[str, object]]:
 def register(registry: ToolRegistry) -> None:
     """Register the stable browser surface without opening a browser."""
 
+    if not registry.browser_enabled:
+        return
+
     if registry.browser_adapter_factory is None:
         registry.browser_adapter_factory = make_browser_adapter_factory(
             headless=True,
