@@ -7,9 +7,10 @@ import inspect
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
+from ...core.safety import normalize_origin
 from ...routing import browser_threshold_version
 from .adapter import (
     ActionObservation,
@@ -18,6 +19,7 @@ from .adapter import (
     ElementRef,
     ElementUnavailableError,
     ExtractedData,
+    NavigationBlockedError,
     NavigationInterceptor,
     PageObservation,
     SearchResultExtraction,
@@ -32,6 +34,14 @@ _logger = logging.getLogger(__name__)
 AdapterFactory = Callable[[], BrowserAdapter | Awaitable[BrowserAdapter]]
 CatalogSink = Callable[[BrowserCatalog | None], None]
 Clock = Callable[[], float]
+
+
+@dataclass(slots=True)
+class _BrowserOperation:
+    token: int
+    interceptor: NavigationInterceptor
+    active: bool = True
+    guard_tasks: set[asyncio.Task[Any]] = field(default_factory=set)
 
 
 @dataclass(slots=True)
@@ -117,6 +127,9 @@ class BrowserSession:
         self._element_refs: dict[str, ElementRef] = {}
         self.recent_actions: list[str] = []
         self.recovery_attempts = 0
+        self._operation_token = 0
+        self._active_operation: _BrowserOperation | None = None
+        self._navigation_guard_callback = self._guard_navigation
 
     @property
     def adapter_instance(self) -> BrowserAdapter | None:
@@ -153,6 +166,7 @@ class BrowserSession:
                     )
                 raise
             self._adapter = adapter
+            self._install_navigation_guard(adapter)
             return adapter
 
     async def open(self) -> BrowserAdapter:
@@ -166,6 +180,7 @@ class BrowserSession:
         if self._adapter is not None and self._adapter is not adapter:
             raise BrowserError("browser session already has an adapter")
         self._adapter = adapter
+        self._install_navigation_guard(adapter)
 
     async def navigate(
         self,
@@ -176,11 +191,11 @@ class BrowserSession:
         self._ensure_task_available()
         adapter = await self.adapter(check_budget=False)
         self.budget.task_actions += 1
-        self._set_navigation_interceptor(adapter, navigation_interceptor)
+        operation = self._begin_operation(navigation_interceptor)
         try:
             observation = await adapter.navigate(url, self.navigation_timeout_ms)
         finally:
-            self._set_navigation_interceptor(adapter, None)
+            self._expire_operation(operation)
         self._reset_page_budget()
         state = self._record_observation(observation)
         self._record_action(f"navigate:{url}")
@@ -208,7 +223,7 @@ class BrowserSession:
         adapter = await self.adapter()
         self.consume_action()
         previous_url = None if self._state is None else self._state.observation.url
-        self._set_navigation_interceptor(adapter, navigation_interceptor)
+        operation = self._begin_operation(navigation_interceptor)
         try:
             if action in {"click", "submit"}:
                 result = await adapter.click(element_ref, self.action_timeout_ms)
@@ -230,18 +245,70 @@ class BrowserSession:
             if previous_url != state.observation.url:
                 self._reset_page_budget()
         finally:
-            self._set_navigation_interceptor(adapter, None)
+            self._expire_operation(operation)
         self._record_action(action)
         return result, state
 
-    @staticmethod
-    def _set_navigation_interceptor(
-        adapter: BrowserAdapter,
-        interceptor: NavigationInterceptor | None,
+    def _install_navigation_guard(self, adapter: BrowserAdapter) -> None:
+        adapter.install_navigation_guard(self._navigation_guard_callback)
+
+    def _begin_operation(
+        self, interceptor: NavigationInterceptor | None
+    ) -> _BrowserOperation:
+        if self._active_operation is not None:
+            self._expire_operation(self._active_operation)
+        self._operation_token += 1
+        operation = _BrowserOperation(
+            self._operation_token,
+            interceptor or _same_origin_navigation,
+        )
+        self._active_operation = operation
+        return operation
+
+    def _expire_operation(self, operation: _BrowserOperation) -> None:
+        operation.active = False
+        if self._active_operation is operation:
+            self._active_operation = None
+        current = asyncio.current_task()
+        for task in operation.guard_tasks:
+            if task is not current:
+                task.cancel()
+
+    async def _guard_navigation(
+        self, destination_url: str, current_url: str | None
     ) -> None:
-        setter = getattr(adapter, "set_navigation_interceptor", None)
-        if callable(setter):
-            setter(interceptor)
+        operation = self._active_operation
+        if operation is None or not operation.active:
+            raise NavigationBlockedError(
+                "browser navigation was blocked because no active browser operation "
+                "can classify it safely"
+            )
+        task = asyncio.current_task()
+        if task is not None:
+            operation.guard_tasks.add(task)
+        token = operation.token
+        try:
+            if not self._operation_is_active(operation, token):
+                raise NavigationBlockedError(
+                    "browser navigation was blocked because its browser operation "
+                    "has ended"
+                )
+            await operation.interceptor(destination_url, current_url)
+            if not self._operation_is_active(operation, token):
+                raise NavigationBlockedError(
+                    "browser navigation was blocked because its browser operation "
+                    "has ended"
+                )
+        finally:
+            if task is not None:
+                operation.guard_tasks.discard(task)
+
+    def _operation_is_active(self, operation: _BrowserOperation, token: int) -> bool:
+        return (
+            operation.active
+            and operation.token == token
+            and self._active_operation is operation
+        )
 
     async def extract(
         self,
@@ -358,6 +425,8 @@ class BrowserSession:
 
     async def close(self) -> None:
         adapter = self._adapter
+        if self._active_operation is not None:
+            self._expire_operation(self._active_operation)
         self._adapter = None
         self._state = None
         self._element_refs.clear()
@@ -400,6 +469,19 @@ class StaleSnapshotError(BrowserError):
 
 class BrowserSessionClosedError(BrowserError):
     """The registry closed the browser session permanently."""
+
+
+async def _same_origin_navigation(
+    destination_url: str, current_url: str | None
+) -> None:
+    if current_url is not None and normalize_origin(
+        destination_url
+    ) == normalize_origin(current_url):
+        return
+    raise NavigationBlockedError(
+        "browser navigation was blocked because no browser safety policy classified "
+        "the destination"
+    )
 
 
 def _reported_tokens(usage: object) -> int:

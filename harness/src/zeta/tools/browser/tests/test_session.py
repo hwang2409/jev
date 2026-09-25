@@ -7,8 +7,10 @@ import pytest
 
 from zeta.tools.browser.adapter import (
     ActionObservation,
+    BrowserTimeoutError,
     ElementRef,
     FakeBrowserAdapter,
+    NavigationBlockedError,
     PageObservation,
 )
 from zeta.tools.browser.session import BrowserBudgetExhaustedError, BrowserSession
@@ -24,6 +26,43 @@ class _SlowAdapter(FakeBrowserAdapter):
     async def launch(self) -> None:
         self.launches += 1
         await asyncio.sleep(0)
+
+
+class _OutlivingRouteAdapter(FakeBrowserAdapter):
+    def __init__(self) -> None:
+        super().__init__(
+            [PageObservation(1, 1, "https://example.test", "", "", (), True, True)]
+        )
+        self.route_started = asyncio.Event()
+        self.release_route = asyncio.Event()
+        self.route_task: asyncio.Task[None] | None = None
+        self.late_continues = 0
+
+    async def click(
+        self, element_ref: ElementRef, timeout_ms: int
+    ) -> ActionObservation:
+        del element_ref, timeout_ms
+        self.route_task = asyncio.create_task(self._late_route())
+        await self.route_started.wait()
+        raise BrowserTimeoutError("click")
+
+    async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
+        del url, timeout_ms
+        self.route_task = asyncio.create_task(self._late_route())
+        await self.route_started.wait()
+        raise BrowserTimeoutError("navigate")
+
+    async def _late_route(self) -> None:
+        self.route_started.set()
+        try:
+            await self._intercept_navigation("https://other.test/late")
+        except asyncio.CancelledError:
+            await self.release_route.wait()
+            try:
+                await self._intercept_navigation("https://other.test/late")
+            except NavigationBlockedError:
+                return
+            self.late_continues += 1
 
 
 class _FailingAdapter:
@@ -235,6 +274,40 @@ async def test_browser_session_keeps_page_budget_for_non_navigating_click() -> N
 
     assert session.budget.page_jev_calls == 3
     assert session.budget.page_jev_tokens == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["action", "navigate"])
+async def test_slow_navigation_decision_cannot_continue_after_timeout(
+    operation: str,
+) -> None:
+    adapter = _OutlivingRouteAdapter()
+    session = BrowserSession(lambda: adapter)
+    element = ElementRef(1, "e1", "button", "click", "", "", None, None, False, True)
+    decision_started = asyncio.Event()
+    release_decision = asyncio.Event()
+
+    async def slow_decision(_destination: str, _current: str | None) -> None:
+        decision_started.set()
+        await release_decision.wait()
+
+    if operation == "action":
+        with pytest.raises(BrowserTimeoutError):
+            await session.action("click", element, navigation_interceptor=slow_decision)
+    else:
+        with pytest.raises(BrowserTimeoutError):
+            await session.navigate(
+                "https://example.test/next",
+                navigation_interceptor=slow_decision,
+            )
+
+    await asyncio.wait_for(decision_started.wait(), timeout=1)
+    assert adapter.route_task is not None
+    release_decision.set()
+    adapter.release_route.set()
+    await adapter.route_task
+
+    assert adapter.late_continues == 0
 
 
 @pytest.mark.asyncio

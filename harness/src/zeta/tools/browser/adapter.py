@@ -97,9 +97,7 @@ class BrowserAdapter(Protocol):
     async def launch(self) -> None:
         raise NotImplementedError
 
-    def set_navigation_interceptor(
-        self, interceptor: NavigationInterceptor | None
-    ) -> None:
+    def install_navigation_guard(self, guard: NavigationInterceptor) -> None:
         raise NotImplementedError
 
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
@@ -309,7 +307,7 @@ class PlaywrightBrowserAdapter:
         self._url = ""
         self._navigation_origin_url: str | None = None
         self._closed = False
-        self._navigation_interceptor: NavigationInterceptor | None = None
+        self._navigation_guard: NavigationInterceptor | None = None
         self._navigation_error: NavigationBlockedError | None = None
 
     async def launch(self) -> None:
@@ -358,13 +356,17 @@ class PlaywrightBrowserAdapter:
             self._navigation_origin_url = None
         return await self.observe(self._limits)
 
-    def set_navigation_interceptor(
-        self, interceptor: NavigationInterceptor | None
-    ) -> None:
-        self._navigation_interceptor = interceptor
+    def install_navigation_guard(self, guard: NavigationInterceptor) -> None:
+        if self._navigation_guard is not None and self._navigation_guard is not guard:
+            raise BrowserError("browser navigation guard is already installed")
+        self._navigation_guard = guard
 
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
         self._require_page()
+        if self._navigation_error is not None:
+            error = self._navigation_error
+            self._navigation_error = None
+            raise error
         try:
             raw = await self._page.evaluate(
                 OBSERVE_SCRIPT,
@@ -633,11 +635,13 @@ class PlaywrightBrowserAdapter:
     async def _handle_route(self, route: object) -> None:
         try:
             request = route.request
-            if (
-                self._is_top_level_navigation(request)
-                and self._navigation_interceptor is not None
-            ):
-                await self._navigation_interceptor(
+            if self._is_top_level_navigation(request):
+                if self._navigation_guard is None:
+                    raise NavigationBlockedError(
+                        "browser navigation was blocked because no active browser "
+                        "operation can classify it safely"
+                    )
+                await self._navigation_guard(
                     request.url,
                     self._url or self._navigation_origin_url,
                 )
@@ -799,7 +803,8 @@ class FakeBrowserAdapter:
         self.selected: list[tuple[ElementRef, str]] = []
         self.extractions: list[tuple[ElementRef | None, list[str], int]] = []
         self.search_extractions: list[tuple[ElementRef | None, int]] = []
-        self._navigation_interceptor: NavigationInterceptor | None = None
+        self._navigation_guard: NavigationInterceptor | None = None
+        self._navigation_error: NavigationBlockedError | None = None
         self._queued_navigation_url: str | None = None
 
     def detach(self, element_id: str) -> None:
@@ -814,10 +819,10 @@ class FakeBrowserAdapter:
     async def launch(self) -> None:
         return None
 
-    def set_navigation_interceptor(
-        self, interceptor: NavigationInterceptor | None
-    ) -> None:
-        self._navigation_interceptor = interceptor
+    def install_navigation_guard(self, guard: NavigationInterceptor) -> None:
+        if self._navigation_guard is not None and self._navigation_guard is not guard:
+            raise BrowserError("browser navigation guard is already installed")
+        self._navigation_guard = guard
 
     def queue_navigation(self, url: str) -> None:
         """Queue a top-level navigation caused by the next action."""
@@ -827,7 +832,11 @@ class FakeBrowserAdapter:
     async def trigger_navigation(self, url: str) -> None:
         """Drive a script-style top-level navigation in deterministic tests."""
 
-        await self._intercept_navigation(url)
+        try:
+            await self._intercept_navigation(url)
+        except NavigationBlockedError as exc:
+            self._navigation_error = exc
+            return
         self._replace_current_url(url)
 
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
@@ -846,6 +855,10 @@ class FakeBrowserAdapter:
 
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
         del limits
+        if self._navigation_error is not None:
+            error = self._navigation_error
+            self._navigation_error = None
+            raise error
         return self._current_observation()
 
     async def click(
@@ -956,9 +969,9 @@ class FakeBrowserAdapter:
         return self._observations[index]
 
     async def _intercept_navigation(self, url: str) -> None:
-        if self._navigation_interceptor is None:
+        if self._navigation_guard is None:
             return
-        await self._navigation_interceptor(url, self._current_observation().url)
+        await self._navigation_guard(url, self._current_observation().url)
 
     def _replace_current_url(self, url: str) -> None:
         self._observations[self._observation_index] = replace(
