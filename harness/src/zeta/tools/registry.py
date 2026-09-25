@@ -142,7 +142,19 @@ class ToolRegistry:
         register_builtin: bool = True,
         enforce_approvals: bool = False,
         safety_tier: SafetyTier | None = None,
+        browser_safety_tier: SafetyTier | None = None,
         browser_enabled: bool = False,
+        browser_page_jev_call_budget: int = 8,
+        browser_page_jev_token_budget: int = 12_000,
+        browser_task_action_budget: int = 20,
+        browser_task_wall_clock_seconds: float = 120.0,
+        browser_allowed_origins: tuple[str, ...] = (),
+        browser_element_top1_confidence: float = 0.8,
+        browser_element_topn: int = 3,
+        browser_search_relevance_threshold: float = 0.7,
+        browser_search_tie_margin: float = 0.1,
+        browser_search_relevance_floor: float = 0.4,
+        browser_search_call_confidence_threshold: float = 0.8,
         skill_catalog: SkillCatalog,
         agent_catalog: AgentCatalog | None = None,
     ) -> None:
@@ -182,7 +194,21 @@ class ToolRegistry:
             self._abort_registry = abort_signal.registry
         self.approval_policy = approval_policy
         self.safety_tier = safety_tier
+        self.browser_safety_tier = (
+            safety_tier if browser_safety_tier is None else browser_safety_tier
+        )
         self.browser_enabled = browser_enabled
+        self.browser_page_jev_call_budget = browser_page_jev_call_budget
+        self.browser_page_jev_token_budget = browser_page_jev_token_budget
+        self.browser_task_action_budget = browser_task_action_budget
+        self.browser_task_wall_clock_seconds = browser_task_wall_clock_seconds
+        self.browser_allowed_origins = tuple(browser_allowed_origins)
+        self.browser_element_top1_confidence = browser_element_top1_confidence
+        self.browser_element_topn = browser_element_topn
+        self.browser_search_relevance_threshold = browser_search_relevance_threshold
+        self.browser_search_tie_margin = browser_search_tie_margin
+        self.browser_search_relevance_floor = browser_search_relevance_floor
+        self.browser_search_call_confidence_threshold = browser_search_call_confidence_threshold
         self._approval_gate = ApprovalGate(
             self.approval_policy, self.pre_execute_hook, self.safety_tier
         )
@@ -353,6 +379,7 @@ class ToolRegistry:
             if name not in exclude_names
         }
         clone._browser_session = None
+        clone._browser_session_factory = None
         clone._browser_session_closed = False
         clone.browser_catalog = None
         clone.router_browser_catalog = None
@@ -366,13 +393,30 @@ class ToolRegistry:
         )
         clone.bash_cwd = store.bash_cwd
         clone.abort_signal = clone._abort_registry.new_generation()
-        if self.safety_tier is not None:
-            clone.safety_tier = SafetyTier(
+        safety_tiers = {
+            id(tier): tier
+            for tier in (self.safety_tier, self.browser_safety_tier)
+            if tier is not None
+        }
+        cloned_tiers = {
+            tier_id: SafetyTier(
                 cwd=clone.cwd,
-                headless=self.safety_tier.headless,
-                task_excerpt=self.safety_tier.task_excerpt,
-                telemetry=self.safety_tier.telemetry,
+                headless=tier.headless,
+                task_excerpt=tier.task_excerpt,
+                telemetry=tier.telemetry,
             )
+            for tier_id, tier in safety_tiers.items()
+        }
+        clone.safety_tier = (
+            cloned_tiers.get(id(self.safety_tier))
+            if self.safety_tier is not None
+            else None
+        )
+        clone.browser_safety_tier = (
+            cloned_tiers.get(id(self.browser_safety_tier))
+            if self.browser_safety_tier is not None
+            else None
+        )
         clone._approval_gate = ApprovalGate(
             clone.approval_policy,
             clone.pre_execute_hook,
@@ -380,6 +424,10 @@ class ToolRegistry:
         )
         clone._agent_runner = None
         clone.agent_catalog = self.agent_catalog
+        if clone.browser_enabled:
+            from .browser import register as register_browser
+
+            register_browser(clone)
         return clone
     def abort(self) -> None:
         self.abort_signal.abort()
@@ -489,12 +537,14 @@ class ToolRegistry:
             )
 
     def set_safety_task_excerpt(self, task_excerpt: str) -> None:
-        if self.safety_tier is not None:
-            self.safety_tier.set_task_excerpt(task_excerpt)
+        for tier in (self.safety_tier, self.browser_safety_tier):
+            if tier is not None:
+                tier.set_task_excerpt(task_excerpt)
 
     def set_safety_headless(self, headless: bool) -> None:
-        if self.safety_tier is not None:
-            self.safety_tier.set_headless(headless)
+        for tier in (self.safety_tier, self.browser_safety_tier):
+            if tier is not None:
+                tier.set_headless(headless)
 
     def _safety_cwd(self, tool_name: str, arguments: dict[str, object]) -> str:
         if self.safety_tier is None:

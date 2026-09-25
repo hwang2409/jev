@@ -62,29 +62,65 @@ def test_browser_enabled_defaults_off_and_cli_overrides_settings(
     _write(home, "browser_enabled = true\n")
     settings = load_settings(home=home, project_dir=None).settings
 
-    assert resolve(
+    assert (
+        resolve(
+            settings,
+            cli_provider=None,
+            cli_model=None,
+            cli_yolo=None,
+            cli_token_budget=None,
+        ).browser_enabled
+        is True
+    )
+    assert (
+        resolve(
+            settings,
+            cli_provider=None,
+            cli_model=None,
+            cli_yolo=None,
+            cli_token_budget=None,
+            cli_browser_enabled=False,
+        ).browser_enabled
+        is False
+    )
+    assert (
+        resolve(
+            Settings(),
+            cli_provider=None,
+            cli_model=None,
+            cli_yolo=None,
+            cli_token_budget=None,
+            cli_browser_enabled=True,
+        ).browser_enabled
+        is True
+    )
+
+
+def test_browser_budget_and_threshold_defaults_are_resolved(tmp_path: Path) -> None:
+    settings = load_settings(
+        home=tmp_path / "home",
+        project_dir=None,
+    ).settings
+    config = resolve(
         settings,
         cli_provider=None,
         cli_model=None,
         cli_yolo=None,
         cli_token_budget=None,
-    ).browser_enabled is True
-    assert resolve(
-        settings,
-        cli_provider=None,
-        cli_model=None,
-        cli_yolo=None,
-        cli_token_budget=None,
-        cli_browser_enabled=False,
-    ).browser_enabled is False
-    assert resolve(
-        Settings(),
-        cli_provider=None,
-        cli_model=None,
-        cli_yolo=None,
-        cli_token_budget=None,
-        cli_browser_enabled=True,
-    ).browser_enabled is True
+    )
+
+    assert (
+        config.browser_page_jev_call_budget,
+        config.browser_page_jev_token_budget,
+        config.browser_task_action_budget,
+        config.browser_task_wall_clock_seconds,
+    ) == (8, 12_000, 20, 120.0)
+    assert config.browser_element_top1_confidence == 0.8
+    assert config.browser_element_topn == 3
+    assert config.browser_search_relevance_threshold == 0.7
+    assert config.browser_search_tie_margin == 0.1
+    assert config.browser_search_relevance_floor == 0.4
+    assert config.browser_search_call_confidence_threshold == 0.8
 
 
 def test_safety_tier_defaults_off_and_cli_can_enable() -> None:
@@ -279,21 +315,27 @@ def test_router_style_cli_and_settings_precedence(tmp_path: Path) -> None:
     _write(home, 'router_style = "tool"\n')
     settings = load_settings(home=home, project_dir=None).settings
 
-    assert resolve(
-        settings,
-        cli_provider=None,
-        cli_model=None,
-        cli_yolo=None,
-        cli_token_budget=None,
-    ).router_style == "tool"
-    assert resolve(
-        settings,
-        cli_provider=None,
-        cli_model=None,
-        cli_yolo=None,
-        cli_token_budget=None,
-        cli_router_style="auto",
-    ).router_style == "auto"
+    assert (
+        resolve(
+            settings,
+            cli_provider=None,
+            cli_model=None,
+            cli_yolo=None,
+            cli_token_budget=None,
+        ).router_style
+        == "tool"
+    )
+    assert (
+        resolve(
+            settings,
+            cli_provider=None,
+            cli_model=None,
+            cli_yolo=None,
+            cli_token_budget=None,
+            cli_router_style="auto",
+        ).router_style
+        == "auto"
+    )
 
 
 def test_malformed_toml_fails_open_with_notice(tmp_path: Path) -> None:
@@ -607,7 +649,9 @@ def test_keybindings_reject_non_string_values(tmp_path: Path) -> None:
     assert "keybindings.ctrl_r" in joined
 
 
-def test_notices_collapse_home_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_notices_collapse_home_prefix(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fake_home = tmp_path / "fakehome"
     fake_home.mkdir()
     monkeypatch.setenv("HOME", str(fake_home))
@@ -746,7 +790,10 @@ def test_scoped_rules_reach_the_live_policy_through_create_app(
 
     policy = app.approval_policy
     assert policy is not None
-    assert policy.decide("bash", {"command": "git status --short"}) is ApprovalDecision.ALLOW
+    assert (
+        policy.decide("bash", {"command": "git status --short"})
+        is ApprovalDecision.ALLOW
+    )
     assert policy.decide("bash", {"command": "git push"}) is ApprovalDecision.ASK
     assert policy.decide("bash", {"cmd": "git status"}) is ApprovalDecision.ASK
     # todo declares no subject, so the scoped rule is dropped and reported.

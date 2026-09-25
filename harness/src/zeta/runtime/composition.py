@@ -143,14 +143,35 @@ def compose_runtime(
             if config.safety_tier and config.yolo
             else None
         )
+        browser_safety_tier = safety_tier
+        if (
+            config.safety_tier
+            and config.browser_enabled
+            and browser_safety_tier is None
+        ):
+            browser_safety_tier = SafetyTier(cwd=opened.store.cwd)
         registry = ToolRegistry(
             opened.store.cwd,
             memory_config=config.memory_config,
             safety_tier=safety_tier,
+            browser_safety_tier=browser_safety_tier,
             browser_enabled=config.browser_enabled,
+            browser_page_jev_call_budget=config.browser_page_jev_call_budget,
+            browser_page_jev_token_budget=config.browser_page_jev_token_budget,
+            browser_task_action_budget=config.browser_task_action_budget,
+            browser_task_wall_clock_seconds=config.browser_task_wall_clock_seconds,
+            browser_allowed_origins=config.browser_allowed_origins,
+            browser_element_top1_confidence=config.browser_element_top1_confidence,
+            browser_element_topn=config.browser_element_topn,
+            browser_search_relevance_threshold=config.browser_search_relevance_threshold,
+            browser_search_tie_margin=config.browser_search_tie_margin,
+            browser_search_relevance_floor=config.browser_search_relevance_floor,
+            browser_search_call_confidence_threshold=config.browser_search_call_confidence_threshold,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )
+        if not config.browser_enabled:
+            registry.browser_safety_tier = None
         cleanup_stack.callback(registry.background_tasks.release_directory)
         loop = AgentLoop(
             backend,
@@ -159,8 +180,9 @@ def compose_runtime(
             skill_catalog=skill_catalog,
             **loop_kwargs,
         )
-        if safety_tier is not None:
-            safety_tier.set_telemetry(loop.publish_usage_event)
+        for tier in (safety_tier, browser_safety_tier):
+            if tier is not None:
+                tier.set_telemetry(loop.publish_usage_event)
         if metadata.plan_mode:
             loop.set_plan_mode(True)
         repo_root = discover_repo_root(Path(metadata.cwd))

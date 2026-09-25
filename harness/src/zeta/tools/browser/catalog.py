@@ -75,6 +75,7 @@ def triage_search_results(
     relevance_threshold: float = SEARCH_RESULT_RELEVANCE_THRESHOLD,
     tie_margin: float = SEARCH_RESULT_TIE_MARGIN,
     relevance_floor: float = SEARCH_RESULT_RELEVANCE_FLOOR,
+    call_confidence_threshold: float = SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD,
     top_n: int = 3,
 ) -> SearchTriageDecision:
     """Apply separate relevance, tie, floor, and confidence rules."""
@@ -87,7 +88,7 @@ def triage_search_results(
         return SearchTriageDecision(None, (), "relevance_floor")
     score_gap = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
     close_tie = score_gap is not None and score_gap + 1e-12 < tie_margin
-    if scores.call_confidence < SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD or close_tie:
+    if scores.call_confidence < call_confidence_threshold or close_tie:
         candidates = (
             [item for item in ranked if ranked[0][1] - item[1] < tie_margin]
             if close_tie
@@ -362,7 +363,6 @@ def _entry_payload(entry: CatalogEntry) -> dict[str, object]:
         "visible": entry.visible,
     }
 
-
 def _json_size(value: object) -> int:
     return len(
         json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
@@ -635,3 +635,77 @@ def _replaceable_index(
         if retained[index][1].element_id != prior_element_id:
             return index
     return len(retained) - 1
+
+
+def catalog_criteria() -> dict[str, dict[str, object]]:
+    """Return neutral router boundaries for browser tools."""
+
+    return {
+        "browser_navigate": {
+            "what": "Open one allowed URL in the browser session.",
+            "not_for": (
+                "Returning page state (use browser_state), extracting page content "
+                "(use browser_extract), or interacting with page elements (use "
+                "browser_click, browser_type, browser_select, or browser_submit)."
+            ),
+            "examples": ["Open https://example.test/account."],
+        },
+        "browser_state": {
+            "what": "Return the current bounded page state and element catalog.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), extracting page content "
+                "(use browser_extract), or acting on elements (use browser_click, "
+                "browser_type, browser_select, or browser_submit)."
+            ),
+            "examples": ["Show the current browser page and its available controls."],
+        },
+        "browser_click": {
+            "what": "Click one identified page element from the current snapshot.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), reading page state (use "
+                "browser_state), extracting content (use browser_extract), or using "
+                "a different element action (use browser_type, browser_select, or "
+                "browser_submit)."
+            ),
+            "examples": ["Click the Continue button in the current page snapshot."],
+        },
+        "browser_type": {
+            "what": "Replace or append text in one identified page input.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), reading page state (use "
+                "browser_state), extracting content (use browser_extract), or using "
+                "browser_click, browser_select, or browser_submit for the element "
+                "action."
+            ),
+            "examples": ["Type the email address into the current page input."],
+        },
+        "browser_select": {
+            "what": "Select one option in an identified page control.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), reading page state (use "
+                "browser_state), extracting content (use browser_extract), or using "
+                "browser_click, browser_type, or browser_submit for the element "
+                "action."
+            ),
+            "examples": ["Select March from the current page month control."],
+        },
+        "browser_extract": {
+            "what": "Extract bounded text or attributes from the page or one element.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), reading the page snapshot "
+                "(use browser_state), or changing page state with browser_click, "
+                "browser_type, browser_select, or browser_submit."
+            ),
+            "examples": ["Extract the title and price from the current product page."],
+        },
+        "browser_submit": {
+            "what": "Submit one identified form or submit control after safety approval.",
+            "not_for": (
+                "Opening a URL (use browser_navigate), reading page state (use "
+                "browser_state), extracting content (use browser_extract), or using "
+                "browser_click, browser_type, or browser_select for the element "
+                "action."
+            ),
+            "examples": ["Submit the completed form from the current page snapshot."],
+        },
+    }

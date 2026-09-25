@@ -36,6 +36,8 @@ class BrowserRiskEvidence:
     authentication_language: bool
     download: bool
     durable_state_change: bool
+    origin_allowed: bool = False
+    operation_token: int | None = None
 
 
 __all__ = [

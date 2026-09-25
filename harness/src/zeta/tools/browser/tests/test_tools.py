@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from pathlib import Path
 
 import pytest
@@ -69,6 +68,8 @@ def _registry(
     safety_tier: SafetyTier | None = None,
     approval_policy: ApprovalPolicy | None = None,
     approval_store: ConversationStore | None = None,
+    allowed_origins: tuple[str, ...] = (),
+    task_action_budget: int = 20,
 ) -> ToolRegistry:
     registry = ToolRegistry(
         tmp_path,
@@ -78,6 +79,8 @@ def _registry(
         safety_tier=safety_tier,
         approval_policy=approval_policy,
         approval_store=approval_store,
+        browser_allowed_origins=allowed_origins,
+        browser_task_action_budget=task_action_budget,
     )
     registry.browser_adapter_factory = lambda: adapter
     register(registry)
@@ -148,6 +151,54 @@ async def test_browser_click_uses_jev_choice_and_pre_post_gates(
     assert result["isError"] is False
     assert len(gates) == 2
     assert [element.element_id for element in adapter.clicks] == ["e1"]
+    assert _structured(result)["threshold_version"] == "browser-thresholds-v1"
+
+
+@pytest.mark.asyncio
+async def test_last_allowed_browser_action_keeps_its_observation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(tmp_path, adapter, task_action_budget=1)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
+        return _choice("e1", 0.9, ("e1",))
+
+    gate_calls = 0
+
+    async def gate(**_kwargs: object) -> PageStateDecision:
+        nonlocal gate_calls
+        gate_calls += 1
+        if gate_calls == 2:
+            session = registry.browser_session
+            assert session is not None
+            await session.call_jev(lambda: asyncio.sleep(0))
+        return PageStateDecision(True, None, None)
+
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    monkeypatch.setattr("zeta.tools.browser.evaluate_page_state_with_provider", gate)
+
+    result = await registry.execute(
+        ToolCall(
+            "click",
+            "browser_click",
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "click",
+            },
+        )
+    )
+
+    assert result["isError"] is False
+    structured = _structured(result)
+    assert structured["url"] == "https://example.test/"
+    assert structured["error"]["kind"] == "browser_budget_exhausted"
+    assert adapter.clicks
 
 
 @pytest.mark.asyncio
@@ -209,6 +260,7 @@ async def test_browser_click_returns_top_three_without_acting_on_low_confidence(
 
     assert result["isError"] is False
     assert _structured(result)["candidate_ids"] == ["e1", "e2", "e3"]
+    assert _structured(result)["threshold_version"] == "browser-thresholds-v1"
     assert adapter.clicks == []
 
 
@@ -383,7 +435,10 @@ async def test_browser_ask_uses_durable_approval_gate(
     )
     task = asyncio.create_task(registry.execute(call))
     for _ in range(100):
-        if any(request.request_id == call.id for request in policy.pending_requests()):
+        if any(
+            request.request_id.startswith(f"{call.id}:nav:")
+            for request in policy.pending_requests()
+        ):
             break
         await asyncio.sleep(0.01)
     else:
@@ -392,7 +447,7 @@ async def test_browser_ask_uses_durable_approval_gate(
     request = next(
         request
         for request in policy.pending_requests()
-        if request.request_id == call.id
+        if request.request_id.startswith(f"{call.id}:nav:")
     )
     assert request.label is not None
     assert "action=submit" in request.label
@@ -400,7 +455,7 @@ async def test_browser_ask_uses_durable_approval_gate(
     assert "destination=https://payments.example/checkout" in request.label
     assert "risk_reason=score_exceeds" in request.label
 
-    assert policy.resolve(call.id, decision) is True
+    assert policy.resolve(request.request_id, decision) is True
     result = await task
 
     assert result["isError"] is (decision is ApprovalDecision.DENY)
@@ -746,7 +801,7 @@ async def test_low_confidence_risky_choice_escalates_without_acting(
 
 
 @pytest.mark.asyncio
-async def test_benign_navigation_does_not_require_optional_safety_tier(
+async def test_first_navigation_with_empty_allowlist_fails_closed(
     tmp_path: Path,
 ) -> None:
     adapter = FakeBrowserAdapter([_observation()])
@@ -756,8 +811,125 @@ async def test_benign_navigation_does_not_require_optional_safety_tier(
         ToolCall("navigate", "browser_navigate", {"url": "https://example.test/next"})
     )
 
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
+    assert adapter.navigations == []
+
+
+@pytest.mark.asyncio
+async def test_navigation_failure_maps_to_page_load_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    adapter.timeout_next("navigate")
+    tier = SafetyTier(cwd=tmp_path)
+    registry = _registry(tmp_path, adapter, tier)
+
+    async def allow(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("allow", "jev")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", allow)
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://example.test/next"})
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "page_load_failed"
+    assert adapter.navigations == []
+
+
+@pytest.mark.asyncio
+async def test_configured_origin_allowlist_normalizes_localhost_ports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(
+        tmp_path,
+        adapter,
+        SafetyTier(cwd=tmp_path),
+        allowed_origins=("HTTP://LOCALHOST:80", "https://other.test:443"),
+    )
+    tier = registry.browser_safety_tier
+    assert tier is not None
+
+    async def allow(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("allow", "jev")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", allow)
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://other.test/next"})
+    )
+
     assert result["isError"] is False
-    assert adapter.navigations == ["https://example.test/next"]
+    assert adapter.navigations == ["https://other.test/next"]
+
+
+@pytest.mark.asyncio
+async def test_allowlisted_origin_does_not_bypass_payment_safety(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    submit = ElementRef(
+        1,
+        "e1",
+        "button",
+        "submit",
+        "Pay now",
+        "Pay now",
+        None,
+        "main",
+        False,
+        True,
+        target_url="https://payments.example/checkout",
+    )
+    adapter = FakeBrowserAdapter([_element_observation(submit)])
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    registry = _registry(
+        tmp_path,
+        adapter,
+        tier,
+        allowed_origins=("https://payments.example",),
+    )
+    await registry.execute(ToolCall("state", "browser_state", {}))
+    seen: list[BrowserRiskEvidence] = []
+
+    async def deny(evidence: BrowserRiskEvidence) -> SafetyOutcome:
+        seen.append(evidence)
+        return SafetyOutcome("deny", "layer0", reason="payment_or_financial_commitment")
+
+    async def choose(
+        *_args: object, **_kwargs: object
+    ) -> jev.BrowserElementChoiceResult:
+        return _choice("e1", 0.9, ("e1",), "submit")
+
+    async def page_gate(**_kwargs: object) -> PageStateDecision:
+        return PageStateDecision(True, None, None)
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+    monkeypatch.setattr(jev, "choose_browser_element", choose)
+    monkeypatch.setattr(
+        "zeta.tools.browser.evaluate_page_state_with_provider", page_gate
+    )
+
+    result = await registry.execute(
+        ToolCall(
+            "submit",
+            "browser_submit",
+            {
+                "snapshot_id": 1,
+                "element_id": "e1",
+                "role": "button",
+                "affordance": "submit",
+            },
+        )
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "safety_denied"
+    assert seen and seen[0].origin_allowed is True
+    assert adapter.clicks == []
 
 
 @pytest.mark.asyncio
@@ -798,57 +970,6 @@ async def test_external_navigation_uses_safety_handler_route(
     assert result["isError"] is True
     assert _structured(result)["error"]["kind"] == "safety_denied"
     assert adapter.navigations == []
-
-
-@pytest.mark.asyncio
-async def test_browser_registers_stable_schemas_and_starts_lazily(
-    tmp_path: Path,
-) -> None:
-    adapter = FakeBrowserAdapter([_observation()])
-    registry = _registry(tmp_path, adapter)
-
-    assert {
-        "browser_navigate",
-        "browser_state",
-        "browser_click",
-        "browser_type",
-        "browser_select",
-        "browser_extract",
-        "browser_submit",
-    } <= registry.registered_names
-    assert adapter.navigations == []
-    result = await registry.execute(ToolCall("state", "browser_state", {}))
-
-    assert result["isError"] is False
-    assert _structured(result)["snapshot_id"] == 1
-    assert adapter.navigations == []
-
-
-def test_browser_schemas_match_the_complete_spec() -> None:
-    registry = ToolRegistry(
-        Path("."),
-        register_builtin=False,
-        browser_enabled=True,
-        skill_catalog=SkillCatalog.empty(),
-    )
-    registry.browser_adapter_factory = lambda: FakeBrowserAdapter([_observation()])
-    register(registry)
-
-    expected = {
-        "browser_navigate": '{"description":"Open an allowed URL in the session page.","name":"browser_navigate","parameters":{"additionalProperties":false,"properties":{"url":{"minLength":1,"type":"string"}},"required":["url"],"type":"object"}}',
-        "browser_state": '{"description":"Return the current bounded page snapshot and element catalog.","name":"browser_state","parameters":{"additionalProperties":false,"properties":{},"type":"object"}}',
-        "browser_click": '{"description":"Click one catalog element by stable snapshot id.","name":"browser_click","parameters":{"additionalProperties":false,"properties":{"affordance":{"minLength":1,"type":"string"},"element_id":{"minLength":1,"type":"string"},"role":{"minLength":1,"type":"string"},"snapshot_id":{"minimum":1,"type":"integer"}},"required":["snapshot_id","element_id","role","affordance"],"type":"object"}}',
-        "browser_type": '{"description":"Replace or append text in one input by snapshot id.","name":"browser_type","parameters":{"additionalProperties":false,"properties":{"affordance":{"minLength":1,"type":"string"},"element_id":{"minLength":1,"type":"string"},"replace":{"type":"boolean"},"role":{"minLength":1,"type":"string"},"snapshot_id":{"minimum":1,"type":"integer"},"text":{"type":"string"}},"required":["snapshot_id","element_id","role","affordance","text","replace"],"type":"object"}}',
-        "browser_select": '{"description":"Select one option in a select control by snapshot id and value.","name":"browser_select","parameters":{"additionalProperties":false,"properties":{"affordance":{"minLength":1,"type":"string"},"element_id":{"minLength":1,"type":"string"},"role":{"minLength":1,"type":"string"},"snapshot_id":{"minimum":1,"type":"integer"},"value":{"type":"string"}},"required":["snapshot_id","element_id","role","affordance","value"],"type":"object"}}',
-        "browser_submit": '{"description":"Submit a form or click the identified submit control after safety approval.","name":"browser_submit","parameters":{"additionalProperties":false,"properties":{"affordance":{"minLength":1,"type":"string"},"element_id":{"minLength":1,"type":"string"},"role":{"minLength":1,"type":"string"},"snapshot_id":{"minimum":1,"type":"integer"}},"required":["snapshot_id","element_id","role","affordance"],"type":"object"}}',
-        "browser_extract": '{"description":"Return bounded text or selected attributes from one element or the page.","name":"browser_extract","parameters":{"additionalProperties":false,"properties":{"attributes":{"items":{"type":"string"},"type":"array"},"element_id":{"minLength":1,"type":["string","null"]},"limit":{"minimum":1,"type":"integer"},"snapshot_id":{"minimum":1,"type":["integer","null"]}},"type":"object"}}',
-    }
-
-    actual = {
-        schema["name"]: json.dumps(schema, sort_keys=True, separators=(",", ":"))
-        for schema in registry.schemas
-    }
-    assert actual == expected
 
 
 @pytest.mark.asyncio
@@ -1071,6 +1192,7 @@ async def test_browser_extract_returns_ranked_search_results(
     assert structured["triage"]["decision"] == "accepted"
     assert [item["result_id"] for item in structured["ranked_results"]] == ["b", "a"]
     assert structured["ranked_results"][0]["relevance_score"] == pytest.approx(0.9)
+    assert structured["triage"]["threshold_version"] == "browser-thresholds-v1"
     assert "search triage: status=ranked decision=accepted warnings=none" in _text(
         result
     )

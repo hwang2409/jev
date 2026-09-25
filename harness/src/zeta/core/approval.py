@@ -588,12 +588,14 @@ class ApprovalGate:
         safety_cwd: str | None = None,
         safety_outcome: SafetyOutcome | None = None,
         approval_label: str | None = None,
+        safety_tier_override: SafetyTier | None = None,
     ) -> tuple[ToolResult | None, AbortSignal]:
         execution_signal = signal
         force_ask = False
         safety_label: str | None = None
+        safety_tier = safety_tier_override or self.safety_tier
         if safety_outcome is not None:
-            if self.safety_tier is None:
+            if safety_tier is None:
                 return ToolResult(
                     tool_call.id,
                     "browser safety tier is not configured for this risky action",
@@ -602,12 +604,12 @@ class ApprovalGate:
             if safety_outcome.decision == "deny":
                 return ToolResult(
                     tool_call.id,
-                    self.safety_tier.teaching_error(safety_outcome),
+                    safety_tier.teaching_error(safety_outcome),
                     True,
                 ), execution_signal
             force_ask = safety_outcome.decision == "ask"
             if force_ask:
-                safety_label = approval_label or self.safety_tier.approval_label(
+                safety_label = approval_label or safety_tier.approval_label(
                     safety_outcome
                 )
         safety_applies = (

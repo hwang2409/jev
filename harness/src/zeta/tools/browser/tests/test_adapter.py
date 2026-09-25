@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from zeta.protocol.types import ToolCall
 from zeta.skills import SkillCatalog
 from zeta.tools.browser import register
 from zeta.tools.browser.adapter import (
@@ -15,6 +16,7 @@ from zeta.tools.browser.adapter import (
     ElementUnavailableError,
     ExtractedData,
     FakeBrowserAdapter,
+    NavigationBlockedError,
     NavigationRaceError,
     PageObservation,
     PlaywrightBrowserAdapter,
@@ -23,6 +25,10 @@ from zeta.tools.browser.adapter import (
     make_browser_adapter_factory,
 )
 from zeta.tools.registry import ToolRegistry
+
+
+async def _allow_navigation(_destination: str, _current: str | None) -> None:
+    return None
 
 
 def test_browser_value_types_construct_with_plain_values() -> None:
@@ -98,6 +104,7 @@ async def test_fake_returns_next_observation_and_records_values() -> None:
         1, "e2", "combobox", "select", "Plan", "plan", "basic", "main", False, True
     )
     adapter = FakeBrowserAdapter([first, second])
+    adapter.install_navigation_guard(_allow_navigation)
 
     action = await adapter.type_text(element, "Ada", False, 100)
     selected = await adapter.select(select, "pro", 100)
@@ -164,6 +171,7 @@ async def test_fake_click_records_ref_and_advances_snapshot() -> None:
         1, "e1", "button", "click", "Next", "next", None, "main", False, True
     )
     adapter = FakeBrowserAdapter([first, second])
+    adapter.install_navigation_guard(_allow_navigation)
 
     action = await adapter.click(element, 100)
 
@@ -181,6 +189,7 @@ async def test_fake_navigation_records_url_and_launch_is_idempotent() -> None:
 
     await adapter.launch()
     await adapter.launch()
+    adapter.install_navigation_guard(_allow_navigation)
     result = await adapter.navigate("https://example.test/next", 100)
 
     assert result.url == "https://example.test/next"
@@ -197,6 +206,7 @@ async def test_fake_navigation_advances_scripted_snapshots() -> None:
         3, 3, "https://example.test/three", "Three", "", (), True, True
     )
     adapter = FakeBrowserAdapter([first, second, third])
+    adapter.install_navigation_guard(_allow_navigation)
 
     first_result = await adapter.navigate(second.url, 100)
     second_result = await adapter.navigate(third.url, 100)
@@ -319,6 +329,7 @@ async def contract_adapter(
             ],
             search_results=results,
         )
+        adapter.install_navigation_guard(_allow_navigation)
         yield adapter
         return
 
@@ -329,6 +340,7 @@ async def contract_adapter(
     except BrowserExecutableNotFoundError as exc:
         await adapter.close()
         pytest.skip(f"playwright browser executable is absent: {exc}")
+    adapter.install_navigation_guard(_allow_navigation)
     try:
         yield adapter
     finally:
@@ -401,6 +413,151 @@ async def test_real_adapter_types_a_missing_browser_executable(
     )
     with pytest.raises(BrowserExecutableNotFoundError):
         await adapter.launch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("adapter_kind", ["fake", "playwright"])
+async def test_launch_fails_structured_without_navigation_interception(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter_kind: str
+) -> None:
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
+    if adapter_kind == "fake":
+        adapter = FakeBrowserAdapter([observation], page=object())
+    else:
+        class Page:
+            async def goto(self, *_args: object, **_kwargs: object) -> None:
+                return None
+
+            async def evaluate(self, *_args: object, **_kwargs: object) -> object:
+                return None
+
+            def locator(self, _selector: str) -> object:
+                return object()
+
+        monkeypatch.setattr(
+            "zeta.tools.browser.adapter.load_playwright_page", lambda: Page()
+        )
+        adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    registry = ToolRegistry(
+        tmp_path,
+        register_builtin=False,
+        browser_enabled=True,
+        skill_catalog=SkillCatalog.empty(),
+    )
+    registry.browser_adapter_factory = lambda: adapter
+    register(registry)
+
+    result = await registry.execute(ToolCall("state", "browser_state", {}))
+
+    assert result["isError"] is True
+    assert result["structuredContent"]["error"]["kind"] == "browser_start_failed"
+    assert (
+        "browser page does not support navigation interception; launch aborted"
+        in result["structuredContent"]["error"]["message"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapters_fail_closed_without_a_navigation_guard() -> None:
+    observation = PageObservation(
+        1, 1, "https://example.test", "One", "", (), True, True
+    )
+    fake = FakeBrowserAdapter([observation])
+
+    with pytest.raises(NavigationBlockedError):
+        await fake.navigate("https://example.test/next", 100)
+
+    class Request:
+        def __init__(self, frame: object) -> None:
+            self.url = "https://example.test/next"
+            self.frame = frame
+
+        def is_navigation_request(self) -> bool:
+            return True
+
+    class Page:
+        def __init__(self) -> None:
+            self.main_frame = object()
+
+    class Route:
+        def __init__(self, request: Request) -> None:
+            self.request = request
+            self.continued = False
+            self.aborted = False
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+        async def abort(self) -> None:
+            self.aborted = True
+
+    real = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    page = Page()
+    real._page = page
+    route = Route(Request(page.main_frame))
+
+    await real._handle_route(route)
+
+    assert route.aborted is True
+    assert route.continued is False
+    assert isinstance(real._navigation_error, NavigationBlockedError)
+
+
+@pytest.mark.asyncio
+async def test_real_adapter_uses_each_redirect_hop_as_the_source() -> None:
+    class Request:
+        def __init__(
+            self,
+            url: str,
+            frame: object,
+            redirected_from: Request | None = None,
+        ) -> None:
+            self.url = url
+            self.frame = frame
+            self.redirected_from = redirected_from
+
+        def is_navigation_request(self) -> bool:
+            return True
+
+    class Page:
+        def __init__(self) -> None:
+            self.main_frame = object()
+
+    class Route:
+        def __init__(self, request: Request) -> None:
+            self.request = request
+            self.continued = False
+
+        async def continue_(self) -> None:
+            self.continued = True
+
+        async def abort(self) -> None:
+            raise AssertionError("redirect route should not be aborted")
+
+    page = Page()
+    first = Request("https://example.test/", page.main_frame)
+    second = Request("https://example.test/next", page.main_frame, first)
+    third = Request("https://example.test/final", page.main_frame, second)
+    adapter = PlaywrightBrowserAdapter(headless=True, limits=SnapshotLimits())
+    adapter._page = page
+    adapter._url = first.url
+    seen: list[tuple[str, str | None]] = []
+
+    async def classify(destination: str, source: str | None) -> None:
+        seen.append((destination, source))
+
+    adapter.install_navigation_guard(classify)
+    for request in (second, third):
+        route = Route(request)
+        await adapter._handle_route(route)
+        assert route.continued is True
+
+    assert seen == [
+        (second.url, first.url),
+        (third.url, second.url),
+    ]
 
 
 @pytest.mark.asyncio

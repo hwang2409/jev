@@ -606,7 +606,11 @@ async def safety_score(
 
 
 def parse_browser_element_response(
-    data: dict[str, Any], candidates: list[dict[str, object]]
+    data: dict[str, Any],
+    candidates: list[dict[str, object]],
+    *,
+    top1_confidence: float = BROWSER_ELEMENT_TOP1_CONFIDENCE,
+    top_n: int = BROWSER_ELEMENT_TOPN,
 ) -> BrowserElementChoiceResult:
     """Parse one successful Jev browser element-choice response."""
 
@@ -653,9 +657,9 @@ def parse_browser_element_response(
                     for candidate_id in candidate_by_id
                 ),
                 key=lambda item: -item[1],
-            )[:BROWSER_ELEMENT_TOPN]
+            )[: max(top_n, 0)]
         )
-        if confidence >= BROWSER_ELEMENT_TOP1_CONFIDENCE:
+        if confidence >= top1_confidence:
             candidate_ids = (
                 (element_id,) if element_id in candidate_by_id else ()
             )
@@ -687,6 +691,8 @@ async def choose_browser_element(
     page_state: dict[str, object],
     candidates: list[dict[str, object]],
     recent_actions: list[str] | None = None,
+    top1_confidence: float = BROWSER_ELEMENT_TOP1_CONFIDENCE,
+    top_n: int = BROWSER_ELEMENT_TOPN,
 ) -> BrowserElementChoiceResult:
     """Ask Jev to choose the next browser element from a bounded catalog."""
 
@@ -699,7 +705,12 @@ async def choose_browser_element(
             recent_actions,
         )
     )
-    return parse_browser_element_response(data, candidates)
+    return parse_browser_element_response(
+        data,
+        candidates,
+        top1_confidence=top1_confidence,
+        top_n=top_n,
+    )
 
 
 def build_browser_page_state_request(

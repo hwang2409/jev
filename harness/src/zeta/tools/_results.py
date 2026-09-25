@@ -136,6 +136,7 @@ _ERROR_HINTS: dict[str, str] = {
     "navigation_race": "call browser_state before retrying the browser action",
     "browser_timeout": "retry with the bounded browser operation",
     "browser_start_failed": "the browser session could not start; retry later",
+    "browser_budget_exhausted": "stop browser actions and ask for a narrower task",
     "browser_session_closed": "the browser session is closed; create a new registry",
     "jev_routing_error": "call browser_state and provide a more specific action",
     "page_load_failed": "call browser_state after the page finishes loading",
