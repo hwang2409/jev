@@ -485,6 +485,7 @@ def test_browser_register_wires_the_configured_adapter(
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
     )
 

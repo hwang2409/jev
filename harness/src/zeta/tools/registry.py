@@ -142,6 +142,7 @@ class ToolRegistry:
         register_builtin: bool = True,
         enforce_approvals: bool = False,
         safety_tier: SafetyTier | None = None,
+        browser_enabled: bool = False,
         skill_catalog: SkillCatalog,
         agent_catalog: AgentCatalog | None = None,
     ) -> None:
@@ -181,6 +182,7 @@ class ToolRegistry:
             self._abort_registry = abort_signal.registry
         self.approval_policy = approval_policy
         self.safety_tier = safety_tier
+        self.browser_enabled = browser_enabled
         self._approval_gate = ApprovalGate(
             self.approval_policy, self.pre_execute_hook, self.safety_tier
         )

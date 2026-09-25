@@ -154,6 +154,7 @@ def _registry(
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
         safety_tier=safety_tier,
     )

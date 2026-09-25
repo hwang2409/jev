@@ -7,8 +7,6 @@ from textwrap import dedent
 
 import pytest
 
-from zeta.core.approval import ApprovalDecision, ApprovalPolicy
-from zeta.core.store import ConversationStore
 from zeta.config.settings import (
     SETTINGS_FILENAME,
     LoadedSettings,
@@ -17,6 +15,8 @@ from zeta.config.settings import (
     load_settings,
     resolve,
 )
+from zeta.core.approval import ApprovalDecision, ApprovalPolicy
+from zeta.core.store import ConversationStore
 
 
 def _write(base: Path, body: str) -> Path:
@@ -53,6 +53,38 @@ def test_memory_injection_defaults_off_and_cli_can_enable() -> None:
 
     assert default.memory_injection is False
     assert enabled.memory_injection is True
+
+
+def test_browser_enabled_defaults_off_and_cli_overrides_settings(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    _write(home, "browser_enabled = true\n")
+    settings = load_settings(home=home, project_dir=None).settings
+
+    assert resolve(
+        settings,
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+    ).browser_enabled is True
+    assert resolve(
+        settings,
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+        cli_browser_enabled=False,
+    ).browser_enabled is False
+    assert resolve(
+        Settings(),
+        cli_provider=None,
+        cli_model=None,
+        cli_yolo=None,
+        cli_token_budget=None,
+        cli_browser_enabled=True,
+    ).browser_enabled is True
 
 
 def test_safety_tier_defaults_off_and_cli_can_enable() -> None:
@@ -236,6 +268,7 @@ def test_resolve_falls_back_to_defaults_when_nothing_configured(tmp_path: Path) 
     assert config.model is None
     assert config.router is True
     assert config.router_style == "auto"
+    assert config.browser_enabled is False
     assert config.yolo is False
     assert config.token_budget is None
     assert config.approval_allow == ()

@@ -60,6 +60,7 @@ def test_browser_catalog_context_survives_turn_reset(tmp_path: Path) -> None:
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
     )
     register_browser(registry)

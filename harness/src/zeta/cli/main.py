@@ -88,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="triage old tool results through Jev before compaction",
     )
     parser.add_argument(
+        "--browser",
+        dest="browser",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable the experimental browser tool surface",
+    )
+    parser.add_argument(
         "--memory-injection",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -239,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             router_mode=args.router,
             router_style=args.router_style,
             jev_compaction=args.jev_compaction,
+            browser_enabled=args.browser,
             memory_injection=args.memory_injection,
         )
         try:

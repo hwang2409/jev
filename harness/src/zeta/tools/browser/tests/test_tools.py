@@ -73,6 +73,7 @@ def _registry(
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
         safety_tier=safety_tier,
         approval_policy=approval_policy,
@@ -827,6 +828,7 @@ def test_browser_schemas_match_the_complete_spec() -> None:
     registry = ToolRegistry(
         Path("."),
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
     )
     registry.browser_adapter_factory = lambda: FakeBrowserAdapter([_observation()])
@@ -864,6 +866,7 @@ async def test_browser_use_after_registry_close_is_rejected_without_restart(
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
+        browser_enabled=True,
         skill_catalog=SkillCatalog.empty(),
     )
     registry.browser_adapter_factory = factory

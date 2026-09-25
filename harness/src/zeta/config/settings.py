@@ -54,6 +54,7 @@ _TOP_KEYS = frozenset(
         "router",
         "router_style",
         "jev_compaction",
+        "browser_enabled",
         "memory_injection",
         "yolo",
         "safety_tier",
@@ -91,6 +92,7 @@ class Settings:
     router: bool | None = None
     router_style: str | None = None
     jev_compaction: bool | None = None
+    browser_enabled: bool | None = None
     memory_injection: bool | None = None
     yolo: bool | None = None
     safety_tier: bool | None = None
@@ -128,6 +130,7 @@ class ResolvedConfig:
     stream_stall_retries: int | None = None
     workspace_snapshot_cap: int | None = None
     memory_config: str | None = None
+    browser_enabled: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,6 +179,7 @@ def resolve(
     cli_router: bool | None = None,
     cli_router_style: str | None = None,
     cli_jev_compaction: bool | None = None,
+    cli_browser_enabled: bool | None = None,
     cli_memory_injection: bool | None = None,
     cli_memory_config: str | None = None,
 ) -> ResolvedConfig:
@@ -211,6 +215,11 @@ def resolve(
             else cli_memory_injection
         )
     )
+    browser_enabled = (
+        bool(settings.browser_enabled)
+        if cli_browser_enabled is None
+        else cli_browser_enabled
+    )
     yolo = bool(settings.yolo) if cli_yolo is None else cli_yolo
     safety_tier = (
         bool(settings.safety_tier)
@@ -243,6 +252,7 @@ def resolve(
             if cli_memory_config is not None
             else settings.memory_config
         ),
+        browser_enabled=browser_enabled,
     )
 
 
@@ -329,6 +339,7 @@ def _validate(
         data, "router_style", _ROUTER_STYLE_CHOICES, notices
     )
     jev_compaction = _validated_bool(data, "jev_compaction", notices)
+    browser_enabled = _validated_bool(data, "browser_enabled", notices)
     memory_injection = _validated_bool(data, "memory_injection", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
@@ -352,6 +363,7 @@ def _validate(
         router=router,
         router_style=router_style,
         jev_compaction=jev_compaction,
+        browser_enabled=browser_enabled,
         memory_injection=memory_injection,
         yolo=yolo,
         safety_tier=safety_tier,
