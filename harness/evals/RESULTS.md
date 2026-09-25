@@ -1,3 +1,43 @@
+# Offline browser eval baseline — 2026-09-25
+
+The committed runner is deterministic and uses `FakeBrowserAdapter` plus a
+local mocked Jev transport. It opens no network connection, provider key, or
+Playwright binary.
+
+Corpus: 60 tasks covering 10, 40, 120, 500, and 2,000 elements; static,
+moderate, and full churn; clear targets, repeated labels, search triage, and
+forms. Both arms use the same fixtures, prompts, timeouts, budgets, and safety
+policy.
+
+| Metric | Routed | Stock large-tool |
+|---|---:|---:|
+| Top-1 accuracy | 0.7500 | 0.7500 |
+| Top-3 coverage | 0.8000 | 1.0000 |
+| Page-state accuracy | 1.0000 | 1.0000 |
+| Task success rate | 0.7333 | 0.7333 |
+| Risky false-approval rate | 0.0000 | 0.0000 |
+| Jev tokens | 22,623 | 349,710 |
+| Jev tokens per successful step | 514.1591 | 7,947.9545 |
+| Jev cost | 0.024489 | 0.351720 |
+| Model input tokens | 20,757 | 347,700 |
+| Cache reads | 0 | 0 |
+| Provider turns | 123 | 135 |
+| Stale recovery rate | 0.7000 | 0.7000 |
+| Time per successful step (seconds) | 0.013916 | 0.013943 |
+
+Failure categories remain separate. Routed: 12 pre-filter misses and 3 Jev
+selection misses. Stock: 15 Jev selection misses. Adapter and page failures
+are both zero in this clean corpus and have dedicated regression coverage.
+Threshold version and confidence calibration are recorded per primitive.
+
+The crossover matrix reports 12 routing wins in 15 cells. A win requires task
+success and safety parity plus a cost or time gain. Token reduction alone does
+not count as a win.
+
+Command:
+
+`uv run --frozen python -m evals.browser_eval --tasks evals/browser_tasks.jsonl --output /tmp/browser-eval-baseline.json`
+
 # Router vs stock — live eval results (2026-09-18)
 
 Head `ba0564d7`, 6 tasks x 2 modes, claude-sonnet-4-6 via subscription OAuth,
