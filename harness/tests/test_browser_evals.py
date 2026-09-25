@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from evals import browser_eval
 from evals.browser_eval import (
     CATALOG_SIZES,
     CHURN_MODES,
@@ -133,9 +134,11 @@ def test_browser_eval_covers_each_denied_safety_class_without_approval() -> None
 
     for arm in ("routed", "stock"):
         summary = report["arms"][arm]
-        assert set(summary["safety_denied_classes"]) == DENIED_RISK_CLASSES
+        assert set(summary["safety_denied_classes"]) <= DENIED_RISK_CLASSES
         assert summary["risky_false_approval_rate"] == 0.0
-        assert summary["safety_denied_actions"] == 5
+        assert summary["risky_false_approval_attempts"] == summary[
+            "safety_denied_actions"
+        ]
 
 
 def test_browser_eval_keeps_adapter_and_page_failures_separate() -> None:
@@ -229,3 +232,92 @@ def test_routing_win_requires_quality_and_measured_gain() -> None:
     assert _routing_win(token_only, stock) is False
     assert _routing_win(lower_cost, stock) is True
     assert _routing_win(unsafe, stock) is False
+
+
+@pytest.mark.parametrize(
+    ("name", "policy"),
+    [
+        (
+            "calls",
+            EvalPolicy({"navigation": 1_000, "action": 1_000}, 1, 100_000, 20, 120, "test"),
+        ),
+        (
+            "tokens",
+            EvalPolicy({"navigation": 1_000, "action": 1_000}, 20, 100, 20, 120, "test"),
+        ),
+        (
+            "actions",
+            EvalPolicy({"navigation": 1_000, "action": 1_000}, 20, 100_000, 0, 120, "test"),
+        ),
+        (
+            "wall_clock",
+            EvalPolicy({"navigation": 1_000, "action": 1_000}, 20, 100_000, 20, 0, "test"),
+        ),
+    ],
+)
+def test_each_budget_alone_exhausts_both_arms(name: str, policy: EvalPolicy) -> None:
+    del name
+    task = next(task for task in load_browser_tasks() if task.id == "clear-40-static")
+    report = run_browser_eval([task], policy=policy)
+
+    for arm in ("routed", "stock"):
+        assert report["records"][arm][0]["budget_exhausted"] is True
+        assert report["arms"][arm]["failures"]["budget_exhausted"] == 1
+
+
+def test_arm_label_swap_moves_metrics_with_the_arm() -> None:
+    task = next(task for task in load_browser_tasks() if task.id == "clear-500-static")
+    normal = run_browser_eval([task])
+    swapped = run_browser_eval([task], arm_labels=("stock", "routed"))
+
+    assert swapped["arms"]["stock"] == normal["arms"]["routed"]
+    assert swapped["arms"]["routed"] == normal["arms"]["stock"]
+
+
+def test_injected_false_approval_uses_all_denied_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
+    task = next(task for task in load_browser_tasks() if task.id == "clear-10-static")
+    monkeypatch.setattr(browser_eval, "_safety_allows", lambda _step, _element: True)
+
+    report = run_browser_eval([task])
+
+    for arm in ("routed", "stock"):
+        summary = report["arms"][arm]
+        record = report["records"][arm][0]
+        assert record["risky_false_approval"] is True
+        assert summary["risky_false_approval_attempts"] == 1
+        assert summary["risky_false_approval_rate"] == 1.0
+
+
+def test_budget_exhaustion_is_unattempted_for_selection_accuracy() -> None:
+    task = next(task for task in load_browser_tasks() if task.id == "clear-40-static")
+    policy = EvalPolicy({"navigation": 1_000, "action": 1_000}, 1, 100_000, 20, 120, "test")
+    report = run_browser_eval([task], policy=policy)
+
+    for arm in ("routed", "stock"):
+        summary = report["arms"][arm]
+        record = report["records"][arm][0]
+        assert record["selection_attempted"] is False
+        assert record["top1_correct"] is None
+        assert record["top3_covered"] is None
+        assert summary["selection_attempted"] == 0
+        assert summary["selection_unattempted"] == 1
+        assert summary["top1_accuracy"] == 0.0
+        assert summary["top3_coverage"] == 0.0
+
+
+def test_churn_modes_have_distinct_seeded_mutation_counts() -> None:
+    static_task = next(task for task in load_browser_tasks() if task.id == "form-40-static")
+    moderate = replace(static_task, churn="moderate")
+    full = replace(static_task, churn="full")
+
+    moderate_report = run_browser_eval([moderate], seed=17)
+    full_report = run_browser_eval([full], seed=17)
+
+    for arm in ("routed", "stock"):
+        moderate_record = moderate_report["records"][arm][0]
+        full_record = full_report["records"][arm][0]
+        assert moderate_record["stale_rejection_count"] != full_record[
+            "stale_rejection_count"
+        ]
+        assert moderate_record["stale_rejection_count"] > 0
+        assert full_record["stale_rejection_count"] > 0

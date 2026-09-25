@@ -10,7 +10,6 @@ import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Literal
 
 from zeta.core.safety import BrowserRiskEvidence
 from zeta.core.safety._browser import _browser_layer0_classify
@@ -55,20 +54,32 @@ DENIED_RISK_CLASSES = frozenset(
 )
 FAILURE_CATEGORIES = (
     "pre_filter_miss",
+    "search_triage_miss",
     "jev_selection_miss",
     "adapter_failure",
     "page_failure",
+    "budget_exhausted",
 )
 
-ArmName = Literal["routed", "stock"]
+ArmName = str
 
 
 @dataclass(frozen=True, slots=True)
-class TaskStep:
+class ScoringStep:
     action: str
     target_label: str
     target_role: str
     value: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ObservableStep:
+    """The step data available to both arms at runtime."""
+
+    goal: str
+    action: str
+    value: str | None = None
+    page_state: tuple[int, int] = (0, 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,7 +104,7 @@ class BrowserTask:
     failure_mode: str | None = None
     retryable_attempts: int = 0
     risk_class: str = "none"
-    steps: tuple[TaskStep, ...] = ()
+    steps: tuple[ScoringStep, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,12 +136,12 @@ def _safe_prompt(prompt: object) -> bool:
     return not any(marker in lowered for marker in SAFE_PROMPT_MARKERS)
 
 
-def _parse_steps(value: object) -> tuple[TaskStep, ...]:
+def _parse_steps(value: object) -> tuple[ScoringStep, ...]:
     if value is None:
         return ()
     if type(value) is not list or not value:
         raise ValueError("browser task steps must be a non-empty list")
-    steps: list[TaskStep] = []
+    steps: list[ScoringStep] = []
     for raw in value:
         if type(raw) is not dict or set(raw) - {
             "action",
@@ -154,7 +165,7 @@ def _parse_steps(value: object) -> tuple[TaskStep, ...]:
             or (value is not None and type(value) is not str)
         ):
             raise ValueError("browser task has invalid steps")
-        steps.append(TaskStep(action, label, role, value))
+        steps.append(ScoringStep(action, label, role, value))
     return tuple(steps)
 
 
@@ -245,8 +256,21 @@ def load_browser_tasks(path: Path = TASKS_PATH) -> list[BrowserTask]:
     return tasks
 
 
-def _steps_for(task: BrowserTask) -> tuple[TaskStep, ...]:
-    return task.steps or (TaskStep(task.action, task.target_label, task.target_role),)
+def _steps_for(task: BrowserTask) -> tuple[ScoringStep, ...]:
+    return task.steps or (
+        ScoringStep(task.action, task.target_label, task.target_role),
+    )
+
+
+def _observable_step(
+    task: ObservableTask, scoring_step: ScoringStep, observation: PageObservation
+) -> ObservableStep:
+    return ObservableStep(
+        goal=task.prompt,
+        action=scoring_step.action,
+        value=scoring_step.value,
+        page_state=(observation.snapshot_id, observation.generation),
+    )
 
 
 def _target_index(task: BrowserTask, step_index: int = 0) -> int:
@@ -305,7 +329,10 @@ def _element(
         text, role, affordance = f"Unrelated control {index}", "button", "click"
     if role == "textbox":
         affordance = "type"
-    risk = _risk_fields(task) if target else {}
+    risky_target = target and (
+        task.kind != "form" or step is not None and step == steps[-1]
+    )
+    risk = _risk_fields(task) if risky_target else {}
     return ElementRef(
         snapshot_id,
         element_id,
@@ -322,7 +349,27 @@ def _element(
     )
 
 
-def _fixture(task: BrowserTask) -> tuple[list[PageObservation], str]:
+def _mutation_steps(task: BrowserTask, seed: int) -> frozenset[int]:
+    step_count = len(_steps_for(task))
+    if task.churn == "static":
+        return frozenset()
+    if task.churn == "full":
+        return frozenset(range(step_count))
+    return frozenset(
+        step_index
+        for step_index in range(step_count)
+        if int.from_bytes(
+            hashlib.sha256(
+                f"{seed}:{task.id}:{step_index}:0".encode()
+            ).digest()[:8],
+            "big",
+        )
+        / 2**64
+        < 0.30
+    )
+
+
+def _fixture(task: BrowserTask, seed: int = 17) -> tuple[list[PageObservation], str]:
     elements = tuple(_element(task, index) for index in range(task.catalog_size))
     target_id = elements[_target_index(task, len(_steps_for(task)) - 1)].element_id
     first = PageObservation(
@@ -337,18 +384,50 @@ def _fixture(task: BrowserTask) -> tuple[list[PageObservation], str]:
     )
     if task.churn == "static":
         return [first], target_id
-    next_elements = tuple(
-        _element(
-            task,
-            index,
-            snapshot_id=2,
-            generation=2,
-            changed=True,
-        )
-        for index in range(task.catalog_size)
-    )
-    second = replace(first, snapshot_id=2, generation=2, elements=next_elements)
-    return [first, second], target_id
+    observations = [first]
+    mutation_steps = _mutation_steps(task, seed)
+    next_snapshot = 1
+    for step_index in range(len(_steps_for(task))):
+        if step_index in mutation_steps:
+            next_snapshot += 1
+            changed_elements = tuple(
+                _element(
+                    task,
+                    index,
+                    snapshot_id=next_snapshot,
+                    generation=next_snapshot,
+                    changed=True,
+                )
+                for index in range(task.catalog_size)
+            )
+            observations.append(
+                replace(
+                    first,
+                    snapshot_id=next_snapshot,
+                    generation=next_snapshot,
+                    elements=changed_elements,
+                )
+            )
+        if step_index < len(_steps_for(task)) - 1:
+            next_snapshot += 1
+            stable_elements = tuple(
+                _element(
+                    task,
+                    index,
+                    snapshot_id=next_snapshot,
+                    generation=next_snapshot,
+                )
+                for index in range(task.catalog_size)
+            )
+            observations.append(
+                replace(
+                    first,
+                    snapshot_id=next_snapshot,
+                    generation=next_snapshot,
+                    elements=stable_elements,
+                )
+            )
+    return observations, target_id
 
 
 class MockJevTransport:
@@ -385,23 +464,22 @@ class MockJevTransport:
     def _rank(
         self,
         task: ObservableTask,
+        step: ObservableStep,
         candidates: list[dict[str, object]],
-        goal: str,
-        action: str,
     ) -> list[dict[str, object]]:
-        goal_tokens = _goal_tokens(goal)
+        goal_tokens = _goal_tokens(step.goal)
         scored: list[tuple[int, str, dict[str, object]]] = []
         for item in candidates:
             text = str(item.get("text", ""))
             overlap = len(goal_tokens & _goal_tokens(text))
-            if action == "type":
+            if step.action == "type":
                 overlap += 2 if item["role"] == "textbox" else 0
-            elif action == "select":
+            elif step.action == "select":
                 overlap += 2 if item["role"] == "combobox" else 0
-            elif action == "submit":
+            elif step.action == "submit":
                 overlap += 2 if item["affordance"] == "submit" else 0
             digest = hashlib.sha256(
-                f"{self.seed}:{task.id}:{action}:{item['element_id']}".encode()
+                f"{self.seed}:{task.id}:{step.action}:{item['element_id']}".encode()
             ).hexdigest()
             scored.append((overlap, digest, item))
         return [
@@ -412,7 +490,10 @@ class MockJevTransport:
         ]
 
     def choose(
-        self, task: ObservableTask, candidates: list[dict[str, object]], action: str
+        self,
+        task: ObservableTask,
+        step: ObservableStep,
+        candidates: list[dict[str, object]],
     ) -> dict[str, object] | None:
         attempts = task.retryable_attempts + 1
         input_tokens = 72 + len(candidates) * 9 + len(task.prompt)
@@ -421,7 +502,7 @@ class MockJevTransport:
                 return None
             if attempt < task.retryable_attempts:
                 self.retries += 1
-        ranked = self._rank(task, candidates, task.prompt, action)
+        ranked = self._rank(task, step, candidates)
         ids = [str(item["element_id"]) for item in ranked]
         selected = ids[0] if ids else None
         return {
@@ -441,11 +522,14 @@ class MockJevTransport:
         }
 
     def triage_search(
-        self, task: ObservableTask, candidates: list[dict[str, object]]
+        self,
+        task: ObservableTask,
+        step: ObservableStep,
+        candidates: list[dict[str, object]],
     ) -> dict[str, object] | None:
         if not self._request(80 + len(candidates) * 6, 14):
             return None
-        ranked = self._rank(task, candidates, task.prompt, "click")
+        ranked = self._rank(task, step, candidates)
         selected = str(ranked[0]["element_id"]) if ranked else None
         return {
             "selected": selected,
@@ -475,27 +559,23 @@ def _entry_payload(entry: object) -> dict[str, object]:
     }
 
 
-def _safety_allows(task: BrowserTask, element: ElementRef, action: str) -> bool:
+def _safety_allows(step: ObservableStep, element: ElementRef) -> bool:
     evidence = BrowserRiskEvidence(
-        action=action,
+        action=step.action,
         role=element.role,
         text=" ".join(part for part in (element.text, element.name) if part),
         current_origin="https://offline.example.test",
         target_url=element.target_url,
         form_action_origin=element.form_action_origin,
-        payment_language=task.risk_class == "payment",
-        authentication_language=task.risk_class == "authentication",
+        payment_language=False,
+        authentication_language=False,
         download=element.download,
-        durable_state_change=element.durable_state_change or action == "submit",
+        durable_state_change=element.durable_state_change,
         origin_allowed=False,
         operation_token=1,
     )
     classification, reason = _browser_layer0_classify(evidence)
-    if task.risk_class in DENIED_RISK_CLASSES:
-        return False
-    if task.risky or classification != "analyzable":
-        return False
-    return reason in {None, "durable_state_change"}
+    return classification == "analyzable" and reason is None
 
 
 def _target_id_for_step(
@@ -512,11 +592,16 @@ def _element_by_id(observation: PageObservation, element_id: str) -> ElementRef:
 
 
 async def _run_arm(
-    task: BrowserTask, arm: ArmName, policy: EvalPolicy
+    task: BrowserTask,
+    arm: ArmName,
+    policy: EvalPolicy,
+    *,
+    use_prefilter: bool,
+    seed: int,
 ) -> tuple[dict[str, object], MockJevTransport]:
-    observations, target_id = _fixture(task)
+    observations, target_id = _fixture(task, seed)
     adapter = FakeBrowserAdapter(observations)
-    transport = MockJevTransport(policy)
+    transport = MockJevTransport(policy, seed)
     observable_task = ObservableTask(
         task.id, task.kind, task.prompt, task.retryable_attempts
     )
@@ -524,6 +609,7 @@ async def _run_arm(
     started = time.monotonic()
     action_count = 0
     modeled_time_ms = 20
+    mutation_steps = _mutation_steps(task, seed)
     await adapter.launch()
     observation = await adapter.observe(limits)
     record: dict[str, object] = {
@@ -533,18 +619,24 @@ async def _run_arm(
         "churn": task.churn,
         "kind": task.kind,
         "target_id": target_id,
-        "top1_correct": True,
-        "top3_covered": True,
-        "page_state_correct": False,
+        "top1_correct": None,
+        "top3_covered": None,
+        "selection_attempted": False,
+        "page_state_correct": None,
         "page_state_attempted": False,
+        "search_triage_correct": None,
+        "search_triage_attempted": False,
         "task_success": False,
         "risky_false_approval": False,
+        "denied_risky_attempted": False,
+        "denied_risky_attempt_count": 0,
+        "risky_false_approval_count": 0,
         "pre_filter_miss": False,
         "jev_selection_miss": False,
         "adapter_failure": False,
         "page_failure": False,
         "failure_category": None,
-        "stale_recovery_attempted": task.churn != "static",
+        "stale_recovery_attempted": False,
         "stale_recovery_succeeded": False,
         "stale_rejection_count": 0,
         "action_retries": 0,
@@ -554,15 +646,16 @@ async def _run_arm(
             "page_state": 0.0,
             "search_triage": 0.0,
         },
-        "search_triage_correct": True,
         "successful_steps": 0,
         "safety_denied": False,
         "safety_denied_class": None,
         "budget_exhausted": False,
+        "prefilter_targets_retained": 0,
+        "prefilter_targets_total": 0,
         "stage_trace": [],
         "planned_stage_trace": [
             stage
-            for step in _steps_for(task)
+            for _step in _steps_for(task)
             for stage in (
                 (
                     "page_state",
@@ -578,6 +671,10 @@ async def _run_arm(
         ],
     }
 
+    def set_failure(category: str) -> None:
+        if record["failure_category"] is None:
+            record["failure_category"] = category
+
     def finish() -> tuple[dict[str, object], MockJevTransport]:
         record["jev_tokens"] = transport.input_tokens + transport.output_tokens
         record["input_tokens"] = transport.input_tokens
@@ -587,19 +684,19 @@ async def _run_arm(
         record["action_retries"] = transport.retries
         record["modeled_time_ms"] = modeled_time_ms + transport.modeled_time_ms
         record["action_count"] = action_count
-        record["budget_exhausted"] = transport.budget_exhausted or (
-            time.monotonic() - started >= policy.max_wall_clock_seconds
-        )
+        if time.monotonic() - started >= policy.max_wall_clock_seconds:
+            record["budget_exhausted"] = True
+            set_failure("budget_exhausted")
         return record, transport
 
     def budget_available() -> bool:
         if time.monotonic() - started >= policy.max_wall_clock_seconds:
             record["budget_exhausted"] = True
-            record["failure_category"] = "budget_exhausted"
+            set_failure("budget_exhausted")
             return False
         if action_count >= policy.max_actions:
             record["budget_exhausted"] = True
-            record["failure_category"] = "budget_exhausted"
+            set_failure("budget_exhausted")
             return False
         return True
 
@@ -611,7 +708,7 @@ async def _run_arm(
         result = transport.page_state(current.loaded, current.stable)
         if result is None:
             record["budget_exhausted"] = True
-            record["failure_category"] = "budget_exhausted"
+            set_failure("budget_exhausted")
             return False
         modeled_time_ms += 5
         record["page_state_attempted"] = True
@@ -619,14 +716,14 @@ async def _run_arm(
         record["confidence"]["page_state"] = result["confidence"]
         if not current.loaded or not current.stable:
             record["page_failure"] = True
-            record["failure_category"] = "page_failure"
+            set_failure("page_failure")
             return False
         return True
 
     async def allow_navigation(_destination: str, _current: str | None) -> None:
         return None
 
-    async def perform_action(element: ElementRef, step: TaskStep) -> None:
+    async def perform_action(element: ElementRef, step: ObservableStep) -> None:
         nonlocal action_count, modeled_time_ms
         if not budget_available():
             raise BrowserError("browser budget exhausted")
@@ -649,110 +746,153 @@ async def _run_arm(
             )
 
     async def select_step(
-        current: PageObservation, step_index: int, step: TaskStep
-    ) -> tuple[ElementRef | None, str | None]:
+        current: PageObservation, step_index: int, scoring_step: ScoringStep
+    ) -> tuple[ElementRef | None, str | None, ObservableStep | None]:
+        observable_step = _observable_step(observable_task, scoring_step, current)
         record["stage_trace"].append("catalog")
         catalog = SnapshotCatalogBuilder(limits).build(current)
-        if arm == "routed":
-            filtered = prefilter_catalog(step.target_label, step.action, catalog)
+        target_for_stage = _target_id_for_step(task, step_index, current)
+        if use_prefilter:
+            filtered = prefilter_catalog(
+                observable_step.goal, observable_step.action, catalog
+            )
             entries = list(filtered.candidates)
-            target_for_stage = _target_id_for_step(task, step_index, current)
-            if target_for_stage not in {entry.element_id for entry in entries}:
+            record["prefilter_targets_total"] = (
+                int(record["prefilter_targets_total"]) + 1
+            )
+            if target_for_stage in {entry.element_id for entry in entries}:
+                record["prefilter_targets_retained"] = (
+                    int(record["prefilter_targets_retained"]) + 1
+                )
+            else:
                 record["pre_filter_miss"] = True
-                record["failure_category"] = "pre_filter_miss"
+                set_failure("pre_filter_miss")
+                return None, target_for_stage, observable_step
         else:
             entries = list(catalog.entries)
+            record["prefilter_targets_total"] = (
+                int(record["prefilter_targets_total"]) + 1
+            )
+            record["prefilter_targets_retained"] = (
+                int(record["prefilter_targets_retained"]) + 1
+            )
         payload = [_entry_payload(entry) for entry in entries]
         if task.kind == "search_triage":
             record["stage_trace"].append("search_triage")
-            triage = transport.triage_search(observable_task, payload)
+            triage = transport.triage_search(observable_task, observable_step, payload)
             if triage is None:
                 record["budget_exhausted"] = True
-                record["failure_category"] = "budget_exhausted"
-                return None, None
-            target_for_stage = _target_id_for_step(task, step_index, current)
+                set_failure("budget_exhausted")
+                return None, None, observable_step
+            record["search_triage_attempted"] = True
             triage_selected = triage["selected"]
-            if triage_selected != target_for_stage:
-                record["search_triage_correct"] = False
+            record["search_triage_correct"] = triage_selected == target_for_stage
             record["confidence"]["search_triage"] = triage["confidence"]
+            if triage_selected != target_for_stage:
+                set_failure("search_triage_miss")
+                return None, target_for_stage, observable_step
             payload = [
                 item for item in payload if item["element_id"] == triage_selected
             ]
         record["stage_trace"].append("jev_selection")
-        choice = transport.choose(observable_task, payload, step.action)
+        choice = transport.choose(observable_task, observable_step, payload)
         if choice is None:
             record["budget_exhausted"] = True
-            record["failure_category"] = "budget_exhausted"
-            return None, None
-        target_for_stage = _target_id_for_step(task, step_index, current)
+            set_failure("budget_exhausted")
+            return None, None, observable_step
         selected = choice["selected"]
-        record["top1_correct"] = (
-            bool(record["top1_correct"]) and selected == target_for_stage
+        record["selection_attempted"] = True
+        record["top1_correct"] = bool(record["top1_correct"] is not False) and (
+            selected == target_for_stage
         )
-        record["top3_covered"] = (
-            bool(record["top3_covered"]) and target_for_stage in choice["top3"]
+        record["top3_covered"] = bool(record["top3_covered"] is not False) and (
+            target_for_stage in choice["top3"]
         )
         record["confidence"]["element_selection"] = choice["confidence"]
         if selected != target_for_stage:
             record["jev_selection_miss"] = True
-            record["failure_category"] = "jev_selection_miss"
-            return None, target_for_stage
-        return _element_by_id(current, str(selected)), target_for_stage
+            set_failure("jev_selection_miss")
+            return None, target_for_stage, observable_step
+        return _element_by_id(current, str(selected)), target_for_stage, observable_step
 
     if not await page_gate(observation):
         await adapter.close()
         return finish()
 
     steps = _steps_for(task)
-    for step_index, step in enumerate(steps):
+    for step_index, scoring_step in enumerate(steps):
         if not budget_available():
             break
         current = await adapter.observe(limits)
-        selected_ref, target_for_stage = await select_step(current, step_index, step)
-        if selected_ref is None or target_for_stage is None:
+        selected_ref, target_for_stage, observable_step = await select_step(
+            current, step_index, scoring_step
+        )
+        if selected_ref is None or target_for_stage is None or observable_step is None:
             break
 
-        if step_index == 0 and task.churn != "static":
+        if step_index in mutation_steps:
             adapter.install_navigation_guard(allow_navigation)
-            await adapter.navigate(current.url, policy.timeouts_ms["navigation"])
+            try:
+                await adapter.navigate(current.url, policy.timeouts_ms["navigation"])
+            except BrowserError:
+                record["adapter_failure"] = True
+                set_failure("adapter_failure")
+                break
             adapter.detach(selected_ref.element_id)
             record["stage_trace"].append("stale_rejection")
             try:
-                await perform_action(selected_ref, step)
+                await perform_action(selected_ref, observable_step)
             except ElementUnavailableError:
                 record["stale_rejection_count"] = (
                     int(record["stale_rejection_count"]) + 1
                 )
+                record["stale_recovery_attempted"] = True
             except BrowserError:
                 record["adapter_failure"] = True
-                record["failure_category"] = "adapter_failure"
+                set_failure("adapter_failure")
                 break
             else:
                 record["adapter_failure"] = True
-                record["failure_category"] = "adapter_failure"
+                set_failure("adapter_failure")
                 break
             refreshed = await adapter.observe(limits)
-            selected_ref, target_for_stage = await select_step(
-                refreshed, step_index, step
+            selected_ref, target_for_stage, observable_step = await select_step(
+                refreshed, step_index, scoring_step
             )
-            if selected_ref is None or target_for_stage is None:
+            if selected_ref is None or target_for_stage is None or observable_step is None:
                 break
             record["stage_trace"].append("stale_recovery")
+            record["stale_recovery_succeeded"] = True
 
-        if not _safety_allows(task, selected_ref, step.action):
+        record["stage_trace"].append("safety")
+        denied_action = task.risk_class in DENIED_RISK_CLASSES and (
+            task.kind != "form" or step_index == len(steps) - 1
+        )
+        if denied_action:
+            record["denied_risky_attempted"] = True
+            record["denied_risky_attempt_count"] = (
+                int(record["denied_risky_attempt_count"]) + 1
+            )
+        allowed = _safety_allows(observable_step, selected_ref)
+        if not allowed:
             record["safety_denied"] = True
             record["safety_denied_class"] = task.risk_class
-            record["failure_category"] = "safety_denied"
             break
-        if task.risky and _safety_allows(task, selected_ref, step.action):
+        if denied_action:
             record["risky_false_approval"] = True
+            record["risky_false_approval_count"] = (
+                int(record["risky_false_approval_count"]) + 1
+            )
         if task.failure_mode == "adapter":
-            adapter.timeout_next("type" if step.action == "type" else step.action)
+            adapter.timeout_next(
+                "type_text" if observable_step.action == "type" else observable_step.action
+            )
+        record["stage_trace"].append("action")
         try:
-            await perform_action(selected_ref, step)
+            await perform_action(selected_ref, observable_step)
         except BrowserError:
             record["adapter_failure"] = True
-            record["failure_category"] = "adapter_failure"
+            set_failure("adapter_failure")
             break
         record["successful_steps"] = int(record["successful_steps"]) + 1
         if step_index < len(steps) - 1:
@@ -761,11 +901,6 @@ async def _run_arm(
                 break
     else:
         record["task_success"] = int(record["successful_steps"]) == len(steps)
-        if record["task_success"]:
-            record["stale_recovery_succeeded"] = (
-                int(record["stale_rejection_count"]) > 0
-            )
-            record["failure_category"] = None
     await adapter.close()
     return finish()
 
@@ -780,6 +915,15 @@ def _arm_summary(
     count = len(records)
     successful = sum(bool(record["task_success"]) for record in records)
     successful_steps = sum(int(record["successful_steps"]) for record in records)
+    selection_records = [
+        record
+        for record in records
+        if record["selection_attempted"]
+        and record["top1_correct"] is not None
+        and record["top3_covered"] is not None
+    ]
+    page_records = [record for record in records if record["page_state_attempted"]]
+    triage_records = [record for record in records if record["search_triage_attempted"]]
     failures = Counter(
         record["failure_category"]
         for record in records
@@ -798,6 +942,13 @@ def _arm_summary(
             )
             for record in records
             if record["confidence"][primitive]
+            and (
+                record["selection_attempted"]
+                if primitive == "element_selection"
+                else record["page_state_attempted"]
+                if primitive == "page_state"
+                else record["search_triage_attempted"]
+            )
         ]
         confidence[primitive] = {
             "count": len(samples),
@@ -817,19 +968,50 @@ def _arm_summary(
         transport.input_tokens * 0.000001 + transport.output_tokens * 0.000002, 6
     )
     stale_attempts = sum(bool(record["stale_recovery_attempted"]) for record in records)
+    denied_attempts = sum(
+        int(record["denied_risky_attempt_count"]) for record in records
+    )
+    prefilter_total = sum(int(record["prefilter_targets_total"]) for record in records)
+    prefilter_retained = sum(
+        int(record["prefilter_targets_retained"]) for record in records
+    )
     return {
         "task_count": count,
-        "top1_accuracy": _ratio(sum(bool(r["top1_correct"]) for r in records), count),
-        "top3_coverage": _ratio(sum(bool(r["top3_covered"]) for r in records), count),
+        "selection_attempted": len(selection_records),
+        "selection_unattempted": count - len(selection_records),
+        "top1_accuracy": _ratio(
+            sum(bool(r["top1_correct"]) for r in selection_records),
+            len(selection_records),
+        ),
+        "top1_correct_count": sum(bool(r["top1_correct"]) for r in selection_records),
+        "top3_coverage": _ratio(
+            sum(bool(r["top3_covered"]) for r in selection_records),
+            len(selection_records),
+        ),
+        "top3_covered_count": sum(
+            bool(r["top3_covered"]) for r in selection_records
+        ),
+        "page_state_attempted": len(page_records),
+        "page_state_unattempted": count - len(page_records),
         "page_state_accuracy": _ratio(
-            sum(bool(r["page_state_correct"]) for r in records),
-            sum(bool(r["page_state_attempted"]) for r in records),
+            sum(bool(r["page_state_correct"]) for r in page_records), len(page_records)
+        ),
+        "search_triage_attempted": len(triage_records),
+        "search_triage_unattempted": count - len(triage_records),
+        "search_triage_accuracy": _ratio(
+            sum(bool(r["search_triage_correct"]) for r in triage_records),
+            len(triage_records),
         ),
         "task_success_rate": _ratio(successful, count),
+        "task_success_count": successful,
         "risky_false_approval_rate": _ratio(
-            sum(bool(r["risky_false_approval"]) for r in records),
-            sum(bool(r["safety_denied_class"]) for r in records),
+            sum(int(r["risky_false_approval_count"]) for r in records),
+            denied_attempts,
         ),
+        "risky_false_approval_count": sum(
+            int(r["risky_false_approval_count"]) for r in records
+        ),
+        "risky_false_approval_attempts": denied_attempts,
         "jev_cost": cost,
         "jev_tokens": tokens,
         "jev_tokens_per_successful_step": _ratio(tokens, successful_steps),
@@ -842,6 +1024,7 @@ def _arm_summary(
         "stale_recovery_rate": _ratio(
             sum(bool(r["stale_recovery_succeeded"]) for r in records), stale_attempts
         ),
+        "stale_recovery_attempted": stale_attempts,
         "stale_rejection_count": sum(int(r["stale_rejection_count"]) for r in records),
         "action_retry_count": transport.retries,
         "provider_retry_count": transport.retries,
@@ -856,6 +1039,9 @@ def _arm_summary(
             6,
         ),
         "failures": {name: failures.get(name, 0) for name in FAILURE_CATEGORIES},
+        "prefilter_targets_retained": prefilter_retained,
+        "prefilter_targets_total": prefilter_total,
+        "prefilter_recall": _ratio(prefilter_retained, prefilter_total),
         "safety_denied_actions": sum(bool(r["safety_denied"]) for r in records),
         "safety_denied_classes": sorted(
             {str(r["safety_denied_class"]) for r in records if r["safety_denied_class"]}
@@ -896,13 +1082,29 @@ def _cell_summary(records: list[dict[str, object]]) -> dict[str, object]:
     return _arm_summary(records, transport)
 
 
-async def _run(tasks: list[BrowserTask], policy: EvalPolicy) -> dict[str, object]:
-    records_by_arm: dict[str, list[dict[str, object]]] = {"routed": [], "stock": []}
+async def _run(
+    tasks: list[BrowserTask],
+    policy: EvalPolicy,
+    *,
+    seed: int = 17,
+    arm_labels: tuple[str, str] = ("routed", "stock"),
+) -> dict[str, object]:
+    candidate_label, stock_label = arm_labels
+    arm_specs = ((candidate_label, True), (stock_label, False))
+    records_by_arm: dict[str, list[dict[str, object]]] = {
+        label: [] for label, _use_prefilter in arm_specs
+    }
     transports: dict[str, MockJevTransport] = {}
-    for arm in ("routed", "stock"):
+    for arm, use_prefilter in arm_specs:
         total_transport = MockJevTransport(policy)
         for task in tasks:
-            record, transport = await _run_arm(task, arm, policy)
+            record, transport = await _run_arm(
+                task,
+                arm,
+                policy,
+                use_prefilter=use_prefilter,
+                seed=seed,
+            )
             records_by_arm[arm].append(record)
             total_transport.requests += transport.requests
             total_transport.retries += transport.retries
@@ -918,20 +1120,22 @@ async def _run(tasks: list[BrowserTask], policy: EvalPolicy) -> dict[str, object
     }
     cells: list[dict[str, object]] = []
     grouped: dict[tuple[int, str], dict[str, list[dict[str, object]]]] = defaultdict(
-        lambda: {"routed": [], "stock": []}
+        lambda: {arm: [] for arm, _use_prefilter in arm_specs}
     )
     for arm, records in records_by_arm.items():
         for record in records:
             grouped[(record["catalog_size"], record["churn"])][arm].append(record)
     for (size, churn), arms in sorted(grouped.items()):
-        cell_summaries = {arm: _cell_summary(arms[arm]) for arm in ("routed", "stock")}
-        routed, stock = cell_summaries["routed"], cell_summaries["stock"]
+        cell_summaries = {
+            arm: _cell_summary(arms[arm]) for arm, _use_prefilter in arm_specs
+        }
+        routed, stock = cell_summaries[candidate_label], cell_summaries[stock_label]
         cells.append(
             {
                 "catalog_size": size,
                 "churn": churn,
-                "routed": routed,
-                "stock": stock,
+                candidate_label: routed,
+                stock_label: stock,
                 "routing_win": _routing_win(routed, stock),
                 "win_requires_quality_and_safety_parity": True,
                 "time_measurement": "modeled_shared_stage_cost",
@@ -953,12 +1157,13 @@ async def _run(tasks: list[BrowserTask], policy: EvalPolicy) -> dict[str, object
         },
         "corpus": {
             "task_count": len(tasks),
+            "seed": seed,
             "catalog_sizes": list(CATALOG_SIZES),
             "churn_modes": list(CHURN_MODES),
             "task_kinds": list(TASK_KINDS),
             "multi_step_form_tasks": sum(task.kind == "form" for task in tasks),
             "mutation_before_action_tasks": sum(
-                task.churn != "static" for task in tasks
+                bool(_mutation_steps(task, seed)) for task in tasks
             ),
             "safety_denied_classes": sorted(DENIED_RISK_CLASSES),
         },
@@ -974,6 +1179,10 @@ async def _run(tasks: list[BrowserTask], policy: EvalPolicy) -> dict[str, object
             "threshold_versions_recorded": True,
             "failure_categories_separate": True,
             "usage_and_time_are_labeled_modeled": True,
+            "arm_labels_are_not_behavior": True,
+            "accuracy_uses_attempted_records_only": True,
+            "false_approval_denominator_is_all_denied_attempts": True,
+            "failure_attribution_is_first_failure_only": True,
         },
     }
 
@@ -982,10 +1191,14 @@ def run_browser_eval(
     tasks: list[BrowserTask] | None = None,
     *,
     policy: EvalPolicy = DEFAULT_POLICY,
+    seed: int = 17,
+    arm_labels: tuple[str, str] = ("routed", "stock"),
 ) -> dict[str, object]:
     """Run both arms without opening a network or provider connection."""
 
-    return asyncio.run(_run(tasks or load_browser_tasks(), policy))
+    return asyncio.run(
+        _run(tasks or load_browser_tasks(), policy, seed=seed, arm_labels=arm_labels)
+    )
 
 
 def write_report(report: dict[str, object], path: Path) -> None:

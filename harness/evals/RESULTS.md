@@ -1,63 +1,79 @@
-# offline browser evaluation baseline — 2026-09-25
+# offline browser evaluation results — 2026-09-25
 
-The fixed runner compares routed and stock arms through one shared stage
-pipeline. Both arms use the same fixtures, prompts, budgets, page gates, and
-safety policy.
+The fixed offline runner compares routed and stock arms on the same seeded
+fixtures, observable goals, page states, budgets, and safety policy.
 
 The corpus has 60 tasks. It covers the full 5 x 3 x 4 matrix:
 
 - catalog sizes: 10, 40, 120, 500, and 2,000;
 - churn: static, moderate, and full;
 - task shapes: clear target, repeated label, search triage, and multi-step form;
-- mutation-before-action stale rejection and recovery;
-- all five denied safety classes: destructive, payment, authentication,
-  external-origin, and download.
+- seeded stale mutation and recovery;
+- five denied safety classes in the task truth.
+
+The seed is 17. The four shared budget settings are:
+
+- page Jev calls: 8;
+- page Jev tokens: 12,000;
+- browser actions: 20;
+- wall clock: 120 seconds.
 
 ## headline
 
-The routed arm completes 40/60 tasks (66.67%). The stock arm completes 28/60
-(46.67%). Both arms have zero risky false approvals and cover all five denied
-classes.
+The routed arm completes 36/60 tasks (0.6000). The stock arm completes 26/60
+(0.4333). Both arms have zero false approvals over 4/4 denied-class risky
+attempts. The routed arm wins 14 of 15 matrix cells and loses one. The loss is
+the 10-element static cell, where both arms complete 0/4 tasks.
 
-The matrix has 14 qualifying routed cells and one no-win cell. The 10-element
-static cell has zero successful tasks in both arms, so it does not qualify as a
-win. This is the fixed runner's result, not a forced routing claim.
+These are the reported numbers. They do not force a routing-win claim.
 
 | metric | routed | stock large-tool |
 | --- | ---: | ---: |
-| top-1 accuracy | 0.7500 | 0.8000 |
-| top-3 coverage | 0.7667 | 0.8167 |
-| page-state accuracy | 1.0000 | 1.0000 |
-| task success rate | 0.6667 | 0.4667 |
-| risky false-approval rate | 0.0000 | 0.0000 |
-| Jev tokens | 39,055 | 133,761 |
-| Jev cost | 0.042451 | 0.136469 |
-| Jev cost per successful step | 0.000663 | 0.003102 |
-| model input tokens | 35,659 | 131,053 |
-| model output tokens | 3,396 | 2,708 |
-| provider turns | 222 | 180 |
-| stale recovery rate | 0.7000 | 0.5000 |
-| stale rejections | 30 | 24 |
-| time per successful step | 0.128953 s | 0.387318 s |
+| top-1 accuracy, attempted | 45/47 (0.9574) | 36/47 (0.7660) |
+| top-3 coverage, attempted | 46/47 (0.9787) | 37/47 (0.7872) |
+| page-state accuracy, attempted | 60/60 (1.0000) | 60/60 (1.0000) |
+| search-triage accuracy, attempted | 14/15 (0.9333) | 11/12 (0.9167) |
+| task success | 36/60 (0.6000) | 26/60 (0.4333) |
+| selection unattempted | 13/60 | 13/60 |
+| prefilter recall | 108/120 (0.9000) | n/a, no prefilter |
+| false approval rate | 0/4 (0.0000) | 0/4 (0.0000) |
+| Jev tokens (modeled) | 34,699 | 130,500 |
+| Jev cost (modeled) | 0.037909 | 0.133300 |
+| Jev cost per successful step (modeled) | 0.000574 | 0.002720 |
+| provider turns | 217 | 180 |
+| stale recovery | 20/20 (1.0000) | 17/17 (1.0000) |
+| stale rejections | 30 | 23 |
+| budget-exhausted tasks | 5 | 18 |
+| time per successful step (modeled) | 0.118591 s | 0.343918 s |
 
-The runner enforces these budgets in both arms: 8 page Jev calls, 12,000 Jev
-tokens, 20 browser actions, and 120 wall-clock seconds. The stock arm reaches
-the Jev budget on 15 tasks. The routed arm reaches none.
+Accuracy rates exclude unattempted records. The denominator appears beside each
+rate. The runner reports 13 unattempted selection records in each arm.
 
-Time, token use, and cost are modeled offline values. The mock has no provider
-key and receives no target id or target label. It ranks from the task prompt,
-action type, and visible catalog. Search triage has 93.33% routed accuracy and
-91.67% stock accuracy. The ambiguous search task fails when triage chooses the
-wrong result.
+## exclusive failure counts
 
-Failure categories remain separate. Routed: 15 Jev selection misses. Stock:
-12 Jev selection misses. Adapter and page failures are zero in this corpus and
-have dedicated regression coverage.
+Each record has one first-failure category. Safety denials remain separate from
+this table. A prefilter miss stops attribution before later selection stages.
 
-The crossover matrix uses task-success and safety parity first. A token
-reduction alone cannot qualify. The 10-element static cell is the no-win cell;
-the other 14 cells qualify on modeled cost or modeled time with the reported
-quality and safety results.
+| first failure category | routed | stock large-tool |
+| --- | ---: | ---: |
+| pre_filter_miss | 12 | 0 |
+| search_triage_miss | 1 | 1 |
+| jev_selection_miss | 2 | 11 |
+| adapter_failure | 0 | 0 |
+| page_failure | 0 | 0 |
+| budget_exhausted | 5 | 18 |
+
+## caveats
+
+- The fake adapter uses deterministic pages. This ceiling inflates both arms.
+- Token counts are modeled from the offline transport formula.
+- Cost is modeled from input and output token formulas.
+- Time is modeled from shared stage-cost formulas.
+- The stock arm has no prefilter, so its prefilter recall is not applicable.
+- The fixed call budget prevents one denied-class task from reaching its final
+  safety stage. False-approval accounting uses only runtime attempts.
+
+The runner uses no network, browser provider, or provider key.
 
 Command:
 
@@ -67,4 +83,4 @@ Targeted verification:
 
 `uv run --frozen pytest -q --tb=short tests/test_browser_evals.py tests/test_evals.py tests/test_module_limits.py::test_module_limits`
 
-Result: 49 passed.
+Result: 57 passed.
