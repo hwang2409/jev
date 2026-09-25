@@ -263,10 +263,11 @@ async def test_browser_smoke_output_has_no_page_or_secret_payload(
 
     captured = capsys.readouterr()
     channels = (captured.out, captured.err, caplog.text)
-    output = "".join(channels).casefold()
+    combined = "".join(channels)
+    output = combined.casefold()
     assert "fixture navigation: passed" in output
     assert "form type/submit: passed" in output
-    assert len(output.encode("utf-8")) <= MAX_SMOKE_OUTPUT_BYTES
+    assert len(combined.encode("utf-8")) <= MAX_SMOKE_OUTPUT_BYTES
     forbidden = (*sentinels.values(), "safe/approved", "authorization", "<html", "full html")
     for channel in channels:
         channel = channel.casefold()
