@@ -93,7 +93,22 @@ def test_fake_judge_is_injected_without_http() -> None:
 def test_judge_async_cancellation_does_not_leave_a_blocked_executor() -> None:
     async def cancel_consumer() -> None:
         loop = asyncio.get_running_loop()
-        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
+
+        class StartHandshakeExecutor(ThreadPoolExecutor):
+            def submit(self, fn, /, *args, **kwargs):
+                started = threading.Event()
+
+                def wrapped():
+                    started.set()
+                    return fn(*args, **kwargs)
+
+                future = super().submit(wrapped)
+                if not started.wait(timeout=1):
+                    future.cancel()
+                    raise AssertionError("executor callable did not start")
+                return future
+
+        loop.set_default_executor(StartHandshakeExecutor(max_workers=1))
         started = asyncio.Event()
         release = threading.Event()
         finished = threading.Event()
