@@ -9,6 +9,7 @@ import json
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
+from functools import cache
 from pathlib import Path
 
 from zeta.core.safety import BrowserRiskEvidence
@@ -355,18 +356,30 @@ def _mutation_steps(task: BrowserTask, seed: int) -> frozenset[int]:
         return frozenset()
     if task.churn == "full":
         return frozenset(range(step_count))
+    selected = _moderate_mutation_schedule(seed)
+    task_id = task.id.rsplit("-", 1)[0]
     return frozenset(
         step_index
         for step_index in range(step_count)
-        if int.from_bytes(
-            hashlib.sha256(
-                f"{seed}:{task.id}:{step_index}:0".encode()
-            ).digest()[:8],
-            "big",
-        )
-        / 2**64
-        < 0.30
+        if (task_id, step_index) in selected
     )
+
+
+@cache
+def _moderate_mutation_schedule(seed: int) -> frozenset[tuple[str, int]]:
+    candidates = [
+        (task.id.rsplit("-", 1)[0], step_index)
+        for task in load_browser_tasks()
+        if task.churn == "moderate"
+        for step_index in range(len(_steps_for(task)))
+    ]
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: hashlib.sha256(
+            f"{seed}:{candidate[0]}:{candidate[1]}:0".encode()
+        ).digest(),
+    )
+    return frozenset(ranked[:9])
 
 
 def _fixture(task: BrowserTask, seed: int = 17) -> tuple[list[PageObservation], str]:
@@ -770,12 +783,6 @@ async def _run_arm(
                 return None, target_for_stage, observable_step
         else:
             entries = list(catalog.entries)
-            record["prefilter_targets_total"] = (
-                int(record["prefilter_targets_total"]) + 1
-            )
-            record["prefilter_targets_retained"] = (
-                int(record["prefilter_targets_retained"]) + 1
-            )
         payload = [_entry_payload(entry) for entry in entries]
         if task.kind == "search_triage":
             record["stage_trace"].append("search_triage")
@@ -1041,7 +1048,11 @@ def _arm_summary(
         "failures": {name: failures.get(name, 0) for name in FAILURE_CATEGORIES},
         "prefilter_targets_retained": prefilter_retained,
         "prefilter_targets_total": prefilter_total,
-        "prefilter_recall": _ratio(prefilter_retained, prefilter_total),
+        "prefilter_recall": (
+            _ratio(prefilter_retained, prefilter_total)
+            if prefilter_total
+            else None
+        ),
         "safety_denied_actions": sum(bool(r["safety_denied"]) for r in records),
         "safety_denied_classes": sorted(
             {str(r["safety_denied_class"]) for r in records if r["safety_denied_class"]}

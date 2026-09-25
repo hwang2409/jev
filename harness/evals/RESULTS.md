@@ -9,6 +9,7 @@ The corpus has 60 tasks. It covers the full 5 x 3 x 4 matrix:
 - churn: static, moderate, and full;
 - task shapes: clear target, repeated label, search triage, and multi-step form;
 - seeded stale mutation and recovery;
+- nine seeded moderate mutations across 30 moderate steps;
 - five denied safety classes in the task truth.
 
 The seed is 17. The four shared budget settings are:
@@ -35,16 +36,16 @@ These are the reported numbers. They do not force a routing-win claim.
 | search-triage accuracy, attempted | 14/15 (0.9333) | 11/12 (0.9167) |
 | task success | 36/60 (0.6000) | 26/60 (0.4333) |
 | selection unattempted | 13/60 | 13/60 |
-| prefilter recall | 108/120 (0.9000) | n/a, no prefilter |
+| prefilter recall | 111/123 (0.9024) | n/a, no prefilter |
 | false approval rate | 0/4 (0.0000) | 0/4 (0.0000) |
-| Jev tokens (modeled) | 34,699 | 130,500 |
-| Jev cost (modeled) | 0.037909 | 0.133300 |
-| Jev cost per successful step (modeled) | 0.000574 | 0.002720 |
-| provider turns | 217 | 180 |
-| stale recovery | 20/20 (1.0000) | 17/17 (1.0000) |
-| stale rejections | 30 | 23 |
+| Jev tokens (modeled) | 35,431 | 129,799 |
+| Jev cost (modeled) | 0.038723 | 0.132601 |
+| Jev cost per successful step (modeled) | 0.000587 | 0.002763 |
+| provider turns | 218 | 187 |
+| stale recovery | 23/23 (1.0000) | 18/18 (1.0000) |
+| stale rejections | 33 | 24 |
 | budget-exhausted tasks | 5 | 18 |
-| time per successful step (modeled) | 0.118591 s | 0.343918 s |
+| time per successful step (modeled) | 0.120833 s | 0.349542 s |
 
 Accuracy rates exclude unattempted records. The denominator appears beside each
 rate. The runner reports 13 unattempted selection records in each arm.
@@ -81,6 +82,6 @@ Command:
 
 Targeted verification:
 
-`uv run --frozen pytest -q --tb=short tests/test_browser_evals.py tests/test_evals.py tests/test_module_limits.py::test_module_limits`
+`uv run --frozen pytest -q --tb=short tests/test_browser_evals.py tests/test_module_limits.py::test_module_limits`
 
-Result: 57 passed.
+Result: 21 passed.

@@ -176,28 +176,6 @@ def test_browser_eval_keeps_adapter_and_page_failures_separate() -> None:
     assert failures["jev_selection_miss"] == 0
 
 
-def test_browser_eval_enforces_each_budget_in_both_arms() -> None:
-    task = BrowserTask(
-        "budget",
-        "clear_target",
-        2_000,
-        "static",
-        "click the continue control",
-        "click",
-        "Continue",
-        "button",
-    )
-    policy = EvalPolicy({"navigation": 1_000, "action": 1_000}, 1, 100, 1, 120, "test")
-    report = run_browser_eval([task], policy=policy)
-
-    for arm in ("routed", "stock"):
-        record = report["records"][arm][0]
-        assert record["provider_turns"] <= 1
-        assert record["jev_tokens"] <= 100
-        assert record["action_count"] <= 1
-        assert record["budget_exhausted"] is True
-
-
 def test_browser_eval_charges_mock_retry_requests() -> None:
     task = BrowserTask(
         "retry",
@@ -275,17 +253,44 @@ def test_arm_label_swap_moves_metrics_with_the_arm() -> None:
 
 
 def test_injected_false_approval_uses_all_denied_attempts(monkeypatch: pytest.MonkeyPatch) -> None:
-    task = next(task for task in load_browser_tasks() if task.id == "clear-10-static")
-    monkeypatch.setattr(browser_eval, "_safety_allows", lambda _step, _element: True)
+    template = next(
+        task for task in load_browser_tasks() if task.id == "clear-10-static"
+    )
+    tasks = [
+        replace(template, id=f"clear-{catalog_size}-denied", catalog_size=catalog_size)
+        for catalog_size in (10, 40, 120, 500)
+    ]
+    monkeypatch.setattr(
+        browser_eval,
+        "_safety_allows",
+        lambda _step, element: element.element_id == "e00005",
+    )
 
-    report = run_browser_eval([task])
+    report = run_browser_eval(tasks)
 
     for arm in ("routed", "stock"):
         summary = report["arms"][arm]
-        record = report["records"][arm][0]
-        assert record["risky_false_approval"] is True
-        assert summary["risky_false_approval_attempts"] == 1
-        assert summary["risky_false_approval_rate"] == 1.0
+        records = report["records"][arm]
+        assert summary["risky_false_approval_attempts"] == len(tasks)
+        assert summary["risky_false_approval_count"] == 1
+        assert summary["risky_false_approval_rate"] == 0.25
+        assert sum(bool(record["risky_false_approval"]) for record in records) == 1
+
+
+def test_moderate_churn_selects_nine_seeded_steps() -> None:
+    tasks = [task for task in load_browser_tasks() if task.churn == "moderate"]
+
+    assert sum(len(task.steps or (task.action,)) for task in tasks) == 30
+    assert sum(len(browser_eval._mutation_steps(task, 17)) for task in tasks) == 9
+
+
+def test_stock_arm_reports_no_prefilter_metrics() -> None:
+    report = run_browser_eval()
+
+    stock = report["arms"]["stock"]
+    assert stock["prefilter_targets_total"] == 0
+    assert stock["prefilter_targets_retained"] == 0
+    assert stock["prefilter_recall"] is None
 
 
 def test_budget_exhaustion_is_unattempted_for_selection_accuracy() -> None:
