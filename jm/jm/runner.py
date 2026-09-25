@@ -164,7 +164,12 @@ class ConfigurationError(ValueError):
 class SharedScheduler:
     """Run bounded calls with the shared 503 backoff policy."""
 
-    def __init__(self, concurrency: int, *, observer_target: object | None = None):
+    def __init__(
+        self,
+        concurrency: int,
+        *,
+        observer_target: object | None = None,
+    ):
         if (
             isinstance(concurrency, bool)
             or not isinstance(concurrency, int)
@@ -1505,7 +1510,13 @@ def judge_async(
 
         threading.Thread(target=produce, daemon=True).start()
         while True:
-            item = await asyncio.to_thread(records.get)
+            try:
+                item = records.get_nowait()
+            except queue.Empty:
+                # A blocking executor wait survives stream cancellation and
+                # makes asyncio.run wait for a producer that may be stalled.
+                await asyncio.sleep(0.01)
+                continue
             if item is sentinel:
                 return
             if isinstance(item, BaseException):
