@@ -5,6 +5,7 @@ import io
 import json
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 
@@ -92,6 +93,7 @@ def test_fake_judge_is_injected_without_http() -> None:
 def test_judge_async_cancellation_does_not_leave_a_blocked_executor() -> None:
     async def cancel_consumer() -> None:
         loop = asyncio.get_running_loop()
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=1))
         started = asyncio.Event()
         release = threading.Event()
         finished = threading.Event()
@@ -115,7 +117,10 @@ def test_judge_async_cancellation_does_not_leave_a_blocked_executor() -> None:
         consumer.cancel()
         await asyncio.gather(consumer, return_exceptions=True)
         await stream.aclose()
-        release.set()
+        try:
+            assert await asyncio.wait_for(asyncio.to_thread(lambda: True), timeout=1)
+        finally:
+            release.set()
         assert await asyncio.to_thread(finished.wait, 1)
 
     asyncio.run(cancel_consumer())
