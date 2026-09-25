@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import threading
@@ -38,6 +39,7 @@ from jm.presets import (
 )
 from jm.runner import (
     FakeJudge,
+    FormationReport,
     ResultFilter,
     Runner,
     State,
@@ -47,6 +49,7 @@ from jm.runner import (
     _run_pipeline,
     admit_states,
     bm25_rank,
+    judge_async,
     tokenize,
 )
 
@@ -84,6 +87,43 @@ def test_fake_judge_is_injected_without_http() -> None:
     runner = Runner(judge_fn=fake, model="typesafe-ai/jev")
     assert runner.judge(state, QUESTIONS) == "answer"
     assert calls == [(state, QUESTIONS, "typesafe-ai/jev")]
+
+
+def test_judge_async_cancellation_does_not_leave_a_blocked_executor() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_judge(*_args, **_kwargs):
+        started.set()
+        try:
+            release.wait()
+            return iter(())
+        finally:
+            finished.set()
+
+    async def cancel_consumer() -> None:
+        stream = judge_async(
+            resolve_preset("jgrep"),
+            (State("case", "focus"),),
+            formation_report=FormationReport(),
+            judge_fn=blocked_judge,
+        )
+        consumer = asyncio.create_task(anext(stream))
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.001)
+        assert started.is_set()
+        consumer.cancel()
+        await asyncio.gather(consumer, return_exceptions=True)
+        await stream.aclose()
+
+    try:
+        asyncio.run(cancel_consumer())
+    finally:
+        release.set()
+    assert finished.wait(1)
 
 
 def test_bm25_tokenization_ranking_and_ties_are_deterministic() -> None:
