@@ -10,7 +10,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from ...routing import BROWSER_THRESHOLD_VERSION
+from ...routing import browser_threshold_version
 from .adapter import (
     ActionObservation,
     BrowserAdapter,
@@ -41,7 +41,7 @@ class BrowserBudget:
     page_jev_token_limit: int = 12_000
     task_action_limit: int = 20
     task_wall_clock_seconds: float = 120.0
-    started_at: float = 0.0
+    started_at: float | None = None
     page_jev_calls: int = 0
     page_jev_tokens: int = 0
     task_actions: int = 0
@@ -94,13 +94,20 @@ class BrowserSession:
         self.search_tie_margin = search_tie_margin
         self.search_relevance_floor = search_relevance_floor
         self.search_call_confidence_threshold = search_call_confidence_threshold
-        self.threshold_version = BROWSER_THRESHOLD_VERSION
+        self.threshold_version = browser_threshold_version(
+            element_top1_confidence=element_top1_confidence,
+            element_topn=element_topn,
+            search_relevance_threshold=search_relevance_threshold,
+            search_tie_margin=search_tie_margin,
+            search_relevance_floor=search_relevance_floor,
+            search_call_confidence_threshold=search_call_confidence_threshold,
+        )
         self.budget = BrowserBudget(
             page_jev_call_limit=page_jev_call_budget,
             page_jev_token_limit=page_jev_token_budget,
             task_action_limit=task_action_budget,
             task_wall_clock_seconds=task_wall_clock_seconds,
-            started_at=clock(),
+            started_at=None,
         )
         self._adapter: BrowserAdapter | None = None
         self._adapter_lock = asyncio.Lock()
@@ -122,8 +129,9 @@ class BrowserSession:
     def catalog(self) -> BrowserCatalog | None:
         return None if self._state is None else self._state.catalog
 
-    async def adapter(self) -> BrowserAdapter:
-        self.ensure_available()
+    async def adapter(self, *, check_budget: bool = True) -> BrowserAdapter:
+        if check_budget:
+            self.ensure_available()
         if self._adapter is not None:
             return self._adapter
         async with self._adapter_lock:
@@ -159,16 +167,22 @@ class BrowserSession:
         self._adapter = adapter
 
     async def navigate(self, url: str) -> BrowserState:
-        adapter = await self.adapter()
-        self.consume_action()
+        self._ensure_task_available()
+        adapter = await self.adapter(check_budget=False)
+        self.budget.task_actions += 1
         observation = await adapter.navigate(url, self.navigation_timeout_ms)
+        self._reset_page_budget()
         state = self._record_observation(observation)
         self._record_action(f"navigate:{url}")
         return state
 
-    async def observe(self) -> BrowserState:
-        self.ensure_available()
-        observation = await (await self.adapter()).observe(self.limits)
+    async def observe(self, *, check_budget: bool = True) -> BrowserState:
+        if check_budget:
+            self.ensure_available()
+        adapter = self._adapter
+        if adapter is None:
+            adapter = await self.adapter()
+        observation = await adapter.observe(self.limits)
         return self._record_observation(observation)
 
     async def action(
@@ -196,7 +210,7 @@ class BrowserSession:
             result = await adapter.select(element_ref, value, self.action_timeout_ms)
         else:
             raise ValueError(f"unsupported browser action: {action}")
-        state = await self.observe()
+        state = await self.observe(check_budget=False)
         self._record_action(action)
         return result, state
 
@@ -236,15 +250,20 @@ class BrowserSession:
         return result
 
     def ensure_available(self) -> None:
+        self._ensure_task_available()
+        if self.budget.page_jev_calls >= self.budget.page_jev_call_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev call budget exhausted")
+        if self.budget.page_jev_tokens >= self.budget.page_jev_token_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev token budget exhausted")
+
+    def _ensure_task_available(self) -> None:
+        if self.budget.started_at is None:
+            self.budget.started_at = self._clock()
         elapsed = self._clock() - self.budget.started_at
         if elapsed >= self.budget.task_wall_clock_seconds:
             raise BrowserBudgetExhaustedError(
                 "browser task wall-clock budget exhausted"
             )
-        if self.budget.page_jev_calls >= self.budget.page_jev_call_limit:
-            raise BrowserBudgetExhaustedError("browser page Jev call budget exhausted")
-        if self.budget.page_jev_tokens >= self.budget.page_jev_token_limit:
-            raise BrowserBudgetExhaustedError("browser page Jev token budget exhausted")
         if self.budget.task_actions >= self.budget.task_action_limit:
             raise BrowserBudgetExhaustedError("browser task action budget exhausted")
 
@@ -305,6 +324,8 @@ class BrowserSession:
 
         self.recent_actions.clear()
         self.recovery_attempts = 0
+        self.budget.started_at = None
+        self.budget.task_actions = 0
 
     async def close(self) -> None:
         adapter = self._adapter
@@ -330,6 +351,10 @@ class BrowserSession:
         }
         self._publish_catalog(catalog)
         return self._state
+
+    def _reset_page_budget(self) -> None:
+        self.budget.page_jev_calls = 0
+        self.budget.page_jev_tokens = 0
 
     def _record_action(self, action: str) -> None:
         self.recent_actions.append(action)

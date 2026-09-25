@@ -523,3 +523,57 @@ async def test_runtime_composition_wires_safety_usage_stream(
     assert event.data["service"] == "jev"
     assert event.data["usage"] == {"input_tokens": 1, "output_tokens": 1}
     assert parse_events([{"type": "usage", **event.data}])["jev_tokens"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("browser_enabled", [False, True])
+@pytest.mark.parametrize("yolo", [False, True])
+@pytest.mark.parametrize("safety_enabled", [False, True])
+@pytest.mark.parametrize("headless", [False, True])
+async def test_runtime_composition_safety_matrix(
+    tmp_path: Path,
+    browser_enabled: bool,
+    yolo: bool,
+    safety_enabled: bool,
+    headless: bool,
+) -> None:
+    config = ResolvedConfig(
+        provider="fake",
+        model="offline",
+        router=False,
+        router_style="tool",
+        jev_compaction=False,
+        memory_injection=False,
+        yolo=yolo,
+        safety_tier=safety_enabled,
+        token_budget=None,
+        theme=None,
+        approval_allow=(),
+        approval_deny=(),
+        approval_ask=(),
+        keybindings={},
+        browser_enabled=browser_enabled,
+    )
+    composition = compose_runtime(
+        home=tmp_path / "home",
+        cwd=tmp_path,
+        manager=SessionManager(tmp_path / "home"),
+        config=config,
+        provider="fake",
+        model="offline",
+        project_context=ProjectContext("", ()),
+        backend_builder=lambda *_args, **_kwargs: (FakeBackend([]), "offline"),
+        skill_catalog=SkillCatalog.empty(),
+        agent_catalog=AgentCatalog.empty(),
+    )
+    try:
+        registry = composition.loop.tool_registry
+        registry.set_safety_headless(headless)
+        assert (registry.safety_tier is not None) is (safety_enabled and yolo)
+        assert (registry.browser_safety_tier is not None) is (
+            safety_enabled and browser_enabled
+        )
+        if registry.browser_safety_tier is not None:
+            assert registry.browser_safety_tier.headless is headless
+    finally:
+        composition.opened.store.close()

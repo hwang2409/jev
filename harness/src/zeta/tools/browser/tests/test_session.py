@@ -5,7 +5,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from zeta.tools.browser.adapter import FakeBrowserAdapter, PageObservation
+from zeta.tools.browser.adapter import (
+    ActionObservation,
+    ElementRef,
+    FakeBrowserAdapter,
+    PageObservation,
+)
 from zeta.tools.browser.session import BrowserBudgetExhaustedError, BrowserSession
 
 
@@ -131,6 +136,92 @@ def test_browser_session_uses_monotonic_wall_clock_budget() -> None:
         clock=lambda: now[0],
     )
     now[0] = 10.0
+    session.ensure_available()
+    now[0] = 20.0
 
+    with pytest.raises(BrowserBudgetExhaustedError):
+        session.ensure_available()
+
+
+def test_browser_session_starts_task_clock_on_first_use() -> None:
+    now = [0.0]
+    session = BrowserSession(
+        lambda: _SlowAdapter(),
+        task_wall_clock_seconds=10,
+        clock=lambda: now[0],
+    )
+    now[0] = 10.0
+
+    session.ensure_available()
+    now[0] = 19.0
+    session.ensure_available()
+
+
+def test_browser_threshold_version_tracks_resolved_settings() -> None:
+    default = BrowserSession(lambda: _SlowAdapter())
+    changed = BrowserSession(
+        lambda: _SlowAdapter(),
+        search_relevance_threshold=0.75,
+    )
+
+    assert default.threshold_version == "browser-thresholds-v1"
+    assert changed.threshold_version != default.threshold_version
+
+
+def test_browser_session_resets_task_budget_at_turn_boundary() -> None:
+    session = BrowserSession(lambda: _SlowAdapter(), task_action_budget=1)
+    session.consume_action()
+
+    session.reset_turn_state()
+
+    session.consume_action()
+    assert session.budget.task_actions == 1
+    assert session.budget.started_at is not None
+
+
+@pytest.mark.asyncio
+async def test_browser_session_resets_page_budget_after_navigation() -> None:
+    adapter = _SlowAdapter()
+    session = BrowserSession(lambda: adapter, page_jev_call_budget=1)
+
+    async def judge() -> SimpleNamespace:
+        return SimpleNamespace(usage={"input_tokens": 1, "output_tokens": 1})
+
+    await session.call_jev(judge)
+    assert session.budget.page_jev_calls == 1
+
+    await session.navigate("https://example.test/next")
+
+    assert session.budget.page_jev_calls == 0
+    assert session.budget.page_jev_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_last_allowed_action_returns_bounded_observation_after_budget_expiry() -> (
+    None
+):
+    now = [0.0]
+
+    class _ExpiringAdapter(_SlowAdapter):
+        async def click(
+            self, element_ref: ElementRef, timeout_ms: int
+        ) -> ActionObservation:
+            result = await super().click(element_ref, timeout_ms)
+            now[0] = 10.0
+            return result
+
+    session = BrowserSession(
+        lambda: _ExpiringAdapter(),
+        task_action_budget=1,
+        task_wall_clock_seconds=10,
+        clock=lambda: now[0],
+    )
+    element = ElementRef(
+        1, "e1", "button", "click", "Continue", "Continue", None, "main", False, True
+    )
+
+    _action, state = await session.action("click", element)
+
+    assert state.observation.url == "https://example.test"
     with pytest.raises(BrowserBudgetExhaustedError):
         session.ensure_available()

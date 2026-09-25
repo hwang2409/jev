@@ -18,7 +18,6 @@ from ...core.safety import (
 )
 from ...protocol import jev
 from ...protocol.types import StructuredToolResult
-from ...routing import BROWSER_THRESHOLD_VERSION
 from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
@@ -311,6 +310,7 @@ async def _run_element_action(
                 choice,
                 candidates,
                 top_n=registry.browser_element_topn,
+                threshold_version=session.threshold_version,
             )
         selected_entry = next(
             (
@@ -386,28 +386,39 @@ async def _run_element_action(
             value=value if isinstance(value, str) else None,
         )
         post_payload = catalog_payload(state.catalog)
-        post_gate = await evaluate_page_state_with_provider(
-            goal=goal,
-            action=action,
-            page_state=post_payload,
-            candidates=_candidate_payloads(state.catalog.entries),
-            deterministic_loaded=state.observation.loaded and state.observation.stable,
-            deterministic_attached=True,
-            recent_actions=session.recent_actions,
-            action_result={
-                "changed": _action.changed,
-                "snapshot_id": _action.snapshot_id,
-                "generation": _action.generation,
-                "url": _action.url,
-                "loaded": _action.loaded,
-                "stable": _action.stable,
-            },
-            previous_page_state=page_state,
-            recovery_attempts=session.recovery_attempts,
-            provider=lambda **kwargs: session.call_jev(
-                jev.judge_browser_page_state, **kwargs
-            ),
-        )
+        try:
+            post_gate = await evaluate_page_state_with_provider(
+                goal=goal,
+                action=action,
+                page_state=post_payload,
+                candidates=_candidate_payloads(state.catalog.entries),
+                deterministic_loaded=state.observation.loaded
+                and state.observation.stable,
+                deterministic_attached=True,
+                recent_actions=session.recent_actions,
+                action_result={
+                    "changed": _action.changed,
+                    "snapshot_id": _action.snapshot_id,
+                    "generation": _action.generation,
+                    "url": _action.url,
+                    "loaded": _action.loaded,
+                    "stable": _action.stable,
+                },
+                previous_page_state=page_state,
+                recovery_attempts=session.recovery_attempts,
+                provider=lambda **kwargs: session.call_jev(
+                    jev.judge_browser_page_state, **kwargs
+                ),
+            )
+        except BrowserBudgetExhaustedError:
+            return _action_state_result(
+                state,
+                action=action,
+                action_result=_action,
+                error_kind="browser_budget_exhausted",
+                recovery=None,
+                threshold_version=session.threshold_version,
+            )
         session.recovery_attempts = post_gate.recovery_attempts
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         if isinstance(exc, jev.JevRouterError):
@@ -420,8 +431,11 @@ async def _run_element_action(
             action_result=_action,
             error_kind=post_gate.error_kind,
             recovery=post_gate.recovery,
+            threshold_version=session.threshold_version,
         )
-    return _state_result(state, action=action)
+    return _state_result(
+        state, action=action, threshold_version=session.threshold_version
+    )
 
 
 async def _browser_extract(
@@ -829,9 +843,7 @@ def _target_origin_allowed(
     if current_origin is not None and target_origin == current_origin:
         return True
     policy = _origin_policy(registry)
-    if policy.allowed_origins:
-        return policy.allows(target_origin)
-    return current_origin is None
+    return policy.allows(target_origin)
 
 
 def _element_origin_allowed(registry: ToolRegistry, state: Any, element: Any) -> bool:
@@ -897,10 +909,8 @@ async def _check_browser_safety(
     abort_signal: AbortSignal | None = None,
     execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult | None:
-    safety_tier = registry.safety_tier
+    safety_tier = registry.browser_safety_tier
     if safety_tier is None:
-        if evidence.origin_allowed:
-            return None
         return _browser_error(
             "browser safety tier is not configured for this risky action",
             "safety_denied",
@@ -926,6 +936,7 @@ async def _check_browser_safety(
             skip_approval=True,
             safety_outcome=outcome,
             approval_label=_browser_approval_label(registry, evidence, outcome),
+            safety_tier_override=safety_tier,
         )
         if gate_result is None:
             return None
@@ -939,7 +950,7 @@ def _browser_approval_label(
     evidence: BrowserRiskEvidence,
     outcome: SafetyOutcome,
 ) -> str:
-    safety_tier = registry.safety_tier
+    safety_tier = registry.browser_safety_tier
     if safety_tier is None:
         return "browser action requires approval"
     details = [
@@ -992,6 +1003,7 @@ def _choice_result(
     candidates: list[dict[str, object]],
     *,
     top_n: int,
+    threshold_version: str,
 ) -> StructuredToolResult:
     by_id = {
         item["element_id"]: item
@@ -1023,7 +1035,7 @@ def _choice_result(
         "candidate_ids": candidate_ids,
         "candidates": [by_id[element_id] for element_id in candidate_ids],
         "usage": dict(choice.usage),
-        "threshold_version": BROWSER_THRESHOLD_VERSION,
+        "threshold_version": threshold_version,
     }
     return _success_result(
         text_block(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
@@ -1038,6 +1050,7 @@ def _action_state_result(
     action_result: Any,
     error_kind: str | None,
     recovery: str | None,
+    threshold_version: str,
 ) -> StructuredToolResult:
     payload = catalog_payload(state.catalog)
     payload.update(
@@ -1057,6 +1070,7 @@ def _action_state_result(
                 "kind": error_kind or "action_outcome_unknown",
                 "message": "browser action outcome is unknown",
             },
+            "threshold_version": threshold_version,
         }
     )
     return _success_result(
@@ -1073,7 +1087,12 @@ def _validate_action_affordance(action: str, affordance: str) -> None:
         )
 
 
-def _state_result(state: Any, *, action: str | None = None) -> StructuredToolResult:
+def _state_result(
+    state: Any,
+    *,
+    action: str | None = None,
+    threshold_version: str | None = None,
+) -> StructuredToolResult:
     if not state.observation.loaded or not state.observation.stable:
         return _browser_error(
             "browser page is not loaded and stable",
@@ -1082,6 +1101,8 @@ def _state_result(state: Any, *, action: str | None = None) -> StructuredToolRes
     payload = catalog_payload(state.catalog)
     if action is not None:
         payload["action"] = action
+    if threshold_version is not None:
+        payload["threshold_version"] = threshold_version
     text = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     return _success_result(text_block(text), structured_content=payload)
 
