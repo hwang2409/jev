@@ -349,7 +349,7 @@ def test_legacy_resume_rejects_unterminated_skill_index_without_mutation(
     metadata_path = home / "sessions" / opened.store.session_id / "meta.json"
     original = metadata_path.read_bytes()
 
-    with pytest.raises(ValueError, match="unterminated skill index"):
+    with pytest.raises(SessionError, match="session skill catalog is invalid"):
         create_app(
             build_parser().parse_args(
                 ["--resume", opened.store.session_id, "--provider", "fake"]

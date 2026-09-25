@@ -46,8 +46,8 @@ def test_harness_callers_have_no_duplicate_gateway_transport() -> None:
     )
     caller_paths = (
         root / "src/zeta/core/context.py",
-        root / "src/zeta/core/safety.py",
-        root / "src/zeta/runtime/loop.py",
+        root / "src/zeta/core/safety/__init__.py",
+        root / "src/zeta/runtime/loop/__init__.py",
         root / "src/zeta/tools/browser/__init__.py",
         root / "src/zeta/tools/browser/catalog.py",
         root / "src/zeta/tools/browser/gates.py",
@@ -57,6 +57,13 @@ def test_harness_callers_have_no_duplicate_gateway_transport() -> None:
         root / "tools/browser_live_smoke.py",
     )
     paths = (*provider_paths, *caller_paths)
+    missing_paths = [
+        path.relative_to(root) for path in paths if not path.is_file()
+    ]
+    assert not missing_paths, (
+        "source path inventory contains missing files: "
+        + ", ".join(str(path) for path in missing_paths)
+    )
     sources = {
         path: path.read_text(encoding="utf-8") for path in paths
     }
