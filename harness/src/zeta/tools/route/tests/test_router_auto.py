@@ -267,6 +267,13 @@ async def test_auto_route_executes_browser_tool_through_loop(
     )
     loop = build_browser_loop(tmp_path, router_style="auto")
     loop.tool_registry.browser_adapter_factory = lambda: adapter
+    tier = SafetyTier(cwd=tmp_path)
+    loop.tool_registry.browser_safety_tier = tier
+
+    async def allow(_evidence: object) -> SafetyOutcome:
+        return SafetyOutcome("allow", "layer0")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", allow)
     loop.backend = FakeBackend(
         [
             ScriptedTurn(
@@ -306,7 +313,7 @@ async def test_browser_batch_preserves_order_and_checks_each_call(
     loop = build_browser_loop(tmp_path, router_style="auto")
     loop.set_browser_catalog(browser_catalog("current"))
     tier = SafetyTier(cwd=tmp_path)
-    loop.tool_registry.safety_tier = tier
+    loop.tool_registry.browser_safety_tier = tier
     safety_calls: list[object] = []
 
     async def deny(evidence: object) -> SafetyOutcome:
