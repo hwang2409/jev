@@ -143,6 +143,17 @@ class ToolRegistry:
         enforce_approvals: bool = False,
         safety_tier: SafetyTier | None = None,
         browser_enabled: bool = False,
+        browser_page_jev_call_budget: int = 8,
+        browser_page_jev_token_budget: int = 12_000,
+        browser_task_action_budget: int = 20,
+        browser_task_wall_clock_seconds: float = 120.0,
+        browser_allowed_origins: tuple[str, ...] = (),
+        browser_element_top1_confidence: float = 0.8,
+        browser_element_topn: int = 3,
+        browser_search_relevance_threshold: float = 0.7,
+        browser_search_tie_margin: float = 0.1,
+        browser_search_relevance_floor: float = 0.4,
+        browser_search_call_confidence_threshold: float = 0.8,
         skill_catalog: SkillCatalog,
         agent_catalog: AgentCatalog | None = None,
     ) -> None:
@@ -183,6 +194,17 @@ class ToolRegistry:
         self.approval_policy = approval_policy
         self.safety_tier = safety_tier
         self.browser_enabled = browser_enabled
+        self.browser_page_jev_call_budget = browser_page_jev_call_budget
+        self.browser_page_jev_token_budget = browser_page_jev_token_budget
+        self.browser_task_action_budget = browser_task_action_budget
+        self.browser_task_wall_clock_seconds = browser_task_wall_clock_seconds
+        self.browser_allowed_origins = tuple(browser_allowed_origins)
+        self.browser_element_top1_confidence = browser_element_top1_confidence
+        self.browser_element_topn = browser_element_topn
+        self.browser_search_relevance_threshold = browser_search_relevance_threshold
+        self.browser_search_tie_margin = browser_search_tie_margin
+        self.browser_search_relevance_floor = browser_search_relevance_floor
+        self.browser_search_call_confidence_threshold = browser_search_call_confidence_threshold
         self._approval_gate = ApprovalGate(
             self.approval_policy, self.pre_execute_hook, self.safety_tier
         )
@@ -353,6 +375,7 @@ class ToolRegistry:
             if name not in exclude_names
         }
         clone._browser_session = None
+        clone._browser_session_factory = None
         clone._browser_session_closed = False
         clone.browser_catalog = None
         clone.router_browser_catalog = None
@@ -380,6 +403,10 @@ class ToolRegistry:
         )
         clone._agent_runner = None
         clone.agent_catalog = self.agent_catalog
+        if clone.browser_enabled:
+            from .browser import register as register_browser
+
+            register_browser(clone)
         return clone
     def abort(self) -> None:
         self.abort_signal.abort()

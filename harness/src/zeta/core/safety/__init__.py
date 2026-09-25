@@ -1,6 +1,10 @@
 """Public safety policy API."""
 
-from ._browser import browser_action_requires_safety
+from ._browser import (
+    BrowserOriginPolicy,
+    browser_action_requires_safety,
+    normalize_origin,
+)
 from ._layer0 import (
     _LAYER0_RULES,
     _resolved_argv,
@@ -25,6 +29,7 @@ __all__ = [
     "SAFE_MAX",
     "SHELL_TOOLS",
     "_LAYER0_RULES",
+    "BrowserOriginPolicy",
     "BrowserRiskEvidence",
     "SafetyOutcome",
     "SafetyTier",
@@ -32,4 +37,5 @@ __all__ = [
     "browser_action_requires_safety",
     "layer0_classify",
     "layer0_reason",
+    "normalize_origin",
 ]

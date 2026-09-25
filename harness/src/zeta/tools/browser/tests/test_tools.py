@@ -69,6 +69,7 @@ def _registry(
     safety_tier: SafetyTier | None = None,
     approval_policy: ApprovalPolicy | None = None,
     approval_store: ConversationStore | None = None,
+    allowed_origins: tuple[str, ...] = (),
 ) -> ToolRegistry:
     registry = ToolRegistry(
         tmp_path,
@@ -78,6 +79,7 @@ def _registry(
         safety_tier=safety_tier,
         approval_policy=approval_policy,
         approval_store=approval_store,
+        browser_allowed_origins=allowed_origins,
     )
     registry.browser_adapter_factory = lambda: adapter
     register(registry)
@@ -209,6 +211,7 @@ async def test_browser_click_returns_top_three_without_acting_on_low_confidence(
 
     assert result["isError"] is False
     assert _structured(result)["candidate_ids"] == ["e1", "e2", "e3"]
+    assert _structured(result)["threshold_version"] == "browser-thresholds-v1"
     assert adapter.clicks == []
 
 
@@ -761,6 +764,43 @@ async def test_benign_navigation_does_not_require_optional_safety_tier(
 
 
 @pytest.mark.asyncio
+async def test_navigation_failure_maps_to_page_load_failed(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    adapter.timeout_next("navigate")
+    registry = _registry(tmp_path, adapter)
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://example.test/next"})
+    )
+
+    assert result["isError"] is True
+    assert _structured(result)["error"]["kind"] == "page_load_failed"
+    assert adapter.navigations == []
+
+
+@pytest.mark.asyncio
+async def test_configured_origin_allowlist_normalizes_localhost_ports(
+    tmp_path: Path,
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    registry = _registry(
+        tmp_path,
+        adapter,
+        allowed_origins=("HTTP://LOCALHOST:80", "https://other.test:443"),
+    )
+    await registry.execute(ToolCall("state", "browser_state", {}))
+
+    result = await registry.execute(
+        ToolCall("navigate", "browser_navigate", {"url": "https://other.test/next"})
+    )
+
+    assert result["isError"] is False
+    assert adapter.navigations == ["https://other.test/next"]
+
+
+@pytest.mark.asyncio
 async def test_risky_navigation_without_safety_tier_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -1071,6 +1111,7 @@ async def test_browser_extract_returns_ranked_search_results(
     assert structured["triage"]["decision"] == "accepted"
     assert [item["result_id"] for item in structured["ranked_results"]] == ["b", "a"]
     assert structured["ranked_results"][0]["relevance_score"] == pytest.approx(0.9)
+    assert structured["triage"]["threshold_version"] == "browser-thresholds-v1"
     assert "search triage: status=ranked decision=accepted warnings=none" in _text(
         result
     )

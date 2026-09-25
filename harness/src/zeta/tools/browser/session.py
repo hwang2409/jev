@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from typing import Any
 
+from ...routing import BROWSER_THRESHOLD_VERSION
 from .adapter import (
     ActionObservation,
     BrowserAdapter,
@@ -27,6 +30,25 @@ _logger = logging.getLogger(__name__)
 
 AdapterFactory = Callable[[], BrowserAdapter | Awaitable[BrowserAdapter]]
 CatalogSink = Callable[[BrowserCatalog | None], None]
+Clock = Callable[[], float]
+
+
+@dataclass(slots=True)
+class BrowserBudget:
+    """Bound one browser task across provider calls, tokens, actions, and time."""
+
+    page_jev_call_limit: int = 8
+    page_jev_token_limit: int = 12_000
+    task_action_limit: int = 20
+    task_wall_clock_seconds: float = 120.0
+    started_at: float = 0.0
+    page_jev_calls: int = 0
+    page_jev_tokens: int = 0
+    task_actions: int = 0
+
+
+class BrowserBudgetExhaustedError(BrowserError):
+    """The browser task reached one of its named limits."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,12 +70,38 @@ class BrowserSession:
         navigation_timeout_ms: int = BROWSER_NAVIGATION_TIMEOUT_MS,
         action_timeout_ms: int = BROWSER_ACTION_TIMEOUT_MS,
         catalog_sink: CatalogSink | None = None,
+        page_jev_call_budget: int = 8,
+        page_jev_token_budget: int = 12_000,
+        task_action_budget: int = 20,
+        task_wall_clock_seconds: float = 120.0,
+        clock: Clock = time.monotonic,
+        element_top1_confidence: float = 0.8,
+        element_topn: int = 3,
+        search_relevance_threshold: float = 0.7,
+        search_tie_margin: float = 0.1,
+        search_relevance_floor: float = 0.4,
+        search_call_confidence_threshold: float = 0.8,
     ) -> None:
         self._factory = factory
         self.limits = limits or SnapshotLimits()
         self.navigation_timeout_ms = navigation_timeout_ms
         self.action_timeout_ms = action_timeout_ms
         self._catalog_sink = catalog_sink
+        self._clock = clock
+        self.element_top1_confidence = element_top1_confidence
+        self.element_topn = element_topn
+        self.search_relevance_threshold = search_relevance_threshold
+        self.search_tie_margin = search_tie_margin
+        self.search_relevance_floor = search_relevance_floor
+        self.search_call_confidence_threshold = search_call_confidence_threshold
+        self.threshold_version = BROWSER_THRESHOLD_VERSION
+        self.budget = BrowserBudget(
+            page_jev_call_limit=page_jev_call_budget,
+            page_jev_token_limit=page_jev_token_budget,
+            task_action_limit=task_action_budget,
+            task_wall_clock_seconds=task_wall_clock_seconds,
+            started_at=clock(),
+        )
         self._adapter: BrowserAdapter | None = None
         self._adapter_lock = asyncio.Lock()
         self._state: BrowserState | None = None
@@ -75,6 +123,7 @@ class BrowserSession:
         return None if self._state is None else self._state.catalog
 
     async def adapter(self) -> BrowserAdapter:
+        self.ensure_available()
         if self._adapter is not None:
             return self._adapter
         async with self._adapter_lock:
@@ -110,14 +159,15 @@ class BrowserSession:
         self._adapter = adapter
 
     async def navigate(self, url: str) -> BrowserState:
-        observation = await (await self.adapter()).navigate(
-            url, self.navigation_timeout_ms
-        )
+        adapter = await self.adapter()
+        self.consume_action()
+        observation = await adapter.navigate(url, self.navigation_timeout_ms)
         state = self._record_observation(observation)
         self._record_action(f"navigate:{url}")
         return state
 
     async def observe(self) -> BrowserState:
+        self.ensure_available()
         observation = await (await self.adapter()).observe(self.limits)
         return self._record_observation(observation)
 
@@ -131,6 +181,7 @@ class BrowserSession:
         value: str | None = None,
     ) -> tuple[ActionObservation, BrowserState]:
         adapter = await self.adapter()
+        self.consume_action()
         if action in {"click", "submit"}:
             result = await adapter.click(element_ref, self.action_timeout_ms)
         elif action == "type":
@@ -155,6 +206,7 @@ class BrowserSession:
         attributes: list[str],
         limit: int,
     ) -> ExtractedData:
+        self.ensure_available()
         return await (await self.adapter()).extract(target, attributes, limit)
 
     async def extract_search_results(
@@ -162,7 +214,43 @@ class BrowserSession:
         target: ElementRef | None,
         limit: int,
     ) -> SearchResultExtraction:
+        self.ensure_available()
         return await (await self.adapter()).extract_search_results(target, limit)
+
+    async def call_jev(
+        self, operation: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any
+    ) -> Any:
+        """Run one browser Jev call and charge its final provider usage once."""
+
+        self.ensure_available()
+        if self.budget.page_jev_calls >= self.budget.page_jev_call_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev call budget exhausted")
+        self.budget.page_jev_calls += 1
+        result = await operation(*args, **kwargs)
+        usage = getattr(result, "usage", {})
+        tokens = _reported_tokens(usage)
+        total = self.budget.page_jev_tokens + tokens
+        self.budget.page_jev_tokens = min(total, self.budget.page_jev_token_limit)
+        if total > self.budget.page_jev_token_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev token budget exhausted")
+        return result
+
+    def ensure_available(self) -> None:
+        elapsed = self._clock() - self.budget.started_at
+        if elapsed >= self.budget.task_wall_clock_seconds:
+            raise BrowserBudgetExhaustedError(
+                "browser task wall-clock budget exhausted"
+            )
+        if self.budget.page_jev_calls >= self.budget.page_jev_call_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev call budget exhausted")
+        if self.budget.page_jev_tokens >= self.budget.page_jev_token_limit:
+            raise BrowserBudgetExhaustedError("browser page Jev token budget exhausted")
+        if self.budget.task_actions >= self.budget.task_action_limit:
+            raise BrowserBudgetExhaustedError("browser task action budget exhausted")
+
+    def consume_action(self) -> None:
+        self.ensure_available()
+        self.budget.task_actions += 1
 
     def resolve_element(
         self,
@@ -258,6 +346,17 @@ class StaleSnapshotError(BrowserError):
 
 class BrowserSessionClosedError(BrowserError):
     """The registry closed the browser session permanently."""
+
+
+def _reported_tokens(usage: object) -> int:
+    if not isinstance(usage, dict):
+        return 0
+    return sum(
+        value
+        for key in ("input_tokens", "output_tokens")
+        for value in [usage.get(key)]
+        if type(value) is int and value >= 0
+    )
 
 
 def catalog_payload(catalog: BrowserCatalog) -> dict[str, object]:

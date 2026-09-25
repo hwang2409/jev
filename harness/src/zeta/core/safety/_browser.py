@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from ._types import BrowserRiskEvidence
@@ -40,6 +41,36 @@ def _url_origin(value: str) -> str | None:
     return f"{parsed.scheme.casefold()}://{host}:{port}"
 
 
+def normalize_origin(value: str) -> str | None:
+    """Normalize one HTTP origin with its effective port."""
+
+    return _url_origin(value)
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserOriginPolicy:
+    """Allow only configured origins before browser actions reach the adapter."""
+
+    allowed_origins: frozenset[str] = frozenset()
+
+    @classmethod
+    def from_values(cls, origins: object) -> BrowserOriginPolicy:
+        if not isinstance(origins, (tuple, list, set, frozenset)):
+            return cls()
+        normalized = {
+            origin
+            for value in origins
+            if isinstance(value, str)
+            for origin in [normalize_origin(value)]
+            if origin is not None
+        }
+        return cls(frozenset(normalized))
+
+    def allows(self, value: str | None) -> bool:
+        origin = normalize_origin(value or "")
+        return origin is not None and origin in self.allowed_origins
+
+
 def _browser_layer0_reason(evidence: BrowserRiskEvidence) -> str | None:
     _classification, reason = _browser_layer0_classify(evidence)
     return reason
@@ -58,13 +89,19 @@ def _browser_layer0_classify(
         target_origin = _url_origin(evidence.target_url)
         if target_origin is None:
             return "escalate", "unclassifiable_target_url"
-        if target_origin != _url_origin(evidence.current_origin):
+        if (
+            target_origin != _url_origin(evidence.current_origin)
+            and not evidence.origin_allowed
+        ):
             return "escalate", "external_origin"
     if evidence.form_action_origin is not None:
         form_origin = _url_origin(evidence.form_action_origin)
         if form_origin is None:
             return "escalate", "unclassifiable_form_action_origin"
-        if form_origin != _url_origin(evidence.current_origin):
+        if (
+            form_origin != _url_origin(evidence.current_origin)
+            and not evidence.origin_allowed
+        ):
             return "escalate", "external_form_action_origin"
     if evidence.payment_language or _BROWSER_PAYMENT_WORDS.search(evidence.text):
         return "analyzable", "payment_or_financial_commitment"

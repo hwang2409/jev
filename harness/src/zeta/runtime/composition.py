@@ -140,7 +140,7 @@ def compose_runtime(
             loop_kwargs["max_turns"] = max_turns
         safety_tier = (
             SafetyTier(cwd=opened.store.cwd)
-            if config.safety_tier and config.yolo
+            if config.safety_tier
             else None
         )
         registry = ToolRegistry(
@@ -148,6 +148,17 @@ def compose_runtime(
             memory_config=config.memory_config,
             safety_tier=safety_tier,
             browser_enabled=config.browser_enabled,
+            browser_page_jev_call_budget=config.browser_page_jev_call_budget,
+            browser_page_jev_token_budget=config.browser_page_jev_token_budget,
+            browser_task_action_budget=config.browser_task_action_budget,
+            browser_task_wall_clock_seconds=config.browser_task_wall_clock_seconds,
+            browser_allowed_origins=config.browser_allowed_origins,
+            browser_element_top1_confidence=config.browser_element_top1_confidence,
+            browser_element_topn=config.browser_element_topn,
+            browser_search_relevance_threshold=config.browser_search_relevance_threshold,
+            browser_search_tie_margin=config.browser_search_tie_margin,
+            browser_search_relevance_floor=config.browser_search_relevance_floor,
+            browser_search_call_confidence_threshold=config.browser_search_call_confidence_threshold,
             skill_catalog=skill_catalog,
             agent_catalog=agent_catalog,
         )

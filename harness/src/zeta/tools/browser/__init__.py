@@ -10,13 +10,15 @@ from urllib.parse import urlsplit
 
 from ...core.abort import AbortSignal
 from ...core.safety import (
+    BrowserOriginPolicy,
     BrowserRiskEvidence,
     SafetyOutcome,
     browser_action_requires_safety,
+    normalize_origin,
 )
 from ...protocol import jev
 from ...protocol.types import StructuredToolResult
-from ...routing import BROWSER_ELEMENT_TOP1_CONFIDENCE, BROWSER_ELEMENT_TOPN
+from ...routing import BROWSER_THRESHOLD_VERSION
 from ...runtime.execution import ToolExecutionContext
 from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
@@ -46,6 +48,7 @@ from .gates import (
 from .session import (
     BROWSER_ACTION_TIMEOUT_MS,
     BROWSER_NAVIGATION_TIMEOUT_MS,
+    BrowserBudgetExhaustedError,
     BrowserSession,
     BrowserSessionClosedError,
     StaleSnapshotError,
@@ -98,24 +101,34 @@ async def _browser_navigate(
             "browser_navigate requires an absolute http or https URL",
             "invalid_arguments",
         )
+    session: BrowserSession | None = None
     try:
         session = _session(registry)
+        session.ensure_available()
+        has_current_state = session.state is not None
         current_url = url
-        if session.state is not None:
+        if has_current_state:
             current_url = session.state.observation.url
+        current_origin = (
+            _origin(current_url) if has_current_state else "http://zeta.invalid"
+        )
+        origin_allowed = _target_origin_allowed(
+            registry, current_origin if has_current_state else None, url
+        )
         evidence = BrowserRiskEvidence(
             action="navigate",
             role="navigation",
             text=url,
-            current_origin=_origin(current_url) or "",
+            current_origin=current_origin or "",
             target_url=url,
             form_action_origin=None,
             payment_language=False,
             authentication_language=False,
             download=False,
             durable_state_change=False,
+            origin_allowed=origin_allowed,
         )
-        if browser_action_requires_safety(evidence):
+        if browser_action_requires_safety(evidence) or _is_cross_origin(evidence):
             safety_error = await _check_browser_safety(
                 registry,
                 evidence,
@@ -127,7 +140,9 @@ async def _browser_navigate(
                 return safety_error
         state = await session.navigate(url)
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
-        return _browser_exception(exc)
+        return _browser_exception(
+            exc, navigation=session is not None and session.adapter_instance is not None
+        )
     return _state_result(state)
 
 
@@ -136,6 +151,7 @@ async def _browser_state(
 ) -> StructuredToolResult:
     del arguments
     try:
+        _session(registry).ensure_available()
         state = await _session(registry).observe()
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(exc)
@@ -217,6 +233,8 @@ async def _run_element_action(
     execution_context: ToolExecutionContext | None = None,
 ) -> StructuredToolResult:
     try:
+        session = _session(registry)
+        session.ensure_available()
         snapshot_id = arguments["snapshot_id"]
         element_id = arguments["element_id"]
         role = arguments["role"]
@@ -231,7 +249,6 @@ async def _run_element_action(
             raise TypeError("browser_type replace must be a boolean")
         if value is not None and not isinstance(value, str):
             raise ValueError("browser_select value must be a string")
-        session = _session(registry)
         session.resolve_element(
             snapshot_id=snapshot_id,
             element_id=element_id,
@@ -261,32 +278,52 @@ async def _run_element_action(
                 "jev_routing_error",
             )
         page_state = catalog_payload(current_state.catalog)
-        choice = await jev.choose_browser_element(
+        choice = await session.call_jev(
+            jev.choose_browser_element,
             goal,
             action,
             page_state,
             candidates,
             session.recent_actions,
         )
+        selected_choice_id = choice.element_id
         if (
-            choice.confidence < BROWSER_ELEMENT_TOP1_CONFIDENCE
-            or choice.element_id is None
+            selected_choice_id is None
+            and choice.confidence >= registry.browser_element_top1_confidence
+        ):
+            selected_choice_id = next(
+                iter(
+                    sorted(
+                        choice.probabilities,
+                        key=choice.probabilities.get,
+                        reverse=True,
+                    )
+                ),
+                None,
+            )
+        if (
+            choice.confidence < registry.browser_element_top1_confidence
+            or selected_choice_id is None
         ):
             return _choice_result(
                 page_state,
                 action,
                 choice,
                 candidates,
+                top_n=registry.browser_element_topn,
             )
         selected_entry = next(
             (
                 candidate
                 for candidate in filtered.candidates
-                if candidate.element_id == choice.element_id
+                if candidate.element_id == selected_choice_id
             ),
             None,
         )
-        if selected_entry is None or choice.affordance != selected_entry.affordance:
+        if selected_entry is None or (
+            choice.affordance is not None
+            and choice.affordance != selected_entry.affordance
+        ):
             return _browser_error(
                 "jev selected an element outside the current browser catalog",
                 "jev_routing_error",
@@ -301,6 +338,9 @@ async def _run_element_action(
             ),
             deterministic_attached=True,
             recent_actions=session.recent_actions,
+            provider=lambda **kwargs: session.call_jev(
+                jev.judge_browser_page_state, **kwargs
+            ),
         )
         if not pre_gate.allow_action:
             return _browser_error(
@@ -326,8 +366,9 @@ async def _run_element_action(
             ),
             download=element.download,
             durable_state_change=element.durable_state_change or action == "submit",
+            origin_allowed=_element_origin_allowed(registry, current_state, element),
         )
-        if browser_action_requires_safety(evidence):
+        if browser_action_requires_safety(evidence) or _is_cross_origin(evidence):
             safety_error = await _check_browser_safety(
                 registry,
                 evidence,
@@ -363,6 +404,9 @@ async def _run_element_action(
             },
             previous_page_state=page_state,
             recovery_attempts=session.recovery_attempts,
+            provider=lambda **kwargs: session.call_jev(
+                jev.judge_browser_page_state, **kwargs
+            ),
         )
         session.recovery_attempts = post_gate.recovery_attempts
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
@@ -414,10 +458,14 @@ async def _browser_extract(
         return _browser_exception(exc)
     triage = None
     if search_extracted is not None and search_extracted.results is not None:
-        triage = await _triage_search_results(
-            _browser_goal(registry, "extract", element_id or "page", None),
-            search_extracted.results,
-        )
+        try:
+            triage = await _triage_search_results(
+                _browser_goal(registry, "extract", element_id or "page", ""),
+                search_extracted.results,
+                session,
+            )
+        except Exception as exc:  # noqa: BLE001 - browser errors are structured
+            return _browser_exception(exc)
         value = triage["value"]
         truncated = search_extracted.truncated
         full_size = search_extracted.full_size
@@ -450,7 +498,7 @@ async def _browser_extract(
 
 
 async def _triage_search_results(
-    goal: str, results: tuple[SearchResultCandidate, ...]
+    goal: str, results: tuple[SearchResultCandidate, ...], session: BrowserSession
 ) -> dict[str, object]:
     records = [
         SearchResult(
@@ -482,11 +530,14 @@ async def _triage_search_results(
                 "status": "ranked",
                 "decision": "relevance_floor",
                 "warnings": ["floor"],
+                "threshold_version": session.threshold_version,
             },
             "value": {"results": []},
         }
     try:
-        scores = await jev.score_search_results(goal, provider_items)
+        scores = await session.call_jev(jev.score_search_results, goal, provider_items)
+    except BrowserBudgetExhaustedError:
+        raise
     except Exception as exc:  # noqa: BLE001 - triage is advisory to extraction
         warning = f"search results returned unranked because Jev triage failed: {exc}"
         return {
@@ -498,10 +549,19 @@ async def _triage_search_results(
                 "decision": "degraded",
                 "warnings": ["degraded"],
                 "warning": warning,
+                "threshold_version": session.threshold_version,
             },
             "value": {"results": provider_items},
         }
-    decision = triage_search_results(scores, records)
+    decision = triage_search_results(
+        scores,
+        records,
+        relevance_threshold=session.search_relevance_threshold,
+        tie_margin=session.search_tie_margin,
+        relevance_floor=session.search_relevance_floor,
+        call_confidence_threshold=session.search_call_confidence_threshold,
+        top_n=3,
+    )
     items_by_id = {item["result_id"]: item for item in provider_items}
     ranked_results = [
         {
@@ -521,6 +581,7 @@ async def _triage_search_results(
         "warnings": _triage_warnings(decision.reason),
         "call_confidence": scores.call_confidence,
         "usage": dict(scores.usage),
+        "threshold_version": session.threshold_version,
     }
     return {
         "results": ranked_results,
@@ -643,6 +704,16 @@ def register(registry: ToolRegistry) -> None:
             navigation_timeout_ms=BROWSER_NAVIGATION_TIMEOUT_MS,
             action_timeout_ms=BROWSER_ACTION_TIMEOUT_MS,
             catalog_sink=target.set_browser_catalog,
+            page_jev_call_budget=target.browser_page_jev_call_budget,
+            page_jev_token_budget=target.browser_page_jev_token_budget,
+            task_action_budget=target.browser_task_action_budget,
+            task_wall_clock_seconds=target.browser_task_wall_clock_seconds,
+            element_top1_confidence=target.browser_element_top1_confidence,
+            element_topn=target.browser_element_topn,
+            search_relevance_threshold=target.browser_search_relevance_threshold,
+            search_tie_margin=target.browser_search_tie_margin,
+            search_relevance_floor=target.browser_search_relevance_floor,
+            search_call_confidence_threshold=target.browser_search_call_confidence_threshold,
         )
 
     registry._browser_session_factory = session_factory
@@ -745,22 +816,42 @@ def _is_absolute_http_url(url: str) -> bool:
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
 
+def _origin_policy(registry: ToolRegistry) -> BrowserOriginPolicy:
+    return BrowserOriginPolicy.from_values(registry.browser_allowed_origins)
+
+
+def _target_origin_allowed(
+    registry: ToolRegistry, current_origin: str | None, target_url: str | None
+) -> bool:
+    target_origin = _origin(target_url or "")
+    if target_origin is None:
+        return False
+    if current_origin is not None and target_origin == current_origin:
+        return True
+    policy = _origin_policy(registry)
+    if policy.allowed_origins:
+        return policy.allows(target_origin)
+    return current_origin is None
+
+
+def _element_origin_allowed(registry: ToolRegistry, state: Any, element: Any) -> bool:
+    current_origin = _origin(state.observation.url)
+    for target in (element.target_url, element.form_action_origin):
+        if target is not None and not _target_origin_allowed(
+            registry, current_origin, target
+        ):
+            return False
+    return True
+
+
+def _is_cross_origin(evidence: BrowserRiskEvidence) -> bool:
+    current = _origin(evidence.current_origin)
+    targets = (evidence.target_url, evidence.form_action_origin)
+    return any(target is not None and _origin(target) != current for target in targets)
+
+
 def _origin(url: str) -> str | None:
-    parsed = urlsplit(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        return None
-    try:
-        port = parsed.port
-    except ValueError:
-        return None
-    host = parsed.hostname.casefold()
-    if (
-        port is None
-        or (parsed.scheme == "http" and port == 80)
-        or (parsed.scheme == "https" and port == 443)
-    ):
-        return f"{parsed.scheme.casefold()}://{host}"
-    return f"{parsed.scheme.casefold()}://{host}:{port}"
+    return normalize_origin(url)
 
 
 def _has_payment_language(*values: str) -> bool:
@@ -808,6 +899,8 @@ async def _check_browser_safety(
 ) -> StructuredToolResult | None:
     safety_tier = registry.safety_tier
     if safety_tier is None:
+        if evidence.origin_allowed:
+            return None
         return _browser_error(
             "browser safety tier is not configured for this risky action",
             "safety_denied",
@@ -897,25 +990,28 @@ def _choice_result(
     action: str,
     choice: Any,
     candidates: list[dict[str, object]],
+    *,
+    top_n: int,
 ) -> StructuredToolResult:
     by_id = {
         item["element_id"]: item
         for item in candidates
         if isinstance(item.get("element_id"), str)
     }
+    limit = max(top_n, 0)
     candidate_ids = [
         element_id for element_id in choice.candidate_ids if element_id in by_id
-    ][:BROWSER_ELEMENT_TOPN]
-    if not candidate_ids:
-        candidate_ids = [
-            element_id
-            for element_id, _probability in sorted(
-                choice.probabilities.items(),
-                key=lambda item: item[1],
-                reverse=True,
-            )
-            if element_id in by_id
-        ][:BROWSER_ELEMENT_TOPN]
+    ][:limit]
+    if limit:
+        for element_id, _probability in sorted(
+            choice.probabilities.items(),
+            key=lambda item: item[1],
+            reverse=True,
+        ):
+            if element_id in by_id and element_id not in candidate_ids:
+                candidate_ids.append(element_id)
+            if len(candidate_ids) >= limit:
+                break
     payload = {
         "snapshot_id": page_state["snapshot_id"],
         "generation": page_state["generation"],
@@ -927,6 +1023,7 @@ def _choice_result(
         "candidate_ids": candidate_ids,
         "candidates": [by_id[element_id] for element_id in candidate_ids],
         "usage": dict(choice.usage),
+        "threshold_version": BROWSER_THRESHOLD_VERSION,
     }
     return _success_result(
         text_block(json.dumps(payload, ensure_ascii=False, sort_keys=True)),
@@ -1004,7 +1101,14 @@ def _bound_utf8(value: str, limit: int) -> tuple[str, bool]:
     return bounded, bounded != value
 
 
-def _browser_exception(exc: Exception) -> StructuredToolResult:
+def _browser_exception(
+    exc: Exception, *, navigation: bool = False
+) -> StructuredToolResult:
+    if isinstance(exc, BrowserBudgetExhaustedError):
+        return _browser_error(
+            "browser budget exhausted; stop browser actions and ask for a narrower task",
+            "browser_budget_exhausted",
+        )
     if isinstance(exc, BrowserSessionClosedError):
         return _browser_error(
             str(exc) or "browser session is closed", "browser_session_closed"
@@ -1020,8 +1124,16 @@ def _browser_exception(exc: Exception) -> StructuredToolResult:
             str(exc) or "browser navigation raced with the action", "navigation_race"
         )
     if isinstance(exc, BrowserTimeoutError):
+        if navigation:
+            return _browser_error(
+                str(exc) or "browser navigation failed", "page_load_failed"
+            )
         return _browser_error(
             str(exc) or "browser operation timed out", "browser_timeout"
+        )
+    if navigation and isinstance(exc, BrowserError):
+        return _browser_error(
+            str(exc) or "browser navigation failed", "page_load_failed"
         )
     if isinstance(exc, ValueError):
         return _browser_error(str(exc), "invalid_arguments")

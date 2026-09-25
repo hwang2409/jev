@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from zeta.tools.browser.adapter import FakeBrowserAdapter, PageObservation
-from zeta.tools.browser.session import BrowserSession
+from zeta.tools.browser.session import BrowserBudgetExhaustedError, BrowserSession
 
 
 class _SlowAdapter(FakeBrowserAdapter):
@@ -76,3 +77,60 @@ async def test_browser_session_closes_adapter_when_launch_is_cancelled() -> None
 
     assert adapter.closed == 1
     assert session.adapter_instance is None
+
+
+@pytest.mark.asyncio
+async def test_browser_session_charges_each_jev_call_and_usage_once() -> None:
+    session = BrowserSession(
+        lambda: _SlowAdapter(),
+        page_jev_call_budget=1,
+        page_jev_token_budget=20,
+    )
+
+    async def judge() -> SimpleNamespace:
+        return SimpleNamespace(usage={"input_tokens": 3, "output_tokens": 2})
+
+    await session.call_jev(judge)
+
+    assert session.budget.page_jev_calls == 1
+    assert session.budget.page_jev_tokens == 5
+    with pytest.raises(BrowserBudgetExhaustedError):
+        await session.call_jev(judge)
+
+
+@pytest.mark.asyncio
+async def test_browser_session_caps_tokens_and_actions_without_negative_counts() -> (
+    None
+):
+    session = BrowserSession(
+        lambda: _SlowAdapter(),
+        page_jev_token_budget=5,
+        task_action_budget=1,
+    )
+
+    async def judge() -> SimpleNamespace:
+        return SimpleNamespace(usage={"input_tokens": 4, "output_tokens": 4})
+
+    with pytest.raises(BrowserBudgetExhaustedError):
+        await session.call_jev(judge)
+    assert session.budget.page_jev_tokens == 5
+    assert session.budget.page_jev_calls == 1
+
+    session = BrowserSession(lambda: _SlowAdapter(), task_action_budget=1)
+    session.consume_action()
+    with pytest.raises(BrowserBudgetExhaustedError):
+        session.consume_action()
+    assert session.budget.task_actions == 1
+
+
+def test_browser_session_uses_monotonic_wall_clock_budget() -> None:
+    now = [0.0]
+    session = BrowserSession(
+        lambda: _SlowAdapter(),
+        task_wall_clock_seconds=10,
+        clock=lambda: now[0],
+    )
+    now[0] = 10.0
+
+    with pytest.raises(BrowserBudgetExhaustedError):
+        session.ensure_available()

@@ -26,3 +26,6 @@ SEARCH_RESULT_RELEVANCE_FLOOR = 0.4
 SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD = 0.8
 """Minimum Jev confidence for automatic search-result ranking."""
 # TODO: calibrate this call-confidence threshold with search ranking data.
+
+BROWSER_THRESHOLD_VERSION = "browser-thresholds-v1"
+"""Telemetry version for the independent browser routing thresholds."""

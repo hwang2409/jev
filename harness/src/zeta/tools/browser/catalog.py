@@ -75,6 +75,7 @@ def triage_search_results(
     relevance_threshold: float = SEARCH_RESULT_RELEVANCE_THRESHOLD,
     tie_margin: float = SEARCH_RESULT_TIE_MARGIN,
     relevance_floor: float = SEARCH_RESULT_RELEVANCE_FLOOR,
+    call_confidence_threshold: float = SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD,
     top_n: int = 3,
 ) -> SearchTriageDecision:
     """Apply separate relevance, tie, floor, and confidence rules."""
@@ -87,7 +88,7 @@ def triage_search_results(
         return SearchTriageDecision(None, (), "relevance_floor")
     score_gap = ranked[0][1] - ranked[1][1] if len(ranked) > 1 else None
     close_tie = score_gap is not None and score_gap + 1e-12 < tie_margin
-    if scores.call_confidence < SEARCH_RESULT_CALL_CONFIDENCE_THRESHOLD or close_tie:
+    if scores.call_confidence < call_confidence_threshold or close_tie:
         candidates = (
             [item for item in ranked if ranked[0][1] - item[1] < tie_margin]
             if close_tie

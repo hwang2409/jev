@@ -55,6 +55,17 @@ _TOP_KEYS = frozenset(
         "router_style",
         "jev_compaction",
         "browser_enabled",
+        "browser_page_jev_call_budget",
+        "browser_page_jev_token_budget",
+        "browser_task_action_budget",
+        "browser_task_wall_clock_seconds",
+        "browser_allowed_origins",
+        "browser_element_top1_confidence",
+        "browser_element_topn",
+        "browser_search_relevance_threshold",
+        "browser_search_tie_margin",
+        "browser_search_relevance_floor",
+        "browser_search_call_confidence_threshold",
         "memory_injection",
         "yolo",
         "safety_tier",
@@ -93,6 +104,17 @@ class Settings:
     router_style: str | None = None
     jev_compaction: bool | None = None
     browser_enabled: bool | None = None
+    browser_page_jev_call_budget: int | None = None
+    browser_page_jev_token_budget: int | None = None
+    browser_task_action_budget: int | None = None
+    browser_task_wall_clock_seconds: float | None = None
+    browser_allowed_origins: tuple[str, ...] = ()
+    browser_element_top1_confidence: float | None = None
+    browser_element_topn: int | None = None
+    browser_search_relevance_threshold: float | None = None
+    browser_search_tie_margin: float | None = None
+    browser_search_relevance_floor: float | None = None
+    browser_search_call_confidence_threshold: float | None = None
     memory_injection: bool | None = None
     yolo: bool | None = None
     safety_tier: bool | None = None
@@ -131,6 +153,17 @@ class ResolvedConfig:
     workspace_snapshot_cap: int | None = None
     memory_config: str | None = None
     browser_enabled: bool = False
+    browser_page_jev_call_budget: int = 8
+    browser_page_jev_token_budget: int = 12_000
+    browser_task_action_budget: int = 20
+    browser_task_wall_clock_seconds: float = 120.0
+    browser_allowed_origins: tuple[str, ...] = ()
+    browser_element_top1_confidence: float = 0.8
+    browser_element_topn: int = 3
+    browser_search_relevance_threshold: float = 0.7
+    browser_search_tie_margin: float = 0.1
+    browser_search_relevance_floor: float = 0.4
+    browser_search_call_confidence_threshold: float = 0.8
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +253,38 @@ def resolve(
         if cli_browser_enabled is None
         else cli_browser_enabled
     )
+    browser_page_jev_call_budget = settings.browser_page_jev_call_budget or 8
+    browser_page_jev_token_budget = settings.browser_page_jev_token_budget or 12_000
+    browser_task_action_budget = settings.browser_task_action_budget or 20
+    browser_task_wall_clock_seconds = (
+        settings.browser_task_wall_clock_seconds or 120.0
+    )
+    browser_element_top1_confidence = (
+        settings.browser_element_top1_confidence
+        if settings.browser_element_top1_confidence is not None
+        else 0.8
+    )
+    browser_element_topn = settings.browser_element_topn or 3
+    browser_search_relevance_threshold = (
+        settings.browser_search_relevance_threshold
+        if settings.browser_search_relevance_threshold is not None
+        else 0.7
+    )
+    browser_search_tie_margin = (
+        settings.browser_search_tie_margin
+        if settings.browser_search_tie_margin is not None
+        else 0.1
+    )
+    browser_search_relevance_floor = (
+        settings.browser_search_relevance_floor
+        if settings.browser_search_relevance_floor is not None
+        else 0.4
+    )
+    browser_search_call_confidence_threshold = (
+        settings.browser_search_call_confidence_threshold
+        if settings.browser_search_call_confidence_threshold is not None
+        else 0.8
+    )
     yolo = bool(settings.yolo) if cli_yolo is None else cli_yolo
     safety_tier = (
         bool(settings.safety_tier)
@@ -253,6 +318,19 @@ def resolve(
             else settings.memory_config
         ),
         browser_enabled=browser_enabled,
+        browser_page_jev_call_budget=browser_page_jev_call_budget,
+        browser_page_jev_token_budget=browser_page_jev_token_budget,
+        browser_task_action_budget=browser_task_action_budget,
+        browser_task_wall_clock_seconds=browser_task_wall_clock_seconds,
+        browser_allowed_origins=settings.browser_allowed_origins,
+        browser_element_top1_confidence=browser_element_top1_confidence,
+        browser_element_topn=browser_element_topn,
+        browser_search_relevance_threshold=browser_search_relevance_threshold,
+        browser_search_tie_margin=browser_search_tie_margin,
+        browser_search_relevance_floor=browser_search_relevance_floor,
+        browser_search_call_confidence_threshold=(
+            browser_search_call_confidence_threshold
+        ),
     )
 
 
@@ -340,6 +418,37 @@ def _validate(
     )
     jev_compaction = _validated_bool(data, "jev_compaction", notices)
     browser_enabled = _validated_bool(data, "browser_enabled", notices)
+    browser_page_jev_call_budget = _validated_positive_int(
+        data, "browser_page_jev_call_budget", notices
+    )
+    browser_page_jev_token_budget = _validated_positive_int(
+        data, "browser_page_jev_token_budget", notices
+    )
+    browser_task_action_budget = _validated_positive_int(
+        data, "browser_task_action_budget", notices
+    )
+    browser_task_wall_clock_seconds = _validated_positive_float(
+        data, "browser_task_wall_clock_seconds", notices
+    )
+    browser_allowed_origins = _validated_str_list(
+        "browser_allowed_origins", data.get("browser_allowed_origins"), notices
+    )
+    browser_element_top1_confidence = _validated_unit_float(
+        data, "browser_element_top1_confidence", notices
+    )
+    browser_element_topn = _validated_positive_int(data, "browser_element_topn", notices)
+    browser_search_relevance_threshold = _validated_unit_float(
+        data, "browser_search_relevance_threshold", notices
+    )
+    browser_search_tie_margin = _validated_unit_float(
+        data, "browser_search_tie_margin", notices
+    )
+    browser_search_relevance_floor = _validated_unit_float(
+        data, "browser_search_relevance_floor", notices
+    )
+    browser_search_call_confidence_threshold = _validated_unit_float(
+        data, "browser_search_call_confidence_threshold", notices
+    )
     memory_injection = _validated_bool(data, "memory_injection", notices)
     theme = _validated_string(data, "theme", notices)
     yolo = _validated_bool(data, "yolo", notices)
@@ -364,6 +473,19 @@ def _validate(
         router_style=router_style,
         jev_compaction=jev_compaction,
         browser_enabled=browser_enabled,
+        browser_page_jev_call_budget=browser_page_jev_call_budget,
+        browser_page_jev_token_budget=browser_page_jev_token_budget,
+        browser_task_action_budget=browser_task_action_budget,
+        browser_task_wall_clock_seconds=browser_task_wall_clock_seconds,
+        browser_allowed_origins=browser_allowed_origins,
+        browser_element_top1_confidence=browser_element_top1_confidence,
+        browser_element_topn=browser_element_topn,
+        browser_search_relevance_threshold=browser_search_relevance_threshold,
+        browser_search_tie_margin=browser_search_tie_margin,
+        browser_search_relevance_floor=browser_search_relevance_floor,
+        browser_search_call_confidence_threshold=(
+            browser_search_call_confidence_threshold
+        ),
         memory_injection=memory_injection,
         yolo=yolo,
         safety_tier=safety_tier,
@@ -444,6 +566,32 @@ def _validated_nonnegative_int(
         notices.append(f"settings · ignored key '{key}': expected nonnegative integer")
         return None
     return value
+
+
+def _validated_positive_float(
+    data: Mapping[str, Any], key: str, notices: list[str]
+) -> float | None:
+    if key not in data:
+        return None
+    value = data[key]
+    if type(value) not in (int, float) or value <= 0:
+        notices.append(f"settings · ignored key '{key}': expected positive number")
+        return None
+    return float(value)
+
+
+def _validated_unit_float(
+    data: Mapping[str, Any], key: str, notices: list[str]
+) -> float | None:
+    if key not in data:
+        return None
+    value = data[key]
+    if type(value) not in (int, float) or not 0 <= value <= 1:
+        notices.append(
+            f"settings · ignored key '{key}': expected number between 0 and 1"
+        )
+        return None
+    return float(value)
 
 
 def _validated_approval(

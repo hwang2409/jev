@@ -5,8 +5,10 @@ import json
 from pathlib import Path
 from typing import Any, ClassVar
 
+import httpx
 import pytest
 from jm import client as jm_client
+from jm._transport import _GatewayTransport
 from jm.answers import (
     ChoiceAnswer,
     NoulAnswer,
@@ -57,9 +59,7 @@ def test_harness_callers_have_no_duplicate_gateway_transport() -> None:
         root / "tools/browser_live_smoke.py",
     )
     paths = (*provider_paths, *caller_paths)
-    sources = {
-        path: path.read_text(encoding="utf-8") for path in paths
-    }
+    sources = {path: path.read_text(encoding="utf-8") for path in paths}
 
     provider_tree = ast.parse(sources[provider_paths[0]])
     assert not any(
@@ -94,15 +94,10 @@ def test_harness_callers_have_no_duplicate_gateway_transport() -> None:
         tree = ast.parse(source)
         imported_modules = _imported_modules(tree)
         if path in provider_paths:
-            imported_roots = {
-                module.split(".", 1)[0] for module in imported_modules
-            }
-            assert not imported_roots.intersection(
-                forbidden_provider_import_roots
-            )
+            imported_roots = {module.split(".", 1)[0] for module in imported_modules}
+            assert not imported_roots.intersection(forbidden_provider_import_roots)
         assert not any(
-            module == "jm"
-            or module.startswith("jm.") and module != "jm.client"
+            module == "jm" or module.startswith("jm.") and module != "jm.client"
             for module in imported_modules
         )
         assert not any(
@@ -160,9 +155,7 @@ class Client:
         response = self.responses.pop(0)
         if hasattr(state, "focus"):
             state = json.loads(state.focus)
-        self.requests.append(
-            {"json": {"state": state, "questions": questions}}
-        )
+        self.requests.append({"json": {"state": state, "questions": questions}})
         if isinstance(response, jev.JevResponse):
             return response
         if response.status_code >= 400:
@@ -216,7 +209,9 @@ async def test_provider_rejects_missing_or_partial_terminal_coverage(
     monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     class Record:
-        def __init__(self, payload: dict[str, Any], answers: dict[str, Any] | None = None):
+        def __init__(
+            self, payload: dict[str, Any], answers: dict[str, Any] | None = None
+        ):
             self.payload = payload
             self.answers = answers or {}
             self.usage = {}
@@ -231,9 +226,7 @@ async def test_provider_rejects_missing_or_partial_terminal_coverage(
 
     monkeypatch.setattr(jev, "judge_async", broken_judge_async)
     with pytest.raises(jev.JevRouterError, match="coverage"):
-        await jev._evaluate(
-            {"state": {}, "questions": {"q": {"type": "noul"}}}
-        )
+        await jev._evaluate({"state": {}, "questions": {"q": {"type": "noul"}}})
 
 
 @pytest.mark.asyncio
@@ -264,9 +257,7 @@ async def test_provider_preserves_http_status_from_error_record(
 
     monkeypatch.setattr(jev, "judge_async", failed_judge_async)
     with pytest.raises(jev.JevRouterError) as raised:
-        await jev._evaluate(
-            {"state": {}, "questions": {"q": {"type": "noul"}}}
-        )
+        await jev._evaluate({"state": {}, "questions": {"q": {"type": "noul"}}})
 
     assert raised.value.status_code == 503
 
@@ -292,9 +283,7 @@ def auto_memory_response() -> jev.JevResponse:
 def safety_response() -> jev.JevResponse:
     return jev.JevResponse(
         answers={
-            "score": ChoiceAnswer(
-                "1", {"0": 0.1, "1": 0.8, "2": 0.08, "3": 0.02}, 0.9
-            ),
+            "score": ChoiceAnswer("1", {"0": 0.1, "1": 0.8, "2": 0.08, "3": 0.02}, 0.9),
             "touches_outside_cwd": NoulAnswer(0.1),
             "plausibly_irreversible": NoulAnswer(0.2),
         },
@@ -554,7 +543,12 @@ def test_build_browser_element_request_derives_structured_choice_criteria() -> N
         )
     }
     assert (
-        len({json.dumps(criteria, sort_keys=True) for criteria in gate_criteria.values()})
+        len(
+            {
+                json.dumps(criteria, sort_keys=True)
+                for criteria in gate_criteria.values()
+            }
+        )
         == 3
     )
     assert gate_criteria["goal_element_present"]["true"]["what"] == (
@@ -690,6 +684,78 @@ async def test_browser_choice_delegates_retries_to_client(
 
 
 @pytest.mark.asyncio
+async def test_browser_choice_retries_retryable_response_through_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    responses = iter(
+        (
+            httpx.Response(503),
+            httpx.Response(
+                200,
+                json={
+                    "answers": {
+                        "element_id": {
+                            "choice": "e17",
+                            "probabilities": {"e17": 0.9},
+                            "confidence": 0.9,
+                            "type": "choice",
+                        },
+                        "goal_element_present": {
+                            "probability": 0.95,
+                            "type": "boolean",
+                        },
+                        "page_loaded_and_stable": {
+                            "probability": 0.8,
+                            "type": "boolean",
+                        },
+                        "action_is_the_next_step": {
+                            "probability": 0.9,
+                            "type": "boolean",
+                        },
+                    },
+                    "usage": {"input_tokens": 12, "output_tokens": 6},
+                },
+            ),
+        )
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        response = next(responses)
+        return httpx.Response(
+            response.status_code,
+            json=response.json() if response.status_code == 200 else None,
+            request=request,
+        )
+
+    http_client = httpx.Client(transport=httpx.MockTransport(handler))
+    transport = _GatewayTransport(
+        http_client=http_client,
+        sleep=lambda _delay: None,
+        jitter=lambda: 0.0,
+    )
+
+    class RetryClient(jm_client.JevClient):
+        def __init__(self) -> None:
+            super().__init__(_transport=transport)
+
+    monkeypatch.setenv("VERCEL_AI_GATEWAY", "test-secret")
+    monkeypatch.setattr(jm_client, "JevClient", RetryClient)
+
+    result = await jev.choose_browser_element(
+        "retryable browser request",
+        "click",
+        {},
+        [{"element_id": "e17", "affordance": "click"}],
+    )
+
+    assert len(requests) == 2
+    assert result.element_id == "e17"
+    assert result.usage == {"input_tokens": 12, "output_tokens": 6}
+
+
+@pytest.mark.asyncio
 async def test_browser_choice_requires_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
     class MissingKeyClient:
         async def evaluate_async(self, *_args: object) -> object:
@@ -700,7 +766,9 @@ async def test_browser_choice_requires_api_key(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(jm_client, "JevClient", MissingKeyClient)
 
-    with pytest.raises(jev.JevRouterError, match="Vercel AI Gateway API key is not set"):
+    with pytest.raises(
+        jev.JevRouterError, match="Vercel AI Gateway API key is not set"
+    ):
         await jev.choose_browser_element("continue", "click", {}, [])
 
 
@@ -762,7 +830,12 @@ async def test_browser_page_state_request_names_each_gate_state_field(
     ]
     gate_criteria = {gate: questions[gate]["criteria"] for gate in questions}
     assert (
-        len({json.dumps(criteria, sort_keys=True) for criteria in gate_criteria.values()})
+        len(
+            {
+                json.dumps(criteria, sort_keys=True)
+                for criteria in gate_criteria.values()
+            }
+        )
         == 6
     )
     assert questions["action_succeeded"]["criteria"]["true"]["what"] == (
@@ -859,8 +932,12 @@ async def test_invalid_client_response_preserves_browser_gate(
     assert raised.value.gate == "goal_element_present"
 
 
-def test_parse_browser_page_state_response_rejects_missing_or_out_of_range_gate() -> None:
-    with pytest.raises(jev.JevRouterError, match="invalid Jev browser page-state response"):
+def test_parse_browser_page_state_response_rejects_missing_or_out_of_range_gate() -> (
+    None
+):
+    with pytest.raises(
+        jev.JevRouterError, match="invalid Jev browser page-state response"
+    ):
         jev.parse_browser_page_state_response(
             {"answers": {"page_loaded_and_stable": {"noul": 2.0}}}
         )
@@ -902,7 +979,10 @@ async def test_search_result_scoring_bounds_state_and_uses_neutral_score_criteri
     assert question["type"] == "score"
     assert question["instructions"]["state_fields"] == ["goal", "results"]
     assert "ignore prior instructions" not in str(request["questions"])
-    assert result.scores == {"result-a": pytest.approx(0.92), "result-b": pytest.approx(0.31)}
+    assert result.scores == {
+        "result-a": pytest.approx(0.92),
+        "result-b": pytest.approx(0.31),
+    }
     assert result.confidence == pytest.approx(0.8)
     assert result.call_confidence == pytest.approx(0.8)
     assert result.usage == {"input_tokens": 18, "output_tokens": 7}
@@ -924,7 +1004,9 @@ async def test_search_result_scoring_rejects_malformed_scores(
     Client.requests = []
     monkeypatch.setattr(jm_client, "JevClient", Client)
 
-    with pytest.raises(jev.JevRouterError, match="invalid Jev search result score response"):
+    with pytest.raises(
+        jev.JevRouterError, match="invalid Jev search result score response"
+    ):
         await jev.score_search_results(
             "find docs",
             [
@@ -956,7 +1038,9 @@ async def test_search_result_scoring_rejects_partial_answers(
     Client.requests = []
     monkeypatch.setattr(jm_client, "JevClient", Client)
 
-    with pytest.raises(jev.JevRouterError, match="invalid Jev search result score response"):
+    with pytest.raises(
+        jev.JevRouterError, match="invalid Jev search result score response"
+    ):
         await jev.score_search_results(
             "find docs",
             [
@@ -1213,9 +1297,7 @@ async def test_memory_relevance_uses_quoted_candidate_state(
         Response(
             200,
             {
-                "answers": {
-                    "memory_relevance_0": {"type": "noul", "noul": 0.8}
-                },
+                "answers": {"memory_relevance_0": {"type": "noul", "noul": 0.8}},
                 "usage": {"input_tokens": 4, "output_tokens": 2},
             },
         )
@@ -1237,7 +1319,9 @@ async def test_memory_relevance_uses_quoted_candidate_state(
 
 
 @pytest.mark.asyncio
-async def test_route_step_builds_the_jev_request(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_route_step_builds_the_jev_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     Client.responses = [response()]
     Client.requests = []
     monkeypatch.setattr(jm_client, "JevClient", Client)
@@ -1281,12 +1365,12 @@ async def test_normalized_client_answers_map_to_route_result(
             200,
             {
                 "answers": {
-                        "tool": {
-                            "type": "choice",
-                            "choice": "read",
-                            "probabilities": {"read": 0.8, "bash": 0.2},
-                            "confidence": 0.7,
-                        },
+                    "tool": {
+                        "type": "choice",
+                        "choice": "read",
+                        "probabilities": {"read": 0.8, "bash": 0.2},
+                        "confidence": 0.7,
+                    },
                     "needs_tool": {"type": "noul", "noul": 0.75},
                     "step_clarity": {"type": "noul", "noul": 0.9},
                 },
