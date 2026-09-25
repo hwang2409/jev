@@ -197,6 +197,47 @@ async def test_browser_session_resets_page_budget_after_navigation() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["click", "submit"])
+async def test_browser_session_resets_page_budget_after_action_navigation(
+    action: str,
+) -> None:
+    first = PageObservation(1, 1, "https://example.test/one", "", "", (), True, True)
+    second = PageObservation(2, 2, "https://example.test/two", "", "", (), True, True)
+    adapter = FakeBrowserAdapter([first, second])
+    session = BrowserSession(
+        lambda: adapter, page_jev_call_budget=8, page_jev_token_budget=20
+    )
+    await session.observe()
+    session.budget.page_jev_calls = 3
+    session.budget.page_jev_tokens = 7
+
+    element = ElementRef(1, "e1", "button", action, "", "", None, None, False, True)
+    await session.action(action, element)
+
+    assert session.budget.page_jev_calls == 0
+    assert session.budget.page_jev_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_browser_session_keeps_page_budget_for_non_navigating_click() -> None:
+    first = PageObservation(1, 1, "https://example.test/one", "", "", (), True, True)
+    second = PageObservation(2, 2, first.url, "", "", (), True, True)
+    adapter = FakeBrowserAdapter([first, second])
+    session = BrowserSession(
+        lambda: adapter, page_jev_call_budget=8, page_jev_token_budget=20
+    )
+    await session.observe()
+    session.budget.page_jev_calls = 3
+    session.budget.page_jev_tokens = 7
+
+    element = ElementRef(1, "e1", "button", "click", "", "", None, None, False, True)
+    await session.action("click", element)
+
+    assert session.budget.page_jev_calls == 3
+    assert session.budget.page_jev_tokens == 7
+
+
+@pytest.mark.asyncio
 async def test_last_allowed_action_returns_bounded_observation_after_budget_expiry() -> (
     None
 ):

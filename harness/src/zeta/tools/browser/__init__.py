@@ -23,6 +23,8 @@ from ..registry import ToolRegistry, _error_result, _success_result, text_block
 from .adapter import (
     BrowserError,
     BrowserTimeoutError,
+    NavigationBlockedError,
+    NavigationInterceptor,
     NavigationRaceError,
     SearchResultCandidate,
     SnapshotLimits,
@@ -137,7 +139,17 @@ async def _browser_navigate(
             )
             if safety_error is not None:
                 return safety_error
-        state = await session.navigate(url)
+        state = await session.navigate(
+            url,
+            navigation_interceptor=_navigation_interceptor(
+                registry,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+                fallback_url=current_url,
+                preapproved_url=url,
+            ),
+        )
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
         return _browser_exception(
             exc, navigation=session is not None and session.adapter_instance is not None
@@ -384,6 +396,14 @@ async def _run_element_action(
             text=text if isinstance(text, str) else None,
             replace=replace,
             value=value if isinstance(value, str) else None,
+            navigation_interceptor=_navigation_interceptor(
+                registry,
+                arguments,
+                abort_signal=abort_signal,
+                execution_context=execution_context,
+                fallback_url=current_state.observation.url,
+                preapproved_url=element.target_url,
+            ),
         )
         post_payload = catalog_payload(state.catalog)
         try:
@@ -945,6 +965,56 @@ async def _check_browser_safety(
     return _browser_error(message, "safety_denied")
 
 
+def _navigation_interceptor(
+    registry: ToolRegistry,
+    arguments: dict[str, object],
+    *,
+    abort_signal: AbortSignal | None,
+    execution_context: ToolExecutionContext | None,
+    fallback_url: str,
+    preapproved_url: str | None,
+) -> NavigationInterceptor:
+    async def inspect(destination_url: str, current_url: str | None) -> None:
+        if preapproved_url is not None and destination_url == preapproved_url:
+            return
+        observed_url = current_url or fallback_url
+        current_origin = _origin(observed_url)
+        evidence = BrowserRiskEvidence(
+            *(
+                "navigate",
+                "navigation",
+                destination_url,
+                current_origin or "",
+                destination_url,
+                None,
+                False,
+                False,
+                False,
+                False,
+                _target_origin_allowed(registry, current_origin, destination_url),
+            )
+        )
+        if not (browser_action_requires_safety(evidence) or _is_cross_origin(evidence)):
+            return
+        safety_error = await _check_browser_safety(
+            registry,
+            evidence,
+            arguments,
+            abort_signal=abort_signal,
+            execution_context=execution_context,
+        )
+        if safety_error is not None:
+            message = "browser navigation was blocked by the safety policy"
+            structured = safety_error.get("structuredContent")
+            if isinstance(structured, dict):
+                error = structured.get("error")
+                if isinstance(error, dict) and isinstance(error.get("message"), str):
+                    message = error["message"]
+            raise NavigationBlockedError(message)
+
+    return inspect
+
+
 def _browser_approval_label(
     registry: ToolRegistry,
     evidence: BrowserRiskEvidence,
@@ -1144,6 +1214,11 @@ def _browser_exception(
         return _browser_error(
             str(exc) or "browser navigation raced with the action", "navigation_race"
         )
+    if isinstance(exc, NavigationBlockedError):
+        return _browser_error(
+            str(exc) or "browser navigation was blocked by the safety policy",
+            "safety_denied",
+        )
     if isinstance(exc, BrowserTimeoutError):
         if navigation:
             return _browser_error(
@@ -1167,15 +1242,6 @@ def _browser_error(message: str, kind: str) -> StructuredToolResult:
     return _error_result(message, kind=kind)
 
 
-__all__ = [
-    "BASE_ELEMENT_PROPERTIES",
-    "BROWSER_ACTION_TIMEOUT_MS",
-    "BROWSER_NAVIGATION_TIMEOUT_MS",
-    "BROWSER_TOOL_NAMES",
-    "PAGE_STATE_RECOVERY_ATTEMPT_CAP",
-    "BrowserSession",
-    "PageStateDecision",
-    "conservative_provider_error_decision",
-    "evaluate_page_state",
-    "evaluate_page_state_with_provider",
-]
+# fmt: off
+__all__ = ["BASE_ELEMENT_PROPERTIES", "BROWSER_ACTION_TIMEOUT_MS", "BROWSER_NAVIGATION_TIMEOUT_MS", "BROWSER_TOOL_NAMES", "PAGE_STATE_RECOVERY_ATTEMPT_CAP", "BrowserSession", "PageStateDecision", "conservative_provider_error_decision", "evaluate_page_state", "evaluate_page_state_with_provider"]
+# fmt: on

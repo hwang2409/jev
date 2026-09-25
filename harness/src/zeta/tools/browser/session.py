@@ -18,6 +18,7 @@ from .adapter import (
     ElementRef,
     ElementUnavailableError,
     ExtractedData,
+    NavigationInterceptor,
     PageObservation,
     SearchResultExtraction,
     SnapshotLimits,
@@ -166,11 +167,20 @@ class BrowserSession:
             raise BrowserError("browser session already has an adapter")
         self._adapter = adapter
 
-    async def navigate(self, url: str) -> BrowserState:
+    async def navigate(
+        self,
+        url: str,
+        *,
+        navigation_interceptor: NavigationInterceptor | None = None,
+    ) -> BrowserState:
         self._ensure_task_available()
         adapter = await self.adapter(check_budget=False)
         self.budget.task_actions += 1
-        observation = await adapter.navigate(url, self.navigation_timeout_ms)
+        self._set_navigation_interceptor(adapter, navigation_interceptor)
+        try:
+            observation = await adapter.navigate(url, self.navigation_timeout_ms)
+        finally:
+            self._set_navigation_interceptor(adapter, None)
         self._reset_page_budget()
         state = self._record_observation(observation)
         self._record_action(f"navigate:{url}")
@@ -193,26 +203,45 @@ class BrowserSession:
         text: str | None = None,
         replace: bool = True,
         value: str | None = None,
+        navigation_interceptor: NavigationInterceptor | None = None,
     ) -> tuple[ActionObservation, BrowserState]:
         adapter = await self.adapter()
         self.consume_action()
-        if action in {"click", "submit"}:
-            result = await adapter.click(element_ref, self.action_timeout_ms)
-        elif action == "type":
-            if text is None:
-                raise ValueError("browser_type requires text")
-            result = await adapter.type_text(
-                element_ref, text, replace, self.action_timeout_ms
-            )
-        elif action == "select":
-            if value is None:
-                raise ValueError("browser_select requires value")
-            result = await adapter.select(element_ref, value, self.action_timeout_ms)
-        else:
-            raise ValueError(f"unsupported browser action: {action}")
-        state = await self.observe(check_budget=False)
+        previous_url = None if self._state is None else self._state.observation.url
+        self._set_navigation_interceptor(adapter, navigation_interceptor)
+        try:
+            if action in {"click", "submit"}:
+                result = await adapter.click(element_ref, self.action_timeout_ms)
+            elif action == "type":
+                if text is None:
+                    raise ValueError("browser_type requires text")
+                result = await adapter.type_text(
+                    element_ref, text, replace, self.action_timeout_ms
+                )
+            elif action == "select":
+                if value is None:
+                    raise ValueError("browser_select requires value")
+                result = await adapter.select(
+                    element_ref, value, self.action_timeout_ms
+                )
+            else:
+                raise ValueError(f"unsupported browser action: {action}")
+            state = await self.observe(check_budget=False)
+            if previous_url != state.observation.url:
+                self._reset_page_budget()
+        finally:
+            self._set_navigation_interceptor(adapter, None)
         self._record_action(action)
         return result, state
+
+    @staticmethod
+    def _set_navigation_interceptor(
+        adapter: BrowserAdapter,
+        interceptor: NavigationInterceptor | None,
+    ) -> None:
+        setter = getattr(adapter, "set_navigation_interceptor", None)
+        if callable(setter):
+            setter(interceptor)
 
     async def extract(
         self,

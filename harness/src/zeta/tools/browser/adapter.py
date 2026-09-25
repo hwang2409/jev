@@ -14,6 +14,8 @@ from urllib.parse import urlsplit
 
 _logger = logging.getLogger(__name__)
 
+NavigationInterceptor = Callable[[str, str | None], Awaitable[None]]
+
 
 @dataclass(frozen=True, slots=True)
 class SnapshotLimits:
@@ -95,6 +97,11 @@ class BrowserAdapter(Protocol):
     async def launch(self) -> None:
         raise NotImplementedError
 
+    def set_navigation_interceptor(
+        self, interceptor: NavigationInterceptor | None
+    ) -> None:
+        raise NotImplementedError
+
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         raise NotImplementedError
 
@@ -160,6 +167,10 @@ class BrowserTimeoutError(BrowserError):
 
 class NavigationRaceError(BrowserError):
     """Navigation changed page generation during an action."""
+
+
+class NavigationBlockedError(BrowserError):
+    """The safety policy blocked a top-level browser navigation."""
 
 
 def load_playwright_page() -> object:
@@ -296,7 +307,10 @@ class PlaywrightBrowserAdapter:
         self._generation = 0
         self._dom_generation: int | None = None
         self._url = ""
+        self._navigation_origin_url: str | None = None
         self._closed = False
+        self._navigation_interceptor: NavigationInterceptor | None = None
+        self._navigation_error: NavigationBlockedError | None = None
 
     async def launch(self) -> None:
         if self._page is not None:
@@ -305,6 +319,7 @@ class PlaywrightBrowserAdapter:
         if _is_page_like(loaded):
             self._page = loaded
             self._closed = False
+            await self._install_navigation_interception()
             return
         try:
             if hasattr(loaded, "async_playwright"):
@@ -317,6 +332,7 @@ class PlaywrightBrowserAdapter:
             self._context = await self._browser.new_context()
             self._page = await self._context.new_page()
             self._closed = False
+            await self._install_navigation_interception()
         except Exception as exc:  # noqa: BLE001 - framework errors cross this seam
             await self.close()
             _raise_playwright_error(exc, "browser launch failed")
@@ -324,15 +340,28 @@ class PlaywrightBrowserAdapter:
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         self._require_page()
         _validate_browser_url(url)
+        self._navigation_origin_url = self._url or None
         self._url = ""
+        self._navigation_error = None
         try:
             await self._page.goto(
                 url, wait_until="domcontentloaded", timeout=timeout_ms
             )
             await self._page.wait_for_load_state("load", timeout=timeout_ms)
-        except Exception as exc:  # noqa: BLE001 - framework errors cross this seam
+        except Exception as exc:
+            if self._navigation_error is not None:
+                error = self._navigation_error
+                self._navigation_error = None
+                raise error from exc
             _raise_playwright_error(exc, "browser navigation failed")
+        finally:
+            self._navigation_origin_url = None
         return await self.observe(self._limits)
+
+    def set_navigation_interceptor(
+        self, interceptor: NavigationInterceptor | None
+    ) -> None:
+        self._navigation_interceptor = interceptor
 
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
         self._require_page()
@@ -530,9 +559,14 @@ class PlaywrightBrowserAdapter:
             raise ElementUnavailableError(element_ref.element_id)
         if self._url and hasattr(self._page, "url") and self._page.url != self._url:
             raise NavigationRaceError(element_ref.element_id)
+        self._navigation_error = None
         try:
             await _maybe_await(action(locator))
-        except Exception as exc:  # noqa: BLE001 - framework errors cross this seam
+        except Exception as exc:
+            if self._navigation_error is not None:
+                error = self._navigation_error
+                self._navigation_error = None
+                raise error from exc
             _raise_playwright_error(exc, "browser action failed")
         observation = await self.observe(self._limits)
         return ActionObservation(
@@ -587,6 +621,50 @@ class PlaywrightBrowserAdapter:
         if self._dom_generation != dom_generation:
             self._dom_generation = dom_generation
             self._generation += 1
+
+    async def _install_navigation_interception(self) -> None:
+        if self._page is None or not hasattr(self._page, "route"):
+            return
+        try:
+            await _maybe_await(self._page.route("**/*", self._handle_route))
+        except Exception as exc:
+            raise BrowserError("browser navigation interception failed") from exc
+
+    async def _handle_route(self, route: object) -> None:
+        try:
+            request = route.request
+            if (
+                self._is_top_level_navigation(request)
+                and self._navigation_interceptor is not None
+            ):
+                await self._navigation_interceptor(
+                    request.url,
+                    self._url or self._navigation_origin_url,
+                )
+            await _maybe_await(route.continue_())
+        except BaseException as exc:  # noqa: BLE001 - route must fail closed
+            if isinstance(exc, NavigationBlockedError):
+                error = exc
+            else:
+                error = NavigationBlockedError(
+                    "browser navigation could not be classified safely"
+                )
+            self._navigation_error = error
+            try:
+                await _maybe_await(route.abort())
+            except Exception as abort_error:
+                _logger.debug("browser route abort failed", exc_info=abort_error)
+
+    def _is_top_level_navigation(self, request: object) -> bool:
+        try:
+            is_navigation = request.is_navigation_request()
+            frame = request.frame
+            main_frame = self._page.main_frame
+        except Exception as exc:
+            raise NavigationBlockedError(
+                "browser navigation request could not be classified safely"
+            ) from exc
+        return bool(is_navigation and frame == main_frame)
 
 
 def make_browser_adapter_factory(
@@ -721,6 +799,8 @@ class FakeBrowserAdapter:
         self.selected: list[tuple[ElementRef, str]] = []
         self.extractions: list[tuple[ElementRef | None, list[str], int]] = []
         self.search_extractions: list[tuple[ElementRef | None, int]] = []
+        self._navigation_interceptor: NavigationInterceptor | None = None
+        self._queued_navigation_url: str | None = None
 
     def detach(self, element_id: str) -> None:
         self._detached.add(element_id)
@@ -734,11 +814,35 @@ class FakeBrowserAdapter:
     async def launch(self) -> None:
         return None
 
+    def set_navigation_interceptor(
+        self, interceptor: NavigationInterceptor | None
+    ) -> None:
+        self._navigation_interceptor = interceptor
+
+    def queue_navigation(self, url: str) -> None:
+        """Queue a top-level navigation caused by the next action."""
+
+        self._queued_navigation_url = url
+
+    async def trigger_navigation(self, url: str) -> None:
+        """Drive a script-style top-level navigation in deterministic tests."""
+
+        await self._intercept_navigation(url)
+        self._replace_current_url(url)
+
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         self._maybe_fail("navigate")
+        previous_index = self._observation_index
+        await self._intercept_navigation(url)
         observation = self._advance_observation()
+        if self._observation_index != previous_index and observation.url != url:
+            await self._intercept_navigation(observation.url)
+            self._replace_current_url(observation.url)
+            result = self._current_observation()
+        else:
+            result = replace(observation, url=url)
         self.navigations.append(url)
-        return replace(observation, url=url)
+        return result
 
     async def observe(self, limits: SnapshotLimits) -> PageObservation:
         del limits
@@ -750,7 +854,7 @@ class FakeBrowserAdapter:
         self._maybe_fail("click")
         self._check_element(element_ref)
         self.clicks.append(element_ref)
-        return self._next_action_observation()
+        return await self._next_action_observation()
 
     async def type_text(
         self,
@@ -763,7 +867,7 @@ class FakeBrowserAdapter:
         self._maybe_fail("type_text", "type")
         self._check_element(element_ref)
         self.typed.append((element_ref, text, replace))
-        return self._next_action_observation()
+        return await self._next_action_observation()
 
     async def select(
         self,
@@ -775,7 +879,7 @@ class FakeBrowserAdapter:
         self._maybe_fail("select")
         self._check_element(element_ref)
         self.selected.append((element_ref, value))
-        return self._next_action_observation()
+        return await self._next_action_observation()
 
     async def extract(
         self,
@@ -822,8 +926,20 @@ class FakeBrowserAdapter:
             self._observation_index += 1
         return self._current_observation()
 
-    def _next_action_observation(self) -> ActionObservation:
+    async def _next_action_observation(self) -> ActionObservation:
+        current = self._current_observation()
+        queued_url = self._queued_navigation_url
+        next_observation = self._peek_next_observation()
+        target_url = queued_url
+        if target_url is None and next_observation.url != current.url:
+            target_url = next_observation.url
+        if target_url is not None:
+            await self._intercept_navigation(target_url)
         observation = self._advance_observation()
+        self._queued_navigation_url = None
+        if queued_url is not None:
+            self._replace_current_url(queued_url)
+            observation = self._current_observation()
         return ActionObservation(
             snapshot_id=observation.snapshot_id,
             generation=observation.generation,
@@ -831,6 +947,22 @@ class FakeBrowserAdapter:
             loaded=observation.loaded,
             stable=observation.stable,
             changed=True,
+        )
+
+    def _peek_next_observation(self) -> PageObservation:
+        if not self._observations:
+            raise BrowserError("fake browser has no observations")
+        index = min(self._observation_index + 1, len(self._observations) - 1)
+        return self._observations[index]
+
+    async def _intercept_navigation(self, url: str) -> None:
+        if self._navigation_interceptor is None:
+            return
+        await self._navigation_interceptor(url, self._current_observation().url)
+
+    def _replace_current_url(self, url: str) -> None:
+        self._observations[self._observation_index] = replace(
+            self._current_observation(), url=url
         )
 
     def _check_element(self, element_ref: ElementRef) -> None:
