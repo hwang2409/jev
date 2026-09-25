@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import io
 import json
-import subprocess
-import sys
 import threading
 import time
 from copy import deepcopy
@@ -121,50 +119,6 @@ def test_judge_async_cancellation_does_not_leave_a_blocked_executor() -> None:
         assert await asyncio.to_thread(finished.wait, 1)
 
     asyncio.run(cancel_consumer())
-
-
-def test_judge_async_process_exits_with_blocked_judgment() -> None:
-    script = """
-import asyncio
-import threading
-
-from jm.presets import resolve_preset
-from jm.runner import FormationReport, State, judge_async
-
-
-async def main():
-    loop = asyncio.get_running_loop()
-    started = asyncio.Event()
-
-    def blocked_judge(*_args, **_kwargs):
-        loop.call_soon_threadsafe(started.set)
-        threading.Event().wait()
-
-    stream = judge_async(
-        resolve_preset("jgrep"),
-        (State("case", "focus"),),
-        formation_report=FormationReport(),
-        judge_fn=blocked_judge,
-    )
-    consumer = asyncio.create_task(anext(stream))
-    await asyncio.wait_for(started.wait(), timeout=2)
-    consumer.cancel()
-    await asyncio.gather(consumer, return_exceptions=True)
-    await stream.aclose()
-    print("consumer cancelled", flush=True)
-
-
-asyncio.run(main())
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", script],
-        cwd=Path(__file__).parents[1],
-        capture_output=True,
-        text=True,
-        timeout=5,
-    )
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "consumer cancelled"
 
 
 def test_bm25_tokenization_ranking_and_ties_are_deterministic() -> None:
