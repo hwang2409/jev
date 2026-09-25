@@ -69,6 +69,9 @@ class _FailingAdapter:
     def __init__(self) -> None:
         self.closed = 0
 
+    def install_navigation_guard(self, _guard: object) -> None:
+        return None
+
     async def launch(self) -> None:
         raise RuntimeError("launch failed")
 
@@ -80,11 +83,20 @@ class _CancelledLaunchAdapter:
     def __init__(self) -> None:
         self.closed = 0
 
+    def install_navigation_guard(self, _guard: object) -> None:
+        return None
+
     async def launch(self) -> None:
         raise asyncio.CancelledError
 
     async def close(self) -> None:
         self.closed += 1
+
+
+class _LaunchNavigationAdapter(_SlowAdapter):
+    async def launch(self) -> None:
+        await super().launch()
+        await self.navigate("https://example.test/launch", 100)
 
 
 @pytest.mark.asyncio
@@ -120,6 +132,17 @@ async def test_browser_session_closes_adapter_when_launch_is_cancelled() -> None
         await session.adapter()
 
     assert adapter.closed == 1
+    assert session.adapter_instance is None
+
+
+@pytest.mark.asyncio
+async def test_browser_session_installs_guard_before_launch_navigation() -> None:
+    adapter = _LaunchNavigationAdapter()
+    session = BrowserSession(lambda: adapter)
+
+    with pytest.raises(NavigationBlockedError):
+        await session.adapter()
+
     assert session.adapter_instance is None
 
 

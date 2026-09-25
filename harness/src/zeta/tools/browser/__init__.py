@@ -147,7 +147,6 @@ async def _browser_navigate(
                 abort_signal=abort_signal,
                 execution_context=execution_context,
                 fallback_url=current_url,
-                preapproved_url=url,
             ),
         )
     except Exception as exc:  # noqa: BLE001 - browser errors are structured
@@ -402,7 +401,6 @@ async def _run_element_action(
                 abort_signal=abort_signal,
                 execution_context=execution_context,
                 fallback_url=current_state.observation.url,
-                preapproved_url=element.target_url,
             ),
         )
         post_payload = catalog_payload(state.catalog)
@@ -972,11 +970,8 @@ def _navigation_interceptor(
     abort_signal: AbortSignal | None,
     execution_context: ToolExecutionContext | None,
     fallback_url: str,
-    preapproved_url: str | None,
 ) -> NavigationInterceptor:
     async def inspect(destination_url: str, current_url: str | None) -> None:
-        if preapproved_url is not None and destination_url == preapproved_url:
-            return
         observed_url = current_url or fallback_url
         current_origin = _origin(observed_url)
         evidence = BrowserRiskEvidence(

@@ -94,6 +94,14 @@ class SearchResultExtraction:
 
 
 class BrowserAdapter(Protocol):
+    """Adapter contract for arc-3 actions in the main document.
+
+    The guard covers top-level navigations. Sub-frame requests stay outside
+    this scope because tools do not act inside sub-frames and extraction is
+    bounded to the main document. Add sub-frame classification before adding
+    sub-frame interaction or extraction.
+    """
+
     async def launch(self) -> None:
         raise NotImplementedError
 
@@ -633,6 +641,8 @@ class PlaywrightBrowserAdapter:
             raise BrowserError("browser navigation interception failed") from exc
 
     async def _handle_route(self, route: object) -> None:
+        """Guard top-level routes; sub-frame requests remain out of scope."""
+
         try:
             request = route.request
             if self._is_top_level_navigation(request):
@@ -970,7 +980,10 @@ class FakeBrowserAdapter:
 
     async def _intercept_navigation(self, url: str) -> None:
         if self._navigation_guard is None:
-            return
+            raise NavigationBlockedError(
+                "browser navigation was blocked because no active browser operation "
+                "can classify it safely"
+            )
         await self._navigation_guard(url, self._current_observation().url)
 
     def _replace_current_url(self, url: str) -> None:

@@ -155,6 +155,7 @@ class BrowserSession:
             if inspect.isawaitable(adapter):
                 adapter = await adapter
             try:
+                self._install_navigation_guard(adapter)
                 await adapter.launch()
             except BaseException:
                 try:
@@ -166,7 +167,6 @@ class BrowserSession:
                     )
                 raise
             self._adapter = adapter
-            self._install_navigation_guard(adapter)
             return adapter
 
     async def open(self) -> BrowserAdapter:

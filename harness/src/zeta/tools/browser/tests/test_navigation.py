@@ -8,9 +8,10 @@ import pytest
 from zeta.core.safety import BrowserRiskEvidence, SafetyOutcome, SafetyTier
 from zeta.protocol import jev
 from zeta.protocol.types import ToolCall
-from zeta.tools.browser import PageStateDecision
+from zeta.tools.browser import PageStateDecision, _navigation_interceptor
 from zeta.tools.browser.adapter import (
     FakeBrowserAdapter,
+    NavigationBlockedError,
     PageObservation,
     SnapshotLimits,
 )
@@ -20,6 +21,34 @@ from zeta.tools.browser.tests.test_tools import (
     _registry,
     _structured,
 )
+
+
+@pytest.mark.asyncio
+async def test_navigation_guard_classifies_every_destination(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    adapter = FakeBrowserAdapter([_observation()])
+    tier = SafetyTier(cwd=tmp_path, headless=True)
+    registry = _registry(tmp_path, adapter, tier)
+    seen: list[BrowserRiskEvidence] = []
+
+    async def classify(evidence: BrowserRiskEvidence) -> SafetyOutcome:
+        seen.append(evidence)
+        return SafetyOutcome("deny", "layer0", reason="external_origin")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", classify)
+    interceptor = _navigation_interceptor(
+        registry,
+        {},
+        abort_signal=None,
+        execution_context=None,
+        fallback_url="https://example.test/",
+    )
+
+    with pytest.raises(NavigationBlockedError):
+        await interceptor("https://other.test/submit", "https://example.test/")
+
+    assert seen and seen[0].target_url == "https://other.test/submit"
 
 
 @pytest.mark.asyncio
