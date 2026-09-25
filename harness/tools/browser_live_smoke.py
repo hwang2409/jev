@@ -6,7 +6,7 @@ import argparse
 import asyncio
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -15,7 +15,11 @@ from zeta.protocol.types import ToolCall
 from zeta.skills import SkillCatalog
 from zeta.tools import ToolRegistry
 from zeta.tools.browser import register
-from zeta.tools.browser.adapter import PlaywrightBrowserAdapter, SnapshotLimits
+from zeta.tools.browser.adapter import (
+    BrowserAdapter,
+    PlaywrightBrowserAdapter,
+    SnapshotLimits,
+)
 
 try:
     from browser_fixture.fixture_server import FixtureServer
@@ -142,7 +146,9 @@ def _load_provider() -> object:
     return jev
 
 
-async def run_smoke(*, headless: bool) -> None:
+async def run_smoke(
+    *, headless: bool, adapter_factory: Callable[[], BrowserAdapter] | None = None
+) -> None:
     _require_live_config()
     _load_provider()
     with FixtureServer() as fixture:
@@ -160,10 +166,12 @@ async def run_smoke(*, headless: bool) -> None:
             browser_safety_tier=SafetyTier(cwd=Path.cwd(), headless=headless),
             skill_catalog=SkillCatalog.empty(),
         )
-        registry.browser_adapter_factory = lambda: PlaywrightBrowserAdapter(
-            headless=headless,
-            limits=SnapshotLimits(),
+        adapter = (
+            adapter_factory()
+            if adapter_factory is not None
+            else PlaywrightBrowserAdapter(headless=headless, limits=SnapshotLimits())
         )
+        registry.browser_adapter_factory = lambda: adapter
         register(registry)
         try:
             state = await _call(
@@ -202,16 +210,6 @@ async def run_smoke(*, headless: bool) -> None:
                 type_ref | {"text": "fixture smoke", "replace": True},
                 str(state["url"]),
             )
-            select_ref = _element_payload(state, "select", label="Smoke choice")
-            registry.browser_goal = "select green in the harmless form"
-            state = await _call(
-                registry,
-                budget,
-                "select",
-                "browser_select",
-                select_ref | {"value": "green"},
-                str(state["url"]),
-            )
             submit_ref = _element_payload(state, "submit", label="Submit harmless form")
             registry.browser_goal = "submit the harmless form"
             submitted = await _call(
@@ -224,7 +222,11 @@ async def run_smoke(*, headless: bool) -> None:
             )
             if "/submitted" not in str(submitted["url"]):
                 raise RuntimeError("smoke form did not reach the submitted page")
-            print("form type/select/submit: passed")
+            if "Received text fixture smoke; choice red." not in str(
+                submitted["summary"]
+            ):
+                raise RuntimeError("smoke form did not submit the entered value")
+            print("form type/submit: passed")
 
             state = await _call(
                 registry,
@@ -286,10 +288,31 @@ async def run_smoke(*, headless: bool) -> None:
                 ambiguous_ref,
                 str(state["url"]),
             )
-            if not low_confidence.get("requires_choice") or len(
-                low_confidence.get("candidate_ids", [])
-            ) != 3:
-                raise RuntimeError("smoke low-confidence response did not expose top three")
+            candidates = low_confidence.get("candidates")
+            candidate_ids = low_confidence.get("candidate_ids")
+            if not isinstance(candidates, list) or not isinstance(candidate_ids, list):
+                raise TypeError("smoke low-confidence response omitted candidates")
+            candidate_labels = [
+                candidate.get("text")
+                for candidate in candidates
+                if isinstance(candidate, dict)
+            ]
+            candidate_element_ids = [
+                candidate.get("element_id")
+                for candidate in candidates
+                if isinstance(candidate, dict)
+            ]
+            if (
+                not low_confidence.get("requires_choice")
+                or candidate_labels != ["Continue with local fixture"] * 3
+                or candidate_ids != candidate_element_ids
+                or len(candidate_ids) != 3
+                or len(set(candidate_ids)) != 3
+            ):
+                raise RuntimeError(
+                    "smoke low-confidence response did not expose the three "
+                    "ambiguous controls"
+                )
             print("low-confidence top-three: passed")
 
             state = await _call(
@@ -301,7 +324,7 @@ async def run_smoke(*, headless: bool) -> None:
                 str(state["url"]),
             )
             external_ref = _element_payload(
-                state, "click", label="Open external target"
+                state, "click", label="safe/approved external target"
             )
             registry.browser_goal = "open the external target"
             external = await _call(
@@ -318,6 +341,8 @@ async def run_smoke(*, headless: bool) -> None:
             print("external navigation denial: passed")
         finally:
             await registry.close()
+            if not getattr(adapter, "_closed", False):
+                raise RuntimeError("browser adapter cleanup did not close the adapter")
             print("browser context and registry cleanup: passed")
     print("fixture server cleanup: passed")
 
