@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from dataclasses import replace
 from urllib.error import URLError
 from urllib.parse import urlsplit
@@ -17,6 +18,8 @@ from zeta.tools.browser.adapter import (
     FakeBrowserAdapter,
     PageObservation,
 )
+
+MAX_SMOKE_OUTPUT_BYTES = 2_048
 
 
 class _FakeSmokeAdapter(FakeBrowserAdapter):
@@ -240,9 +243,11 @@ def _patch_fake_smoke(
 async def test_browser_smoke_output_has_no_page_or_secret_payload(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     adapter = _FakeSmokeAdapter()
     _patch_fake_smoke(monkeypatch)
+    caplog.set_level(logging.DEBUG)
     sentinels = {
         "VERCEL_AI_GATEWAY": "sentinel-cookie",
         "AI_GATEWAY_API_KEY": "sentinel-header",
@@ -256,14 +261,17 @@ async def test_browser_smoke_output_has_no_page_or_secret_payload(
         adapter_factory=lambda: adapter,
     )
 
-    output = capsys.readouterr().out.casefold()
+    captured = capsys.readouterr()
+    channels = (captured.out, captured.err, caplog.text)
+    output = "".join(channels).casefold()
     assert "fixture navigation: passed" in output
     assert "form type/submit: passed" in output
-    assert "safe/approved" not in output
-    assert "authorization" not in output
-    assert "<html" not in output
-    for sentinel in sentinels.values():
-        assert sentinel not in output
+    assert len(output.encode("utf-8")) <= MAX_SMOKE_OUTPUT_BYTES
+    forbidden = (*sentinels.values(), "safe/approved", "authorization", "<html", "full html")
+    for channel in channels:
+        channel = channel.casefold()
+        for marker in forbidden:
+            assert marker not in channel
 
 
 @pytest.mark.asyncio
