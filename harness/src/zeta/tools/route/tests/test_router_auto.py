@@ -139,12 +139,13 @@ def build_browser_loop(
     *,
     router_style: str = "tool",
     router_mode: bool = True,
+    browser_enabled: bool = True,
 ) -> AgentLoop:
     store = ConversationStore(tmp_path)
     registry = ToolRegistry(
         tmp_path,
         register_builtin=False,
-        browser_enabled=True,
+        browser_enabled=browser_enabled,
         skill_catalog=SkillCatalog.empty(),
     )
     route_module.register(registry)
@@ -212,6 +213,16 @@ def test_browser_tools_join_router_catalog_without_page_elements(tmp_path: Path)
     for catalog in catalogs:
         assert {name for name in catalog if name.startswith("browser_")} == expected_names
         assert all("e1" not in str(criteria) for criteria in catalog.values())
+
+
+def test_browser_tools_stay_out_of_router_catalog_when_disabled(tmp_path: Path) -> None:
+    loop = build_browser_loop(
+        tmp_path, router_style="auto", browser_enabled=False
+    )
+
+    catalogs = [loop._auto_catalog(), route_module._catalog(loop.tool_registry)]
+    for catalog in catalogs:
+        assert {name for name in catalog if name.startswith("browser_")} == set()
 
 
 def test_browser_tools_use_distinct_sibling_boundaries(tmp_path: Path) -> None:
@@ -303,6 +314,23 @@ async def test_browser_batch_preserves_order_and_checks_each_call(
         return SafetyOutcome("deny", "layer0", reason="external_origin")
 
     monkeypatch.setattr(tier, "evaluate_browser_action", deny)
+
+    routing_checks: list[str] = []
+    identity_checks: list[str] = []
+    original_router_rejection = loop._router_rejection
+    original_browser_rejection = loop._browser_element_rejection
+
+    def count_routing_checks(tool_call: ToolCall):
+        routing_checks.append(tool_call.id)
+        return original_router_rejection(tool_call)
+
+    def count_identity_checks(tool_call: ToolCall):
+        if tool_call.name == "browser_click":
+            identity_checks.append(tool_call.id)
+        return original_browser_rejection(tool_call)
+
+    monkeypatch.setattr(loop, "_router_rejection", count_routing_checks)
+    monkeypatch.setattr(loop, "_browser_element_rejection", count_identity_checks)
     monkeypatch.setattr(
         loop_module,
         "auto_route",
@@ -343,6 +371,22 @@ async def test_browser_batch_preserves_order_and_checks_each_call(
                             },
                         },
                     ),
+                    ToolCall(
+                        "extract-1",
+                        "invoke",
+                        {
+                            "tool": "browser_extract",
+                            "args": {},
+                        },
+                    ),
+                    ToolCall(
+                        "navigate-2",
+                        "invoke",
+                        {
+                            "tool": "browser_navigate",
+                            "args": {"url": "https://external.test/account"},
+                        },
+                    ),
                 ]
             ),
             ScriptedTurn(content=[TextContent("done")]),
@@ -356,13 +400,24 @@ async def test_browser_batch_preserves_order_and_checks_each_call(
         for message in loop.store.messages()
         if message.tool_result is not None
     ]
-    assert [result.tool_call_id for result in results] == ["navigate-1", "click-1"]
+    assert [result.tool_call_id for result in results] == [
+        "navigate-1",
+        "click-1",
+        "extract-1",
+        "navigate-2",
+    ]
     first_error = results[0].structured_content.get("error")
     assert isinstance(first_error, dict)
     assert first_error["kind"] == "safety_denied"
     assert results[1].structured_content["error_kind"] == "unrouted_element"
-    assert len(safety_calls) == 1
-    assert loop.unrouted_attempts == 1
+    assert results[2].structured_content["error_kind"] == "unrouted_tool"
+    second_error = results[3].structured_content.get("error")
+    assert isinstance(second_error, dict)
+    assert second_error["kind"] == "safety_denied"
+    assert routing_checks == ["navigate-1", "click-1", "extract-1", "navigate-2"]
+    assert identity_checks == ["click-1"]
+    assert len(safety_calls) == 2
+    assert loop.unrouted_attempts == 2
 
 
 @pytest.mark.asyncio

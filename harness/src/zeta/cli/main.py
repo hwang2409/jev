@@ -246,6 +246,7 @@ def main(argv: list[str] | None = None) -> int:
             router_mode=args.router,
             router_style=args.router_style,
             jev_compaction=args.jev_compaction,
+            browser_enabled=args.browser,
             memory_injection=args.memory_injection,
         )
         try:

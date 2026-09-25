@@ -34,6 +34,54 @@ def test_serve_passes_router_mode_to_server(monkeypatch: pytest.MonkeyPatch) -> 
     assert captured["router_mode"] is False
 
 
+def _serve_browser_value(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    flag: str,
+    settings: str,
+) -> bool:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "settings.toml").write_text(settings, encoding="utf-8")
+    monkeypatch.setenv("ZETA_HOME", str(home))
+
+    from zeta.server import ZetaServer as RealZetaServer
+
+    captured: dict[str, bool] = {}
+
+    class SpyServer(RealZetaServer):
+        def __init__(self, **kwargs: object) -> None:
+            super().__init__(**kwargs)
+            captured["browser_enabled"] = self.runtime._config(
+                None, None
+            ).browser_enabled
+
+    async def run_server(_server: SpyServer) -> None:
+        return None
+
+    import zeta.server
+
+    monkeypatch.setattr(zeta.server, "ZetaServer", SpyServer)
+    monkeypatch.setattr(zeta.server, "run_server", run_server)
+
+    assert main(["--provider", "fake", flag, "serve"]) == 0
+    return captured["browser_enabled"]
+
+
+def test_serve_browser_flag_enables_tools_over_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert _serve_browser_value(monkeypatch, tmp_path, "--browser", "") is True
+
+
+def test_serve_no_browser_flag_disables_tools_over_settings(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    assert _serve_browser_value(
+        monkeypatch, tmp_path, "--no-browser", "browser_enabled = true\n"
+    ) is False
+
+
 def test_parser_accepts_router_style() -> None:
     args = build_parser().parse_args(["--router-style", "auto"])
     assert args.router_style == "auto"
