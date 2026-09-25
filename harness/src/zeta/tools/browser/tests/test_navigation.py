@@ -365,13 +365,14 @@ async def test_read_only_operations_deny_page_navigation(
         ("browser_submit", "submit", {}),
     ],
 )
-async def test_same_origin_action_navigation_runs_classification(
+async def test_action_navigation_enters_policy_classification(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     tool_name: str,
     affordance: str,
     arguments: dict[str, object],
 ) -> None:
+    destination = "https://other.test/next"
     element = _observation().elements[0]
     element = element.__class__(
         element.snapshot_id,
@@ -384,10 +385,11 @@ async def test_same_origin_action_navigation_runs_classification(
         element.landmark,
         element.disabled,
         element.visible,
+        target_url=destination,
         generation=element.generation,
     )
     first = _element_observation(element)
-    second = PageObservation(2, 2, "https://example.test/next", "Next", "Next", (element,), True, True)
+    second = PageObservation(2, 2, destination, "Next", "Next", (element,), True, True)
     adapter = FakeBrowserAdapter([first, second])
     tier = SafetyTier(cwd=tmp_path)
     registry = _registry(tmp_path, adapter, tier)
@@ -400,7 +402,10 @@ async def test_same_origin_action_navigation_runs_classification(
         return PageStateDecision(True, None, None)
 
     async def allow(_evidence: BrowserRiskEvidence) -> SafetyOutcome:
+        seen.append(_evidence)
         return SafetyOutcome("allow", "layer0")
+
+    seen: list[BrowserRiskEvidence] = []
 
     monkeypatch.setattr(jev, "choose_browser_element", choose)
     monkeypatch.setattr("zeta.tools.browser.evaluate_page_state_with_provider", page_gate)
@@ -420,29 +425,37 @@ async def test_same_origin_action_navigation_runs_classification(
     )
 
     assert result["isError"] is False
-    assert adapter.navigation_classifications == [
-        ("https://example.test/next", "https://example.test/")
-    ]
+    assert [evidence.action for evidence in seen] == [affordance, "navigate"]
+    assert seen[-1].target_url == destination
 
 
 @pytest.mark.asyncio
-async def test_same_origin_browser_navigate_runs_classification(
-    tmp_path: Path,
+async def test_browser_navigate_enters_policy_classification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = _observation()
-    destination = "https://example.test/next"
+    destination = "https://other.test/next"
     adapter = FakeBrowserAdapter(
         [first, PageObservation(2, 2, destination, "Next", "Next", (), True, True)]
     )
-    registry = _registry(tmp_path, adapter)
+    tier = SafetyTier(cwd=tmp_path)
+    registry = _registry(tmp_path, adapter, tier)
     await registry.execute(ToolCall("state", "browser_state", {}))
+    seen: list[BrowserRiskEvidence] = []
+
+    async def allow(evidence: BrowserRiskEvidence) -> SafetyOutcome:
+        seen.append(evidence)
+        return SafetyOutcome("allow", "layer0")
+
+    monkeypatch.setattr(tier, "evaluate_browser_action", allow)
 
     result = await registry.execute(
         ToolCall("navigate", "browser_navigate", {"url": destination})
     )
 
     assert result["isError"] is False
-    assert adapter.navigation_classifications == [(destination, first.url)]
+    assert [evidence.action for evidence in seen] == ["navigate", "navigate"]
+    assert all(evidence.target_url == destination for evidence in seen)
 
 
 @pytest.mark.asyncio
