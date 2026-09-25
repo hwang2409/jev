@@ -1,605 +1,240 @@
-# Jev-Navigated Browsing: Arc 3 Implementation Plan
+# Jev-navigated browsing: arc 3 gap plan
 
-Date: 2026-09-25  
-Status: implementation plan for review  
-Scope: one experimental, Playwright-backed browsing arc in `harness/`
+Date: 2026-09-25
+Status: audit-first implementation plan for review
+Scope: close the remaining gaps around the merged experimental browser surface
 
-This plan turns the merged arc-3 design into dependency-ordered, PR-sized
-lanes. The stable browser tool surface stays separate from the live element
-catalog. Jev receives bounded page state as neutral data, and every action
-passes identity, page-state, and safety checks before execution.
+The design spec remains authoritative:
+`harness/docs/superpowers/specs/2026-09-22-jev-browsing-arc-design.md`.
+The safety contract remains authoritative for shared risk decisions:
+`harness/docs/superpowers/specs/2026-09-21-jev-safety-tier-design.md`.
 
-The normal lanes use fake browser adapters and mocked Jev responses. They do
-not call a real site, the Gateway, or a Playwright browser binary. The final
-lane alone runs the gated headless smoke against a local disposable fixture.
+This is a gap plan. It does not rebuild the browser adapter, catalog, provider,
+page-state gates, safety handoff, or router surface already present on the
+branch. The audit below maps the design to current evidence. The lane ladder
+contains only partial or missing rows.
 
-## Scope
+## audit baseline
 
-In scope:
+The audit used the branch files, not the earlier plan's inventory. Current
+browser code has five direct Python files. The largest files are
+`browser/__init__.py` at 1,045 lines and `browser/adapter.py` at 949 lines.
+Both remain below `MAX_FILE_LINES=1250`. The directory remains below
+`MAX_FILES_PER_DIRECTORY=17`.
 
-- one browser session and one page per agent session;
-- `browser_navigate`, `browser_state`, `browser_click`, `browser_type`,
-  `browser_select`, `browser_extract`, and `browser_submit`;
-- bounded element catalogs, cheap local pre-filtering, and Jev element choice;
-- page-state Nouls, stale-snapshot recovery, search-result triage, and
-  injection-resistant state handling;
-- shared safety-tier reuse for risky submits, clicks, and external navigation;
-- offline evaluation against a stock large-tool baseline;
-- one explicitly enabled, headless-only live smoke lane.
+### design surface audit
 
-Out of scope:
+| design surface | status | current evidence | disposition |
+| --- | --- | --- | --- |
+| seven stable browser tools and stable schemas | implemented | `harness/src/zeta/tools/browser/__init__.py:55-70,627-710` registers `browser_navigate`, `browser_state`, `browser_click`, `browser_type`, `browser_select`, `browser_extract`, and `browser_submit`; `harness/src/zeta/tools/route/__init__.py:156` adds their static criteria | retain; lane 1 gates registration |
+| one session per agent, lazy adapter launch, close and clone handling | implemented | `harness/src/zeta/tools/browser/session.py:40-250` owns one adapter, state, refs, generation, and cleanup; `harness/src/zeta/tools/registry.py:249-258,427-440` owns lazy access and close; `registry.py:345-380` resets the session on clone | retain; test the gated path in lane 1 |
+| framework-neutral adapter seam | implemented | `harness/src/zeta/tools/browser/adapter.py:18-142` defines plain values and `BrowserAdapter`; `adapter.py:284-518` contains the Playwright implementation; `adapter.py:703-813` contains the deterministic fake | retain; do not split or re-plan these modules |
+| bounded page observations and element references | implemented | `harness/src/zeta/tools/browser/adapter.py:18-83` defines byte-bounded observations and risk facts; `adapter.py:177-282` extracts plain DOM data | retain; add only policy limits in lane 2 |
+| snapshot-local identity and generation invalidation | implemented | `harness/src/zeta/tools/browser/session.py:167-213,234-249` rejects stale or mismatched ids; `harness/src/zeta/tools/browser/catalog.py:160-219` builds and checks snapshots | retain; existing tests remain regression gates |
+| catalog roles, affordances, text bounds, and byte bounds | implemented | `harness/src/zeta/tools/browser/catalog.py:24-55,160-480` builds normalized entries and bounded payloads; `catalog.py:253-480` enforces byte fitting | retain |
+| cheap pre-filter and no-candidate behavior | implemented | `harness/src/zeta/tools/browser/catalog.py:457-637` defines `ELEMENT_PREFILTER_K=40`, `ELEMENT_CATALOG_MAX=24`, role and lexical scoring, diversity, prior-id retention, and empty results | retain |
+| Jev element Choice and least-confidence result | implemented | `harness/src/zeta/providers/jev.py:492-702` builds, parses, retries, and confidence-gates element choice; `harness/src/zeta/routing.py:7-12` names the top-1 and top-3 settings | retain |
+| six page-state Nouls and conservative recovery | implemented | `harness/src/zeta/providers/jev_browser.py:14-325` defines and parses all six gates; `harness/src/zeta/tools/browser/gates.py:25-212` applies safe directions and the recovery cap | retain |
+| shared safety-tier handoff for risky browser actions | partial | `harness/src/zeta/core/safety/_browser.py:43-83` classifies browser evidence; `harness/src/zeta/core/safety/_tier.py:86-128` evaluates it through the shared tier; `browser/__init__.py:316-339,798-838` calls the tier | add explicit origin-allowlist enforcement and budget tests in lane 2 |
+| origin allowlist and approval-gated external navigation | partial | `browser/__init__.py:745-751` only parses an origin; `adapter.py:625-636` accepts any absolute HTTP or HTTPS URL; `_browser.py:57-68` detects cross-origin evidence but has no allowlist | add one shared policy in lane 2 |
+| named browser budgets | partial | `session.py:24-25` has only navigation and action timeouts; `adapter.py:18-24` has byte caps; no page Jev call, Jev token, task action, or task wall-clock budget exists | add named settings, accounting, and fail-closed exhaustion in lane 2 |
+| default-off experimental flag | missing | `harness/src/zeta/tools/_discovery.py:14-50` imports browser and calls `register`; `browser/__init__.py:627-710` registers unconditionally; `harness/src/zeta/config/settings.py:50-68,85-129` has no browser setting; `harness/src/zeta/cli/main.py:54-100` has no browser flag | make lane 1 the registration-time gate |
+| prompt-injection boundary rules | implemented | `harness/src/zeta/providers/jev.py:492-607` names state fields and neutral criteria; `harness/tests/test_browser_injection.py:201-692` covers hostile fields, URLs, hidden names, extraction, tool results, safety, and static schemas | retain; rerun as a gate regression |
+| stable structured errors and recovery hints | implemented | `harness/src/zeta/tools/browser/__init__.py:1004-1037` maps adapter and routing failures; `harness/src/zeta/tools/_results.py:134-147` supplies recovery hints | retain; add budget and origin error kinds in lane 2 |
+| search-result extraction and triage | implemented | `adapter.py:75-92,454-482` returns bounded result records; `catalog.py:55-158` applies score, tie, floor, confidence, and source diversity; `test_tools.py:1055-1112` exercises handler results | retain |
+| headless Playwright path | partial | `adapter.py:284-324` supports headless launch; `harness/tools/browser_live_smoke.py:125-190` runs handlers, but its policy values are unset at lines 21-24 and the URL comes from an environment variable at lines 27-32 | replace the external-site smoke with the locked local fixture in lane 3 |
+| local fixture smoke site | missing | no `harness/tests/browser_fixture/` directory exists; `harness/tests/test_browser_live_smoke.py:8-16` only tests enablement and does not start a site | add the disposable localhost fixture and smoke assertions in lane 3 |
+| offline routed-versus-stock browser evaluation | missing | `harness/evals/run_evals.py` covers existing router tasks; no browser task corpus or browser-specific runner exists | add the browser eval harness in lane 4 |
 
-- tabs, uploads, user-facing downloads, arbitrary JavaScript, extensions,
-  authentication management, CAPTCHA solving, cookie export, screenshot
-  control, and a general browser API;
-- external smoke sites, personal credentials, production data, or real
-  payment and download flows;
-- a second risk policy, a second Jev transport, or page-specific tool schemas;
-- making browsing default-on while this arc remains experimental.
+### design section 9 test-family audit
 
-## Locked decisions
+| design section 9 family | status | current evidence | remaining work |
+| --- | --- | --- | --- |
+| 9.1 catalog and routing fixtures | implemented | `harness/src/zeta/tools/browser/tests/test_catalog.py:125-387` covers bounds, hidden entries, generations, and large inputs; `test_prefilter.py:113-239` covers 100 and 500 element pages, diversity, and empty candidates; `harness/src/zeta/tools/route/tests/test_router_auto.py:164-403` covers static schemas and unrouted elements | keep as regression coverage; add flag-off schema assertions in lane 1 |
+| 9.2 mocked Jev provider | implemented | `harness/tests/test_jev_provider.py:451-960` covers neutral Choice, page-state, search scoring, malformed responses, retries, missing keys, bounds, usage, and confidence; `harness/tests/test_safety.py:63-316` covers safety decisions and failure polarity | add named budget accounting and allowlist cases in lane 2 |
+| 9.3 fake browser adapter | implemented | `harness/src/zeta/tools/browser/tests/test_adapter.py:64-465` covers action recording, bounds, failures, launch, cleanup, and contract parity; `test_session.py:46-78` covers launch failure and cancellation cleanup | keep as regression coverage |
+| 9.4 tool and loop tests | implemented | `harness/src/zeta/tools/browser/tests/test_tools.py:803-1112` covers schemas, lazy use, stale identity, cleanup, extraction, triage, and safety; `router_auto.py:238-403` covers loop routing and fail-open identity rejection | add default-off and flag-on cases in lane 1 |
+| 9.5 gated live smoke | partial | `harness/tools/browser_live_smoke.py:42-79` has policy checks and a budget helper; `test_browser_live_smoke.py:8-16` checks only enablement | add local fixture, complete flow, stale recovery, low-confidence response, external approval, cleanup, and no-secret checks in lane 3 |
 
-Each decision is locked with the stated veto window: **locked (veto window:
-this PR review)**.
+## locked decisions
 
-1. **Feature flag:** Browsing is flag-gated, not default-on. The named setting
-   is `browser_enabled`, with a matching `--browser` flag. The default is
-   `false` until the arc leaves the experimental phase. **locked (veto window: this PR review).**
-2. **Smoke site:** The smoke uses a disposable fixture site served on localhost
-   from test assets. It has deterministic navigation, search or filtering, a
-   harmless form submit, one deliberate external link, and hostile-text
-   fixtures. It uses no external site and no personal credentials. **locked (veto window: this PR review).**
-3. **Run mode:** Headless is the only supported run mode. A headed run is
-   debug-only and manual. The final lane does not make headed mode a CI path.
-   **locked (veto window: this PR review).**
-4. **Budgets:** Use named settings with these proposed defaults:
+These decisions are closed for this plan. Each is locked for this PR review.
 
-   | setting | default | rationale |
+1. Browsing uses one named `browser_enabled` setting and matching
+   `--browser`/`--no-browser` flags. The default is `false`. Registration is
+   gated before tool schemas, adapter factories, or sessions are exposed.
+2. The live smoke uses a disposable fixture served on localhost. It includes
+   deterministic navigation, search or filtering, a harmless form submit, a
+   deliberate external link, stale state, low-confidence controls, and
+   hostile text. It uses no external site or personal credential.
+3. The supported smoke mode is headless. A headed run is a manual debug aid,
+   not a CI path or acceptance mode.
+4. The named budgets have these defaults:
+
+   | setting | default | exhaustion behavior |
    | --- | ---: | --- |
-   | `browser_page_jev_call_budget` | `8` calls | Covers state, selection, gates, and two bounded recoveries on one page. |
-   | `browser_page_jev_token_budget` | `12,000` tokens | Bounds catalog and gate input while allowing 24 filtered entries across the page budget. |
-   | `browser_task_action_budget` | `20` actions | Covers navigation, search or filter, form entry, submit, and recovery without allowing loops. |
-   | `browser_task_wall_clock_seconds` | `120` seconds | Gives a headless local task bounded startup and action time without an open-ended wait. |
+   | `browser_page_jev_call_budget` | 8 calls | stop with `browser_budget_exhausted` |
+   | `browser_page_jev_token_budget` | 12,000 tokens | stop with `browser_budget_exhausted` |
+   | `browser_task_action_budget` | 20 actions | stop with `browser_budget_exhausted` |
+   | `browser_task_wall_clock_seconds` | 120 seconds | stop with `browser_budget_exhausted` |
 
-   Exhaustion stops the task with a structured teaching error. The handler
-   fails closed and never continues silently. **locked (veto window: this PR review).**
-5. **Origin policy:** Use an allowlist. The smoke allowlist contains only the
-   ephemeral localhost fixture origin. Any external-origin navigation requires
-   approval in this arc, even when the user explicitly requested it. **locked (veto window: this PR review).**
+   The handler fails closed and never continues silently after exhaustion.
+5. Origin handling uses an allowlist. The smoke allowlist contains only its
+   ephemeral localhost origin. External-origin navigation always reaches the
+   shared safety approval policy, even when the user requested it. No page
+   label can grant approval.
 
-## Package layout and module limits
+## gap lane ladder
 
-The module-limit test is policy, not a lane target. Every lane must keep
-`MAX_FILE_LINES=1250` and `MAX_FILES_PER_DIRECTORY=17` green. The `tui`
-directory is already at its 17-file cap, so no lane adds a file there.
+The current browser surface is default-on. Therefore lane 1 is the only first
+lane. Every later lane depends on lane 1 and keeps the default-off gate. No
+lane may widen the exposed surface before its gating and safety dependency.
 
-Reserve the direct `harness/src/zeta/tools/browser/` layout before lane 1. The
-planned final direct-file count is 11, below the cap:
-
-```text
-browser/
-  __init__.py       public registration and stable exports
-  adapter.py        BrowserAdapter protocol and plain observation types
-  fake.py           deterministic FakeBrowserAdapter
-  playwright.py     optional Playwright implementation only
-  catalog.py        snapshot catalog builder and bounded serialization
-  prefilter.py      deterministic candidate filtering
-  session.py        lazy session, snapshot identity, and cleanup
-  gates.py          page-state gate decisions and recovery policy
-  triage.py         search-result records, scoring, and tie policy
-  handlers.py       browser tool handlers and structured errors
-  schemas.py        stable tool schemas and shared payload builders
-```
-
-Tests stay under `browser/tests/` and are split by responsibility. The target
-set is `test_adapter.py`, `test_session.py`, `test_catalog.py`,
-`test_prefilter.py`, `test_provider.py`, `test_tools.py`, `test_gates.py`, and
-`test_triage.py`. Injection probes stay in the existing top-level
-`harness/tests/test_browser_injection.py` because they cross provider,
-handler, and safety boundaries.
-
-If an implementation would exceed 1,250 lines, split the responsibility into
-one of these reserved files before adding more behavior. Do not raise either
-limit. Each lane's exit gate includes `harness/tests/test_module_limits.py`.
-
-## Shared contracts
-
-These contracts apply to every lane:
-
-- Browser framework objects stay behind `BrowserAdapter`. Structured results
-  contain plain dataclasses or dictionaries only.
-- A catalog entry carries adapter-observed role, affordance, destination,
-  form context, and risk facts. Visible page text is data, never policy.
-- `snapshot_id` and a generation counter identify the page state. Navigation,
-  reload, or frame replacement invalidates prior element ids.
-- Stale, detached, ambiguous, timeout, navigation-race, provider, and safety
-  errors have stable kinds, bounded text, and machine-readable hints.
-- Identity and safety errors fail closed. A routing error can request fresh
-  state, but it cannot guess an element or silently retry a risky action.
-- The browser surface remains static. The live element catalog travels in
-  structured state for Jev and does not become a changing provider tool list.
-- Normal lanes run offline with fake adapters and mocked Jev transport.
-
-## Dependency-ordered lane ladder
-
-Every lane is one focused PR. A lane may add a small follow-up test to an
-earlier family when integration exposes a missing contract, but it may not
-skip its stated non-goals or pull live dependencies into normal tests.
-
-### Lane 1: adapter seam and fake adapter
+### lane 1: gate the existing browser surface
 
 Depends on: none.
 
 Scope:
 
-- Define the narrow `BrowserAdapter` protocol for launch, navigation,
-  observation, click, type, select, extraction, search extraction, and close.
-- Define plain observation values, snapshot limits, element references, action
-  results, extraction results, and stable adapter error types.
-- Add `FakeBrowserAdapter` with scripted observations and controls for detach,
-  timeout, navigation race, launch failure, and cleanup failure.
-- Keep Playwright imports and locator conversion in `playwright.py`, behind the
-  protocol. Do not expose page objects or locators in results.
+- Add `browser_enabled` to the validated settings and resolved runtime config.
+- Add `--browser` and `--no-browser` with the same precedence rules as the
+  other Boolean settings. Keep the built-in default false.
+- Pass the resolved value into the registry or discovery context.
+- Make `browser.register()` return without registering tools, criteria, an
+  adapter factory, or a session when the flag is off.
+- Keep flag-on registration byte-compatible with the existing seven schemas.
+- Allow browser unit tests to construct an explicitly enabled registry.
 
 Files touched:
 
-- `harness/src/zeta/tools/browser/adapter.py`
-- `harness/src/zeta/tools/browser/fake.py`
-- `harness/src/zeta/tools/browser/playwright.py` only for the adapter seam
-- `harness/src/zeta/tools/browser/tests/test_adapter.py`
-- `harness/pyproject.toml` only if the optional browser extra needs the seam
-
-Exit criteria:
-
-- Fake and real adapters share the same action contract.
-- The fake can produce every offline failure condition without network or a
-  Playwright binary.
-- Adapter values have bounded fields and no browser framework objects.
-- `test_adapter.py` and `test_module_limits.py::test_module_limits` pass.
-
-Targeted tests:
-
-- `harness/src/zeta/tools/browser/tests/test_adapter.py`
-- adapter construction, action recording, bounds, cleanup, timeout, and race
-  cases from the design's fake-adapter family.
-
-Non-goals:
-
-- Tool registration, Jev calls, page-state gates, safety policy, and live
-  smoke execution.
-- A complete DOM catalog or a real browser task.
-
-### Lane 2: session lifecycle
-
-Depends on: lane 1.
-
-Scope:
-
-- Add lazy `BrowserSession` ownership for one adapter, context, page, and
-  current state.
-- Start on first browser use and close from registry or loop cleanup.
-- Make launch single-flight and cleanup best effort without hiding the original
-  failure.
-- Track snapshot ids, generation changes, recent actions, action and
-  navigation timeouts, and the current element-reference map.
-- Reject use after close and reject an element from an old snapshot.
-
-Files touched:
-
-- `harness/src/zeta/tools/browser/session.py`
+- `harness/src/zeta/config/settings.py`
+- `harness/src/zeta/cli/main.py`
+- `harness/src/zeta/runtime/composition.py`
+- `harness/src/zeta/runtime/tool_setup.py` if that path builds a separate registry
 - `harness/src/zeta/tools/registry.py`
-- `harness/src/zeta/tools/browser/tests/test_session.py`
-- `harness/tests/test_session_lifecycle.py`
-- `harness/tests/test_session_shutdown.py`
-
-Exit criteria:
-
-- One registry owns one browser session for one agent session.
-- Start and close are idempotent under success, cancellation, and launch
-  failure.
-- Snapshot and generation checks prevent stale ids from reaching the adapter.
-- The two session integration tests and the module-limit test pass.
-
-Targeted tests:
-
-- `browser/tests/test_session.py`
-- `harness/tests/test_session_lifecycle.py`
-- `harness/tests/test_session_shutdown.py`
-- stale-id and navigation-race cases from the fake-adapter family.
-
-Non-goals:
-
-- Candidate filtering, Jev selection, risk scoring, or loop routing.
-- Multiple pages, tabs, shared contexts, or authentication state.
-
-### Lane 3: catalog builder and cheap pre-filter
-
-Depends on: lane 2.
-
-Scope:
-
-- Build bounded entries for links, buttons, textboxes, comboboxes, checkboxes,
-  radios, tabs, headings, articles, and submit controls.
-- Normalize accessible names and text. Preserve landmark context and adapter
-  facts. Exclude unsupported, hidden, disabled, duplicate, and un-actionable
-  entries as specified.
-- Add deterministic lexical and role filtering using the goal and action.
-- Enforce `ELEMENT_PREFILTER_K=40` and `ELEMENT_CATALOG_MAX=24` as named
-  settings, byte caps, diversity quotas, prior-goal retention, and explicit
-  `no_candidate` results.
-- Cover 100, 500, and 2,000 actionable-element fixtures.
-
-Files touched:
-
-- `harness/src/zeta/tools/browser/catalog.py`
-- `harness/src/zeta/tools/browser/prefilter.py`
-- `harness/src/zeta/routing.py` for named browser catalog settings
-- `harness/src/zeta/tools/browser/tests/test_catalog.py`
-- `harness/src/zeta/tools/browser/tests/test_prefilter.py`
-
-Exit criteria:
-
-- Catalog output is deterministic, bounded, and free of selectors, XPath,
-  hidden HTML, cookies, scripts, or policy claims.
-- Snapshot ids are monotonic. Generation changes invalidate prior ids.
-- Prefilter output is capped, role-aware, diverse on ties, and never calls Jev
-  when it has no candidates.
-- Large-page tests stay within time and byte bounds.
-- Catalog, pre-filter, and module-limit tests pass.
-
-Targeted tests:
-
-- `browser/tests/test_catalog.py`
-- `browser/tests/test_prefilter.py`
-- catalog and routing fixture family from design section 9.1.
-
-Non-goals:
-
-- Provider request construction, page-state Nouls, search-result ranking, or
-  external-origin policy.
-
-### Lane 4: provider element-choice call shape
-
-Depends on: lane 3.
-
-Scope:
-
-- Add the browser element Choice call to `providers/jev.py`.
-- Send named neutral state fields: goal, current origin and path, recent
-  actions, title, bounded page summary, and filtered catalog.
-- Add `goal_element_present`, `page_loaded_and_stable`, and
-  `action_is_the_next_step` Nouls to the same call.
-- Parse selected id, affordance, probabilities, Nouls, usage, and confidence.
-- Use the candidate `0.8` top-1 threshold and expose up to three candidates
-  below it. Keep this threshold separate from page-state, safety, and triage
-  thresholds.
-- Preserve provider retry, malformed-response, missing-key, and usage rules.
-
-Files touched:
-
-- `harness/src/zeta/providers/jev.py`
-- `harness/src/zeta/protocol/jev.py` or the existing browser result module if
-  the result type needs a dedicated seam
-- `harness/tests/test_jev_provider.py`
-- `harness/src/zeta/tools/browser/tests/test_provider.py`
-
-Exit criteria:
-
-- The request has stable Choice criteria and separate structured Noul criteria.
-- State fields are quoted as data and page text cannot alter instructions,
-  policy, thresholds, or tool schemas.
-- Confidence uses the existing least-confident judgment convention.
-- Low confidence exposes candidates and performs no action.
-- Provider tests and module limits pass without network access.
-
-Targeted tests:
-
-- mocked Jev request-shape, response parsing, usage, retry, malformed response,
-  missing-key, confidence, and threshold tests.
-- Choice, page-state, risk, and relevance fixture construction tests that are
-  owned by later lanes and remain offline.
-
-Non-goals:
-
-- Calling the handler, executing browser actions, wiring the registry, or
-  implementing the shared safety-tier decision.
-
-### Lane 5: tools, registry, and loop integration
-
-Depends on: lanes 2, 3, and 4.
-
-Scope:
-
-- Register the seven stable browser tools with stable schemas.
-- Wire lazy session construction, catalog publication, and cleanup through
-  `ToolRegistry` and the loop.
-- Validate the selected id, snapshot, role, and affordance against the exact
-  current catalog before any adapter call.
-- Add static browser tool routing to the existing router-v2 invoke surface.
-- Store current catalog and snapshot context in the router context. Reject an
-  unrouted browser element with a structured teaching error.
-- Return bounded state, extraction, success, top-3, and recovery results.
-
-Files touched:
-
 - `harness/src/zeta/tools/browser/__init__.py`
-- `harness/src/zeta/tools/browser/handlers.py`
-- `harness/src/zeta/tools/browser/schemas.py`
-- `harness/src/zeta/tools/registry.py`
-- `harness/src/zeta/runtime/loop/__init__.py`
-- `harness/src/zeta/runtime/loop/routing.py`
-- `harness/src/zeta/tools/route/__init__.py`
+- `harness/src/zeta/tools/route/__init__.py` only if disabled discovery needs a guard
+- `harness/tests/test_settings.py`
+- `harness/tests/test_cli.py`
+- `harness/tests/test_tool_discovery.py`
 - `harness/src/zeta/tools/browser/tests/test_tools.py`
-- `harness/tests/test_tools_integration.py`
-- `harness/tests/test_router_auto_integration.py`
+- `harness/src/zeta/tools/route/tests/test_router_auto.py`
 
 Exit criteria:
 
-- The seven tool names and schemas remain stable across page changes.
-- `browser_state` is the recovery tool after navigation, changing actions,
-  stale ids, and unclear page progress.
-- Stale, mismatched, detached, and unrouted element identities never execute.
-- Session close is wired through the normal registry and loop cleanup paths.
-- Tool, loop, route, and module-limit tests pass offline.
+- A default registry exposes no `browser_*` tools, schemas, or browser adapter.
+- `--browser` exposes exactly the existing seven tools and stable schemas.
+- `--no-browser` overrides settings and keeps the surface hidden.
+- Flag-off discovery does not construct a browser session or Playwright object.
+- Existing browser tests set the flag explicitly and retain their behavior.
+- The module-limit test remains green.
 
-Targeted tests:
+Targeted test set:
 
-- stable schema, lazy start, state recovery, extraction bounds, stale identity,
-  top-3 expansion, unrouted rejection, batching, and close tests.
-- design section 9.4 tool and loop family.
+- settings and CLI precedence tests;
+- discovery default-off and explicit-enable tests;
+- browser schema and lazy-session tests;
+- router catalog tests for hidden and enabled browser tools;
+- `harness/tests/test_module_limits.py::test_module_limits`.
 
 Non-goals:
 
-- Page-state Noul decisions, safety approval, search relevance acceptance,
-  injection corpus expansion, live smoke, or an external site.
+- Do not change browser handlers, catalog behavior, provider criteria, safety
+  scoring, budgets, origin policy, or live smoke behavior.
+- Do not rename any browser tool or alter its schema.
 
-### Lane 6: page-state Noul gates
+### lane 2: add named budgets and origin policy
 
-Depends on: lanes 4 and 5.
+Depends on: lane 1 and the existing shared safety tier.
 
 Scope:
 
-- Implement the six gates: `page_loaded_and_stable`, `goal_element_present`,
-  `action_is_the_next_step`, `action_succeeded`, `dead_end`, and
-  `needs_different_approach`.
-- Combine deterministic adapter evidence with bounded Jev judgments.
-- Block on negative load or goal presence. Treat uncertain action success as
-  unknown and request a fresh state without claiming reversal.
-- Bound recovery attempts and return stable teaching errors at the cap.
-- Keep provider failure polarity conservative for each active gate.
+- Add the four locked browser budgets to settings, resolved config, the
+  registry, and the browser session context.
+- Count every browser page Jev call and provider-reported input and output
+  token. Bound the task action count and wall clock with a monotonic clock.
+- Apply the budgets to element choice, page-state gates, search triage, and
+  recovery. Preserve existing navigation and action timeout settings.
+- Return one stable `browser_budget_exhausted` teaching error. Do not retry a
+  risky action after exhaustion.
+- Add one origin policy that normalizes scheme, host, and effective port.
+  Permit only configured origins without external approval. Classify every
+  cross-origin target through the shared safety tier. Deny or escalate an
+  origin that is not allowlisted; never let a page label change the result.
+- Keep the policy in the existing browser safety path. Do not create a second
+  browser risk policy.
 
 Files touched:
 
-- `harness/src/zeta/tools/browser/gates.py`
-- `harness/src/zeta/providers/jev_browser.py`
-- `harness/src/zeta/providers/jev.py` only for shared result plumbing
-- `harness/src/zeta/tools/browser/handlers.py`
+- `harness/src/zeta/config/settings.py`
+- `harness/src/zeta/cli/main.py` only for budget overrides if required by the
+  settings contract
+- `harness/src/zeta/runtime/composition.py`
+- `harness/src/zeta/tools/registry.py`
+- `harness/src/zeta/tools/browser/session.py`
+- `harness/src/zeta/tools/browser/__init__.py`
+- `harness/src/zeta/core/safety/_browser.py`
+- `harness/src/zeta/core/safety/_tier.py` only for shared origin outcome wiring
+- `harness/src/zeta/tools/_results.py`
+- `harness/tests/test_settings.py`
+- `harness/tests/test_safety.py`
 - `harness/src/zeta/tools/browser/tests/test_gates.py`
 - `harness/src/zeta/tools/browser/tests/test_tools.py`
-
-Exit criteria:
-
-- Each gate has a named criterion, threshold, safe direction, and structured
-  failure result.
-- Negative load and goal-presence judgments block action execution.
-- Uncertain post-action success requests state and never reports false success.
-- Provider errors use the gate's safe direction and never bypass identity or
-  safety checks.
-- Gate, handler, provider, and module-limit tests pass offline.
-
-Targeted tests:
-
-- all page-state Noul tests from design section 9.2 and the full gate family in
-  `browser/tests/test_gates.py`.
-- recovery-cap and changed-versus-unchanged-state cases.
-
-Non-goals:
-
-- Risk classification, external navigation approval, search-result scoring,
-  or live browser startup.
-
-### Lane 7: shared safety-tier wiring
-
-Depends on: lane 5. It may use lane 6 gate results but does not redefine them.
-
-Scope:
-
-- Reuse the safety-tier shape from
-  `2026-09-21-jev-safety-tier-design.md` for risky browser actions.
-- Classify submits and risky clicks from adapter facts: role, text, current
-  origin, destination, form action origin, payment or auth language, download,
-  and durable-state change.
-- Require the gate before `browser_submit` and before classifier-marked risky
-  clicks. Classify external-origin navigation as risky.
-- Keep layer 0 deterministic. Send only analyzable actions to Jev safety
-  scoring. Fail closed on errors, missing keys, malformed responses, and low
-  confidence: escalate in interactive mode and deny with a teaching error in
-  headless mode.
-- Add the `browser_enabled` flag and named budget settings without enabling
-  browsing by default.
-
-Files touched:
-
-- `harness/src/zeta/core/safety/_browser.py`
-- `harness/src/zeta/core/safety/_tier.py`
-- `harness/src/zeta/core/safety/_types.py`
-- `harness/src/zeta/core/safety/__init__.py`
-- `harness/src/zeta/tools/browser/handlers.py`
-- `harness/src/zeta/providers/jev.py`
-- CLI and settings modules that own `browser_enabled` and budget values
-- `harness/tests/test_safety.py`
-- `harness/tests/test_safety_eval.py`
-- `harness/src/zeta/tools/browser/tests/test_tools.py`
-
-Exit criteria:
-
-- Browser actions use the shared safety policy and no parallel browser policy.
-- Page labels such as `safe` never bypass layer 0 or the safety tier.
-- External-origin navigation requires approval, including explicit user
-  requests.
-- Budget exhaustion stops with a stable teaching error and no silent retry.
-- Safety decision, fail-closed, headless, interactive, flag-off, and module
-  limit tests pass offline.
-
-Targeted tests:
-
-- risk-class matrix, score and confidence matrix, approval handoff, denial,
-  missing-key, malformed-response, and flag-off byte-identity tests.
-- shared safety-tier tests from section 9.2 and tool handoff tests.
-
-Non-goals:
-
-- Changing shell safety policy, adding new safety levels, approving external
-  origins, or making the browser flag default-on.
-
-### Lane 8: search-result triage
-
-Depends on: lanes 3 through 6.
-
-Scope:
-
-- Extract bounded search records with result id, title, snippet, displayed URL,
-  source section, and position.
-- Add Jev Score relevance ranking over records as neutral data.
-- Apply separate relevance threshold, tie margin, relevance floor, call
-  confidence, top-3 exposure, and source-diversity settings.
-- Use relevance only as a pre-filter feature. Never auto-click from score alone.
-- Send an external result through the lane-7 safety policy.
-
-Files touched:
-
-- `harness/src/zeta/tools/browser/triage.py`
-- `harness/src/zeta/tools/browser/catalog.py` only for shared result records
-- `harness/src/zeta/providers/jev.py`
-- `harness/src/zeta/tools/browser/handlers.py`
-- `harness/src/zeta/tools/browser/tests/test_triage.py`
-- `harness/src/zeta/tools/browser/tests/test_tools.py`
-
-Exit criteria:
-
-- Clear winners are accepted only above the relevance threshold and tie margin.
-- Close ties, low confidence, and below-floor results expose candidates or
-  request a narrower goal.
-- Equal scores preserve source diversity.
-- The handler never treats page result text as an instruction.
-- Triage, handler, safety handoff, and module-limit tests pass offline.
-
-Targeted tests:
-
-- clear winner, tie, low score, sponsored result, pagination, source diversity,
-  threshold boundary, and external-result tests from section 9.1 and 9.2.
-
-Non-goals:
-
-- General search-provider integration, external-origin approval changes,
-  arbitrary result scraping, or live search traffic.
-
-### Lane 9: injection-probe suite
-
-Depends on: lanes 5 through 8.
-
-Scope:
-
-- Add paired benign and hostile fixtures at the real boundaries.
-- Cover buttons, links, snippets, input values, hidden accessible names, URLs,
-  search results, extraction output, and tool-result carryover.
-- Assert hostile text remains named state data and never changes criteria,
-  policy, origin allowlists, thresholds, tool schemas, or approval behavior.
-- Assert actual adapter role, destination, form facts, and risk facts win over
-  page claims such as `safe`, `approved`, `urgent`, or instruction text.
-- Keep fail-closed identity, provider, and safety behavior mutation-proven.
-
-Files touched:
-
 - `harness/tests/test_browser_injection.py`
-- `harness/src/zeta/tools/browser/handlers.py`
-- `harness/src/zeta/tools/browser/catalog.py`
-- `harness/src/zeta/providers/jev.py`
-- `harness/src/zeta/core/safety/_browser.py`
-- `harness/src/zeta/tools/browser/tests/test_tools.py`
 
 Exit criteria:
 
-- Every injection probe fails if page content is promoted to instruction data.
-- Hostile content cannot create tools, change origins, grant approval, or
-  select an element outside the current catalog.
-- Extracted text stays bounded and inert on the next provider turn.
-- The full injection suite, targeted browser tests, and module limits pass.
+- All four names and defaults are visible in the resolved browser context.
+- Call, token, action, and wall-clock exhaustion stop the task with the same
+  structured error and safe recovery hint.
+- Provider usage is charged once, including retries, with no negative or
+  unbounded counter.
+- The localhost fixture origin can pass the allowlist.
+- An external target cannot auto-proceed, including after an explicit user
+  request. It reaches the existing approval or headless denial path.
+- Hostile page text cannot add an origin, raise a budget, or change a
+  threshold.
+- Existing shell safety behavior remains unchanged.
+- The module-limit test remains green.
 
-Targeted tests:
+Targeted test set:
 
-- all probes in `harness/tests/test_browser_injection.py`.
-- injection cases from design section 9.1 through 9.4, including transport
-  capture and message-assembly boundaries.
-
-Non-goals:
-
-- Claiming perfect model resistance, adding a model-based security scanner, or
-  changing the shared shell safety policy.
-
-### Lane 10: offline evaluation harness
-
-Depends on: lanes 3 through 9.
-
-Scope:
-
-- Add an offline browser task corpus and runner that compares the stable routed
-  arm with an equivalent stock large-tool baseline.
-- Use the same fake adapter, page fixtures, task prompts, timeouts, and safety
-  policy in both arms.
-- Cover catalog sizes 10, 40, 120, 500, and 2,000; static, moderate churn,
-  and full churn; clear targets, repeated labels, search triage, and forms.
-- Report top-1 accuracy, top-3 coverage, page-state gate accuracy, task
-  success, risky false approvals, cost and tokens per step, provider turns,
-  stale recovery, retries, and time per successful step.
-- Report pre-filter recall and separate routing misses from adapter or page
-  failures. Record threshold versions and the expected small-catalog outcome.
-
-Files touched:
-
-- `harness/evals/browser_tasks.jsonl`
-- `harness/evals/browser_eval.py`
-- `harness/evals/RESULTS.md` only for offline baseline results
-- `harness/tests/test_browser_evals.py`
-- `harness/tests/test_evals.py` only for shared runner plumbing
-
-Exit criteria:
-
-- The eval runs without network, a Gateway key, or a Playwright binary.
-- Routed and stock arms use equivalent fixtures and policy.
-- Reports include all primary metrics and confidence calibration by primitive.
-- The report distinguishes a pre-filter miss from a Jev selection miss.
-- Eval tests, targeted browser tests, and module limits pass.
-
-Targeted tests:
-
-- offline task loading, fixture generation, metric calculation, cost accounting,
-  safety parity, catalog-size matrix, churn matrix, and report schema tests.
-- design section 10's queued big-catalog crossover matrix.
+- settings defaults and CLI precedence;
+- browser call and token accounting, action cap, and wall-clock cap;
+- origin normalization, localhost allowlist, external approval, and headless
+  denial;
+- missing-key, malformed, and low-confidence shared safety failures;
+- injection probes for hostile URLs, labels, and extracted text;
+- gate recovery at and below the budget cap;
+- `harness/tests/test_module_limits.py::test_module_limits`.
 
 Non-goals:
 
-- Live Gateway calls, threshold auto-tuning, production traffic, or declaring
-  a routing win from token reduction alone.
+- Do not add a browser-specific safety scorer or new safety tier.
+- Do not enable browsing by default.
+- Do not add a live site, Playwright smoke fixture, or browser evaluation
+  corpus.
 
-### Lane 11: gated live smoke
+### lane 3: replace the external smoke with a localhost fixture
 
-Depends on: lanes 1 through 10.
+Depends on: lanes 1 and 2.
 
 Scope:
 
-- Serve a disposable local fixture from test assets on an ephemeral localhost
-  port. Include deterministic navigation, search or filter, harmless submit,
-  deliberate external link, hostile text, stale state, and low-confidence
-  controls.
-- Run only when the explicit smoke gate is set. Require network access, a
-  Playwright browser binary, and a Vercel AI Gateway key.
-- Run headless only. Keep headed mode as a manual debug option outside the
-  supported smoke contract.
-- Verify navigate -> state -> select/type -> submit, stale-id recovery,
-  low-confidence top-3 exposure, and risky external or submit approval.
-- Enforce the localhost allowlist, per-page Jev call and token budgets, task
-  action cap, wall-clock budget, cleanup, and no-secret logging.
+- Add a disposable fixture server under `harness/tests/browser_fixture/`.
+- Serve deterministic pages with navigation, search or filtering, a harmless
+  form, an external link, hostile page text, a stale-state transition, and a
+  low-confidence control.
+- Start the server on an ephemeral localhost port and pass only that origin
+  to the browser origin policy.
+- Update `harness/tools/browser_live_smoke.py` to require the explicit smoke
+  gate, enable the browser flag, use headless Playwright, and use the named
+  budgets. Remove the unset external-site policy path.
+- Verify navigate, state, type or select, submit, stale-id recovery,
+  low-confidence top-three exposure, external approval or denial, cleanup,
+  and bounded no-secret logging.
+- Keep a headed option only for manual debugging. It is not a supported smoke
+  acceptance path.
 
 Files touched:
 
@@ -608,84 +243,113 @@ Files touched:
 - `harness/tests/browser_fixture/assets/*`
 - `harness/tools/browser_live_smoke.py`
 - `harness/tests/test_browser_live_smoke.py`
-- `harness/pyproject.toml` and `harness/uv.lock` for the optional Playwright
-  extra and pinned browser test support
+- `harness/pyproject.toml` and `harness/uv.lock` only if the browser extra
+  needs a lockfile update
 
 Exit criteria:
 
-- The smoke refuses to run without its explicit flag and complete policy
+- The smoke refuses to run without its explicit gate and required provider
   configuration.
-- The only allowed smoke origin is the ephemeral localhost fixture origin.
-- External-origin navigation reaches approval and cannot auto-proceed merely
-  because the user asked for it.
-- Budget exhaustion returns a structured teaching error and stops the task.
-- Headless smoke passes with cleanup. No personal credentials, production data,
-  real downloads, or secrets appear in logs.
-- The smoke test and module-limit test pass. Headed mode is not a CI claim.
+- The smoke uses only the ephemeral localhost origin in its allowlist.
+- The headless flow proves the complete form path and cleans up the server,
+  browser context, and registry.
+- External navigation reaches shared safety and cannot proceed from a user
+  request alone.
+- Stale and low-confidence paths return their stable structured outcomes.
+- Logs exclude passwords, cookies, authorization headers, full HTML, and
+  unbounded extraction.
+- No normal unit test needs a network connection, provider key, or browser
+  binary.
+- The module-limit test remains green.
 
-Targeted tests:
+Targeted test set:
 
-- gated live smoke only; all normal lane tests remain offline.
-- fixture navigation, filter, harmless submit, external link, hostile text,
-  stale snapshot, top-3, safety approval, budget, and cleanup checks.
+- fixture server lifecycle and deterministic route tests;
+- smoke disabled, missing-config, wrong-origin, headless-flow, stale-state,
+  low-confidence, external-approval, cleanup, and log-bound tests;
+- existing browser adapter and safety tests;
+- `harness/tests/test_module_limits.py::test_module_limits`.
 
 Non-goals:
 
-- External websites, headed support, auth, payments, real downloads, or a
-  general browser compatibility matrix.
+- Do not use an external website, personal credential, payment account,
+  production data, real download, or headed CI run.
+- Do not add tabs, uploads, arbitrary JavaScript, authentication management,
+  CAPTCHA handling, cookie export, or screenshot control.
 
-## Test-family ownership map
+### lane 4: add the offline browser evaluation harness
 
-Every family from the merged design's section 9 has an owning lane:
+Depends on: lanes 1 and 2. It may land before lane 3, but the live smoke does
+not prove the evaluation metrics.
 
-| design section 9 family | owning lane | evidence |
-| --- | --- | --- |
-| catalog and routing fixtures | lane 3 | bounded catalogs, caps, roles, ids, diversity, and injection-neutral filtering |
-| mocked Jev provider | lane 4, with gate additions in lane 6 | request shape, criteria, parsing, usage, retries, malformed responses, keys, and per-primitive thresholds |
-| fake browser adapter | lane 1 | action recording, scripted observations, detach, timeout, race, and cleanup |
-| tool and loop tests | lane 5, with safety and gate cases in lanes 6-8 | schemas, ownership, recovery, truncation, static routing, top-3, batch behavior, and unrouted rejection |
-| gated live smoke | lane 11 | local fixture, headless end-to-end flow, stale recovery, top-3, approval, budgets, and cleanup |
+Scope:
 
-The injection-probe suite in lane 9 is an additional cross-boundary family
-required by section 7 and is included in the lane map even though it has no
-separate numbered subsection in section 9.
+- Add a browser task corpus and offline runner using the existing fake adapter
+  and mocked Jev transport.
+- Compare the stable routed arm with an equivalent stock large-tool arm using
+  the same pages, prompts, timeouts, budgets, and safety policy.
+- Cover catalog sizes 10, 40, 120, 500, and 2,000; static, moderate churn,
+  and full churn; clear targets, repeated labels, search triage, and forms.
+- Report top-1, top-3, page-state accuracy, task success, risky false
+  approvals, Jev cost and tokens per step, provider turns, stale recovery,
+  retries, and time per successful step.
+- Separate pre-filter misses, Jev selection misses, adapter failures, and
+  page failures. Record threshold versions and confidence by primitive.
 
-## Failure polarity and recovery rules
+Files touched:
 
-The plan uses one polarity for safety and identity:
+- `harness/evals/browser_tasks.jsonl`
+- `harness/evals/browser_eval.py`
+- `harness/evals/RESULTS.md` only for committed offline baseline results
+- `harness/tests/test_browser_evals.py`
+- `harness/tests/test_evals.py` only for shared runner plumbing
 
-- stale id: return `stale_snapshot`; take no action;
-- detached or ambiguous locator: return `element_unavailable`; take no action;
-- navigation race: return `navigation_race`; observe before deciding;
-- adapter timeout: return `browser_timeout`; allow one bounded observation;
-- provider timeout or malformed result: return a routing error; do not guess;
-- page-load failure: return `page_load_failed`; do not infer success;
-- safety error or low confidence: escalate or deny per shared tier; never
-  auto-retry the same risky action;
-- extraction truncation: return success with `truncated=true` and request a
-  narrower target when needed;
-- any budget exhaustion: stop with a structured teaching error.
+Exit criteria:
 
-The router may use its existing fail-open behavior for general tool discovery
-when that contract requires a usable session. Browser element actions never
-fail open into an arbitrary element. Safety and identity always fail closed.
+- The runner uses no network, provider key, or Playwright binary.
+- Routed and stock arms use equivalent fixtures and safety policy.
+- The report contains all primary metrics and failure categories.
+- The large-catalog crossover matrix is present.
+- The runner cannot report a routing win from token reduction alone.
+- Eval, browser, safety, injection, and module-limit tests pass.
 
-## Self-review
+Targeted test set:
 
-- The plan has eleven dependency-ordered, PR-sized lanes.
-- Each lane names scope, files, exit criteria, targeted tests, and non-goals.
-- All section 9 test families map to an owning lane.
-- The browser package has a reserved 11-file direct layout, below the
-  17-file directory cap. The 1,250-line file cap remains enforced.
-- Normal lanes are offline-only. The final smoke alone needs network, the
-  Playwright binary, and a Vercel AI Gateway key.
-- The five open decisions are recorded as locked with the veto window.
-- Budgets have named settings, concrete defaults, rationales, and a fail-closed
-  exhaustion rule.
-- The smoke uses a local disposable fixture, headless execution, localhost
-  allowlisting, and no personal credentials.
-- No lane adds tabs, arbitrary JavaScript, authentication management, or a
-  second safety policy.
-- Failure handling is explicit and consistent for safety, identity, routing,
-  timeout, and extraction errors.
-- The document has no unfinished placeholders.
+- task loading and safe prompt validation;
+- fake fixture generation and catalog-size matrix;
+- churn matrix, search triage, form tasks, and stale recovery;
+- metric calculation, cost accounting, confidence calibration, and report
+  schema;
+- safety parity and false-approval accounting;
+- `harness/tests/test_module_limits.py::test_module_limits`.
+
+Non-goals:
+
+- Do not call the live Gateway or tune thresholds from eval output.
+- Do not add production traffic, a live browser dependency, or a new tool
+  surface.
+
+## ordering and acceptance gate
+
+Lane 1 is mandatory before any other lane. Lane 2 supplies the policy needed
+by the live smoke and evaluation runner. Lane 3 validates the real headless
+path. Lane 4 measures offline quality and cost. Existing implementation rows
+remain acceptance gates, even when their lane has no new code.
+
+Each lane must preserve:
+
+- default-off browser registration;
+- fail-closed identity, provider, gate, budget, origin, and safety behavior;
+- stable seven-tool schemas;
+- plain browser data with no framework objects or page instructions;
+- `MAX_FILE_LINES=1250` and `MAX_FILES_PER_DIRECTORY=17`.
+
+## self-review
+
+This revision starts from current code evidence. It does not re-plan merged
+browser modules. It places the default-off gate before every later surface
+change. It records the missing budget, origin, local-smoke, and eval work.
+Every lane has scope, files, exit criteria, targeted tests, and non-goals.
+The design-spec test families are mapped to existing coverage or a named gap.
+Failure paths use one conservative polarity: uncertainty stops or escalates;
+no uncertain browser action proceeds silently.
