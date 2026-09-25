@@ -172,7 +172,7 @@ class PlaywrightBrowserAdapter:
     async def launch(self) -> None:
         if self._page is not None:
             return
-        loaded = load_playwright_page()
+        loaded = _adapter.load_playwright_page()
         if _is_page_like(loaded):
             self._page = loaded
             self._closed = False

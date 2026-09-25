@@ -55,6 +55,7 @@ class FakeBrowserAdapter:
         self.selected: list[tuple[ElementRef, str]] = []
         self.extractions: list[tuple[ElementRef | None, list[str], int]] = []
         self.search_extractions: list[tuple[ElementRef | None, int]] = []
+        self.navigation_classifications: list[tuple[str, str | None]] = []
         self._navigation_guard: NavigationInterceptor | None = None
         self._navigation_error: NavigationBlockedError | None = None
         self._queued_navigation_url: str | None = None
@@ -97,10 +98,11 @@ class FakeBrowserAdapter:
     async def navigate(self, url: str, timeout_ms: int) -> PageObservation:
         self._maybe_fail("navigate")
         previous_index = self._observation_index
-        await self._intercept_navigation(url)
+        previous_url = self._current_observation().url
+        await self._intercept_navigation(url, previous_url)
         observation = self._advance_observation()
         if self._observation_index != previous_index and observation.url != url:
-            await self._intercept_navigation(observation.url)
+            await self._intercept_navigation(observation.url, url)
             self._replace_current_url(observation.url)
             result = self._current_observation()
         else:
@@ -223,13 +225,17 @@ class FakeBrowserAdapter:
         index = min(self._observation_index + 1, len(self._observations) - 1)
         return self._observations[index]
 
-    async def _intercept_navigation(self, url: str) -> None:
+    async def _intercept_navigation(
+        self, url: str, current_url: str | None = None
+    ) -> None:
         if self._navigation_guard is None:
             raise NavigationBlockedError(
                 "browser navigation was blocked because no active browser operation "
                 "can classify it safely"
             )
-        await self._navigation_guard(url, self._current_observation().url)
+        source_url = current_url or self._current_observation().url
+        self.navigation_classifications.append((url, source_url))
+        await self._navigation_guard(url, source_url)
 
     def _replace_current_url(self, url: str) -> None:
         self._observations[self._observation_index] = replace(

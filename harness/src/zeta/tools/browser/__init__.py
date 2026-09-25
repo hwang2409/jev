@@ -35,11 +35,11 @@ from .adapter import (
 )
 from .catalog import (
     SearchResult,
-    catalog_criteria,
     prefilter_catalog,
     rank_search_result_ids,
     triage_search_results,
 )
+from .catalog import catalog_criteria as catalog_criteria
 from .gates import (
     PAGE_STATE_RECOVERY_ATTEMPT_CAP,
     PageStateDecision,
