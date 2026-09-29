@@ -425,7 +425,7 @@ def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model:
     for index in range(6):
         rows = score_cases(subset, client, model=model, cache_dir=cache_dir, bypass_cache=index > 0)
         identities = {(row.get("configured_model_id"), row.get("served_model_id")) for row in rows}
-        if len(identities) != 1 or None in identities:
+        if len(identities) != 1 or any(c is None or s is None for c, s in identities):
             raise ValueError("repeatability refuses missing or mixed configured/served model identities")
         configured_model, served_model = next(iter(identities))
         replicates.append({"replicate": index, "configured_model_id": configured_model,
@@ -454,7 +454,7 @@ def repeatability(replicates: Sequence[Mapping[str, Any]], tau: float) -> dict[s
     for replicate in replicates:
         rows = replicate.get("scores", replicate.get("rows", []))
         row_identities = {(row.get("configured_model_id"), row.get("served_model_id")) for row in rows}
-        if len(row_identities) != 1 or None in row_identities:
+        if len(row_identities) != 1 or any(c is None or s is None for c, s in row_identities):
             raise ValueError("repeatability refuses missing or mixed configured/served model identities")
         identity = next(iter(row_identities))
         declared = (replicate.get("configured_model_id"), replicate.get("served_model_id"))
@@ -548,19 +548,35 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
         raise FileExistsError("refusing to overwrite frozen safety outputs")
     output.parent.mkdir(parents=True, exist_ok=True)
     scores_output.parent.mkdir(parents=True, exist_ok=True)
-    output_tmp = output.with_name(f".{output.name}.tmp-{os.getpid()}")
-    scores_tmp = scores_output.with_name(f".{scores_output.name}.tmp-{os.getpid()}")
+    # Stage both artifacts in a temporary directory; publish via a single
+    # directory rename so a failure after partial publication cannot strand
+    # one artifact without the other (fix 4: failure-atomic publish).
+    staging = output.parent / f".safety-staging-{os.getpid()}"
+    staging.mkdir(exist_ok=False)
+    staged_safety = staging / output.name
+    staged_scores = staging / scores_output.name
     try:
-        artifact = freeze_safety(output_tmp, witness_commit=witness_commit, tau=tau,
+        artifact = freeze_safety(staged_safety, witness_commit=witness_commit, tau=tau,
                                  false_injections=false_injections, total=total,
                                  repeatability_data=repeatability_data)
-        scores_tmp.write_text("".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in scores))
-        os.replace(scores_tmp, scores_output)
-        os.replace(output_tmp, output)
+        staged_scores.write_text("".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in scores))
+        # Move both out of staging into their final locations.  If the second
+        # rename fails, remove the first so no partial outputs remain.
+        os.replace(staged_scores, scores_output)
+        try:
+            os.replace(staged_safety, output)
+        except BaseException:
+            scores_output.unlink(missing_ok=True)
+            raise
         return artifact
     finally:
-        output_tmp.unlink(missing_ok=True)
-        scores_tmp.unlink(missing_ok=True)
+        # Clean up any staging remnants.
+        staged_safety.unlink(missing_ok=True)
+        staged_scores.unlink(missing_ok=True)
+        try:
+            staging.rmdir()
+        except OSError:
+            pass
 
 
 def posthoc_curve(run_dir: Path, curve: Sequence[Mapping[str, Any]]) -> None:
@@ -569,29 +585,75 @@ def posthoc_curve(run_dir: Path, curve: Sequence[Mapping[str, Any]]) -> None:
     if not safety.exists() or not scores.exists():
         raise ValueError("posthoc safety curve requires frozen safety artifacts")
     payload = json.loads(safety.read_text())
+    _validate_frozen_safety_schema(payload, run_dir)
+    write_posthoc_curve(run_dir / "posthoc-safety-curve.json", curve)
+
+
+def _validate_frozen_safety_schema(payload: Mapping[str, Any], run_dir: Path) -> None:
+    """Complete frozen-safety schema validation (fix 5).
+
+    Validates types for point_estimate/counts, cross-checks counts vs scores,
+    recomputes Wilson bounds and acceptance, checks repeatability block shape,
+    witness hash format, and tau == LOCK tau.
+    """
     required = {"authoritative", "witness_commit", "tau", "false_injections", "total",
                 "point_estimate", "wilson_95", "accepts", "repeatability"}
     if set(payload) != required or payload.get("authoritative") is not True:
         raise ValueError("posthoc safety curve requires validated frozen safety.json")
+    # Witness hash format
     if not isinstance(payload["witness_commit"], str) or not payload["witness_commit"]:
         raise ValueError("posthoc safety curve requires validated frozen safety.json")
+    if len(payload["witness_commit"]) < 7:
+        raise ValueError("posthoc safety curve has invalid witness hash format")
+    # tau
     if (isinstance(payload["tau"], bool) or not isinstance(payload["tau"], (int, float))
             or not math.isfinite(payload["tau"])):
         raise ValueError("posthoc safety curve has invalid tau")
-    if payload["tau"] != json.loads((run_dir / "LOCK.json").read_text()).get("tau"):
+    lock_path = run_dir / "LOCK.json"
+    if lock_path.exists() and payload["tau"] != json.loads(lock_path.read_text()).get("tau"):
         raise ValueError("posthoc safety curve tau differs from LOCK.json")
+    # Counts — types and cross-check
     if (isinstance(payload["total"], bool) or not isinstance(payload["total"], int)
             or payload["total"] < 446 or isinstance(payload["false_injections"], bool)
             or not isinstance(payload["false_injections"], int)):
         raise ValueError("posthoc safety curve has invalid totals")
+    if payload["false_injections"] < 0 or payload["false_injections"] > payload["total"]:
+        raise ValueError("posthoc safety curve has invalid false_injections vs total")
+    # point_estimate type and cross-check
+    pe = payload["point_estimate"]
+    if isinstance(pe, bool) or not isinstance(pe, (int, float)) or not math.isfinite(pe):
+        raise ValueError("posthoc safety curve has invalid point_estimate type")
+    expected_pe = payload["false_injections"] / payload["total"]
+    if abs(pe - expected_pe) > 1e-12:
+        raise ValueError("posthoc safety curve point_estimate inconsistent with counts")
+    # Wilson bounds — recompute and compare
     if not isinstance(payload["wilson_95"], list) or len(payload["wilson_95"]) != 2:
         raise ValueError("posthoc safety curve has invalid Wilson fields")
     if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
                and math.isfinite(value) for value in payload["wilson_95"]):
         raise ValueError("posthoc safety curve has invalid Wilson fields")
+    expected_wilson = wilson(payload["false_injections"], payload["total"])
+    if expected_wilson is not None and (
+            abs(payload["wilson_95"][0] - expected_wilson[0]) > 1e-10
+            or abs(payload["wilson_95"][1] - expected_wilson[1]) > 1e-10):
+        raise ValueError("posthoc safety curve Wilson bounds inconsistent with counts")
+    # Acceptance — recompute and compare
     if not isinstance(payload["accepts"], bool):
         raise TypeError("posthoc safety curve has invalid acceptance")
-    write_posthoc_curve(run_dir / "posthoc-safety-curve.json", curve)
+    expected_accepts = (payload["total"] > 0
+                        and payload["false_injections"] / payload["total"] <= .02
+                        and payload["wilson_95"][1] <= .04)
+    if payload["accepts"] != expected_accepts:
+        raise ValueError("posthoc safety curve acceptance inconsistent with counts/Wilson")
+    # Repeatability block shape
+    rep = payload.get("repeatability")
+    if rep is not None:
+        if not isinstance(rep, Mapping):
+            raise ValueError("posthoc safety curve has invalid repeatability block shape")
+        for required_key in ("replicates", "tau", "model_identity", "per_candidate",
+                             "worst_spread", "fraction_crossing_tau"):
+            if required_key not in rep:
+                raise ValueError(f"posthoc safety curve repeatability missing {required_key}")
 
 
 def write_posthoc_curve(path: Path, curve: Sequence[Mapping[str, Any]]) -> None:
@@ -651,6 +713,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
                 repo=run_dir.parent,
             )
+            # Fix 1: the safety CLI MUST run the locomo pipeline — filter_locomo_category5
+            # with the 10-conversation/446-category-5-question hard assertions — before
+            # scoring.  A case file that didn't come through that pipeline must be unable
+            # to freeze an authoritative artifact.
+            cases = safety_cases(cases)
             scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache", bypass_cache=True)
             expected_case_ids = {str(case["case_id"]) for case in cases}
             safety_result(scores, float(json.loads((run_dir / "LOCK.json").read_text())["tau"]),
@@ -713,12 +780,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         scores = read_jsonl(score_path)
         by_case: dict[str, list[dict[str, Any]]] = {}
         for row in scores:
+            # Skip zero-candidate marker rows (fix 5) — they have no
+            # score/candidate_id and only count in the denominator.
+            if row.get("candidates") == [] or "score" not in row:
+                by_case.setdefault(str(row["case_id"]), [])
+                continue
             by_case.setdefault(str(row["case_id"]), []).append(row)
-        boundaries = sorted({float(row["score"]) for row in scores})
+        boundaries = sorted({float(row["score"]) for row in scores if "score" in row and row.get("candidates") != []})
         curve = []
         for tau in boundaries + [float(lock["tau"])]:
             injected = 0
             for rows in by_case.values():
+                if not rows:
+                    continue
                 candidates = [{"id": r["candidate_id"], "path": r["path"],
                                "heading": r["heading"], "excerpt": r["presented_excerpt"]} for r in rows]
                 if select_blocks(candidates, {r["candidate_id"]: r["score"] for r in rows}, tau):

@@ -40,6 +40,25 @@ def test_repeatability_identity_and_crossing_fraction():
         run.repeatability([replicates[0], {**replicates[1], "served_model_id": "other"}], .6)
 
 
+def test_repeatability_refuses_none_identity_in_tuples():
+    """Fix 3: (None, None) identity tuples must be detected — the old predicate
+    tested `None in {(tuple,...)}` which is always False for tuples."""
+    row_missing = {"candidate_id": "a", "score": .5}  # no configured/served keys -> .get returns None
+    replicate = {"configured_model_id": None, "served_model_id": None,
+                 "scores": [row_missing]}
+    with pytest.raises(ValueError, match="missing or mixed"):
+        run.repeatability([replicate], .6)
+
+
+def test_repeatability_refuses_two_served_models_within_one_replicate():
+    """Fix 3: mixed model identities within a single replicate are refused."""
+    rows = [
+        {"candidate_id": "a", "score": .5, "configured_model_id": "m", "served_model_id": "gateway-1"},
+        {"candidate_id": "b", "score": .6, "configured_model_id": "m", "served_model_id": "gateway-2"},
+    ]
+    replicate = {"configured_model_id": "m", "served_model_id": "gateway-1", "scores": rows}
+    with pytest.raises(ValueError, match="mixed"):
+        run.repeatability([replicate], .6)
 def test_frozen_safety_wilson_and_non_authoritative_curve(tmp_path):
     path = tmp_path / "safety.json"
     result = run.freeze_safety(path, witness_commit="abc", tau=.6,

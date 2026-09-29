@@ -179,36 +179,36 @@ def _decode_records(records: Sequence[Any], *, gate: str | None = None,
     payloads = [record.to_dict() for record in records]
     coverage = next((payload for payload in payloads if payload.get("record_type") == "coverage"), None)
     if coverage is None:
-        raise AdapterError("Jev judgment did not produce terminal coverage (missing coverage)", gate=gate)
+        raise AdapterError("Jev judgment did not produce terminal coverage", gate=gate)
 
     result = next((payload for payload in payloads if payload.get("record_type") == "result"), None)
     if result is None:
         error = next((payload for payload in payloads if payload.get("record_type") == "error"), None)
-        if error is None and coverage.get("coverage") != "complete":
-            raise AdapterError(f"partial coverage: {coverage.get('coverage', 'incomplete')}", gate=gate)
-        error_detail = error.get("error", {}) if error is not None else {}
         error_message = (
-            error_detail.get("message", "Jev judgment failed")
-            if isinstance(error_detail, Mapping) else str(error_detail or "Jev judgment failed")
+            error.get("error", {}).get("message", "Jev judgment failed")
+            if error is not None and isinstance(error.get("error"), Mapping)
+            else ("Jev judgment failed" if error is None
+                  else str(error.get("error") or "Jev judgment failed"))
         )
-        question_ids = set(question_ids)
+        # Production specializations (browser/search) — none apply for
+        # memory relevance questions, but mirror the exact branching so
+        # the eval path is a semantic copy of the production block.
+        question_id_set = set(question_ids)
         if error_message == "malformed answer" or error is None:
-            # Memory relevance questions have none of the browser/search IDs
-            # used by the production specializations, so preserve this message.
-            if "element_id" in question_ids:
+            if "element_id" in question_id_set:
                 error_message = "invalid Jev browser choice response"
-            elif "page_loaded_and_stable" in question_ids:
+            elif "page_loaded_and_stable" in question_id_set:
                 error_message = "invalid Jev browser page-state response"
-            elif any(question_id.startswith("result-") for question_id in question_ids):
+            elif any(qid.startswith("result-") for qid in question_id_set):
                 error_message = "invalid Jev search result score response"
-        elif any(question_id.startswith("result-") for question_id in question_ids):
+        elif any(qid.startswith("result-") for qid in question_id_set):
             error_message = "invalid Jev search result score response"
+        error_detail = error.get("error") if error is not None else {}
         detail = str(error_detail) if error is not None else error_message
-        if error_message == "request failed":
-            error_message = "request failed (partial coverage)"
         raise AdapterError(
             error_message if error_message != "Jev judgment failed" else detail,
-            http_status=(error_detail.get("http_status") if isinstance(error_detail, Mapping)
+            http_status=(error_detail.get("http_status")
+                         if isinstance(error_detail, Mapping)
                          and isinstance(error_detail.get("http_status"), int) else None),
             gate=gate,
         )

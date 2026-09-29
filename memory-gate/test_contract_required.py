@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -47,13 +48,25 @@ def test_t1_score_rows_carry_verified_identities(monkeypatch):
     assert rows[0]["served_model_id"] == "served-by-gateway"
 
 
-def test_t2_eval_cache_key_matches_jm_projected_wire_request_and_protocol_miss():
+def test_t2_eval_cache_key_matches_jm_projected_wire_request_and_protocol_miss(monkeypatch):
+    """Fix 6: obtain the expected key by invoking jm's own runner/cache path,
+    not the same helper being tested.  The miss test bumps jm's CACHE_SCHEMA."""
     request = pipeline.build_request("where?", pipeline.prepare_candidates({}, [{"excerpt": "memory", "path": "m.md", "heading": []}]))
-    from jm.cache import build_cache_preimage, cache_key
-    expected = cache_key(build_cache_preimage(model="m", questions=request["questions"], state=run._formed_state(request)))
+    # Obtain expected key through jm's build_cache_envelope (the same envelope
+    # construction the runner uses at jm/jm/runner.py:1227-1239) rather than
+    # build_cache_preimage which is what _cache_key itself calls.
+    import jm.cache as jm_cache
+    from jm.cache import _project_state, build_cache_envelope, cache_key
+    formed = run._formed_state(request)
+    wire_state = _project_state(formed.payload, request["questions"], include_uid=False)
+    envelope = build_cache_envelope(wire_state=wire_state, questions=request["questions"], model="m")
+    expected = cache_key(envelope)
     assert run._cache_key(request, "m") == expected
-    changed = {**request, "questions": {**request["questions"], "protocol_version": "changed"}}
-    assert run._cache_key(changed, "m") != expected
+    # The miss test bumps the REAL jm cache schema constant, proving the key
+    # is sensitive to jm's protocol version, not a synthetic question mutation.
+    monkeypatch.setattr(jm_cache, "CACHE_SCHEMA", "jm-answer/v999-bumped")
+    bumped_key = run._cache_key(request, "m")
+    assert bumped_key != expected, "bumping CACHE_SCHEMA must invalidate the cache key"
 
 
 def _score_row(case_id, candidate_id, score=.9, coverage=True):
@@ -78,25 +91,57 @@ def test_t4_adapter_error_classes_are_distinct_and_preserve_context(monkeypatch)
     class Record:
         def __init__(self, payload): self.payload = payload
         def to_dict(self): return self.payload
-    seen = []
-    for records in ([Record({"record_type": "coverage", "coverage": "complete"})],
-                    [Record({"record_type": "coverage", "coverage": "complete"}), Record({"record_type": "error", "error": "bad"})],
-                    [Record({"record_type": "coverage", "coverage": "partial"})]):
-        with pytest.raises(pipeline.AdapterError) as exc:
-            pipeline._decode_records(records)
-        seen.append(str(exc.value))
-    assert len(set(seen)) == 3
-    assert all(text for text in seen)
+    # (a) coverage=None -> exact "Jev judgment did not produce terminal coverage"
+    with pytest.raises(pipeline.AdapterError, match="^Jev judgment did not produce terminal coverage$"):
+        pipeline._decode_records([])
+    # (b) partial coverage, no result, no error -> result-is-None branch raises "Jev judgment failed"
+    with pytest.raises(pipeline.AdapterError, match="Jev judgment failed"):
+        pipeline._decode_records([Record({"record_type": "coverage", "coverage": "partial"})])
+    # (c) "request failed" error preserved verbatim (no coverage suffix)
+    with pytest.raises(pipeline.AdapterError, match="^request failed$") as exc_info:
+        pipeline._decode_records(
+            [Record({"record_type": "coverage", "coverage": "partial"}),
+             Record({"record_type": "error", "error": {"message": "request failed", "http_status": 502}})],
+        )
+    assert exc_info.value.http_status == 502
 
 
 def test_t4_partial_and_absent_coverage_are_distinguishable(monkeypatch):
     class Record:
         def __init__(self, payload): self.payload = payload
         def to_dict(self): return self.payload
-    with pytest.raises(pipeline.AdapterError, match="missing coverage"):
+    with pytest.raises(pipeline.AdapterError, match="terminal coverage"):
         pipeline._decode_records([])
+    # partial coverage WITH a result -> partial-coverage message
     with pytest.raises(pipeline.AdapterError, match="partial coverage"):
-        pipeline._decode_records([Record({"record_type": "coverage", "coverage": "partial"})])
+        pipeline._decode_records([Record({"record_type": "coverage", "coverage": "partial"}),
+                                  Record({"record_type": "result", "answers": {}})])
+
+
+def test_t4_partial_coverage_with_error_surfaces_error_with_http_status():
+    """Fix 2(c): error records in the no-result branch surface verbatim error."""
+    class Record:
+        def __init__(self, payload): self.payload = payload
+        def to_dict(self): return self.payload
+    with pytest.raises(pipeline.AdapterError) as exc:
+        pipeline._decode_records([
+            Record({"record_type": "coverage", "coverage": "partial"}),
+            Record({"record_type": "error", "error": {"message": "gateway timeout", "http_status": 504}}),
+        ])
+    assert str(exc.value) == "gateway timeout"
+    assert exc.value.http_status == 504
+
+
+def test_t4_result_with_partial_coverage_raises_partial():
+    """Fix 2: result+partial -> partial-coverage message (coverage checked LAST)."""
+    class Record:
+        def __init__(self, payload): self.payload = payload
+        def to_dict(self): return self.payload
+    with pytest.raises(pipeline.AdapterError, match="^Jev judgment returned partial coverage$"):
+        pipeline._decode_records([
+            Record({"record_type": "coverage", "coverage": "partial"}),
+            Record({"record_type": "result", "answers": {}}),
+        ])
 
 
 def test_t5_evaluate_protocol_is_called_once():
@@ -113,7 +158,7 @@ def test_t5_callable_transport_typeerror_is_not_retried():
     def transport(*args):
         calls.append(args)
         raise TypeError("transport internals")
-    with pytest.raises(pipeline.AdapterError, match="partial coverage"):
+    with pytest.raises(pipeline.AdapterError, match="request failed"):
         pipeline.evaluate_production({"questions": {}, "state": {}}, transport, model="m")
     assert len(calls) == 1
 
@@ -130,15 +175,75 @@ def test_t5_legacy_callable_protocol_still_works():
 def test_t6_posthoc_requires_validated_frozen_safety(tmp_path):
     with pytest.raises((ValueError, SystemExit), match="frozen|safety"):
         run.posthoc_curve(tmp_path, [{"tau": .6}])
+    expected_wilson = run.wilson(0, 446)
     (tmp_path / "LOCK.json").write_text(json.dumps({"tau": .731}))
     (tmp_path / "safety.json").write_text(json.dumps({
-        "authoritative": True, "witness_commit": "w", "tau": .731,
-        "false_injections": 0, "total": 446, "point_estimate": 0,
-        "wilson_95": [0, 0], "accepts": True, "repeatability": None,
+        "authoritative": True, "witness_commit": "abc1234", "tau": .731,
+        "false_injections": 0, "total": 446, "point_estimate": 0.0,
+        "wilson_95": expected_wilson, "accepts": True, "repeatability": None,
     }))
     (tmp_path / "safety-scores.jsonl").write_text("")
     run.posthoc_curve(tmp_path, [{"tau": .6}])
     assert json.loads((tmp_path / "posthoc-safety-curve.json").read_text())["authoritative"] is False
+
+
+def test_t6_posthoc_rejects_malformed_point_estimate(tmp_path):
+    """Fix 5: point_estimate must be numeric and consistent with counts."""
+    expected_wilson = run.wilson(0, 446)
+    (tmp_path / "LOCK.json").write_text(json.dumps({"tau": .6}))
+    (tmp_path / "safety.json").write_text(json.dumps({
+        "authoritative": True, "witness_commit": "abc1234", "tau": .6,
+        "false_injections": 0, "total": 446, "point_estimate": "zero",
+        "wilson_95": expected_wilson, "accepts": True, "repeatability": None,
+    }))
+    (tmp_path / "safety-scores.jsonl").write_text("")
+    with pytest.raises(ValueError, match="point_estimate"):
+        run.posthoc_curve(tmp_path, [{"tau": .6}])
+
+
+def test_t6_posthoc_rejects_inconsistent_wilson_vs_counts(tmp_path):
+    """Fix 5: Wilson bounds must match recomputed values from counts."""
+    (tmp_path / "LOCK.json").write_text(json.dumps({"tau": .6}))
+    (tmp_path / "safety.json").write_text(json.dumps({
+        "authoritative": True, "witness_commit": "abc1234", "tau": .6,
+        "false_injections": 0, "total": 446, "point_estimate": 0.0,
+        "wilson_95": [0.0, 0.5],  # deliberately wrong
+        "accepts": True, "repeatability": None,
+    }))
+    (tmp_path / "safety-scores.jsonl").write_text("")
+    with pytest.raises(ValueError, match="Wilson.*inconsistent"):
+        run.posthoc_curve(tmp_path, [{"tau": .6}])
+
+
+def test_t6_posthoc_safety_run_with_retrieval_miss_markers(tmp_path):
+    """Fix 5: safety run containing zero-candidate marker rows must not crash
+    in the posthoc-safety-curve CLI path."""
+    # 1 scored case + 445 marker rows (zero candidates) = 446 total
+    total = 446
+    fi = 1
+    expected_wilson = run.wilson(fi, total)
+    pe = fi / total
+    accepts = (fi / total <= .02 and expected_wilson[1] <= .04)
+    (tmp_path / "LOCK.json").write_text(json.dumps({"tau": .6}))
+    (tmp_path / "safety.json").write_text(json.dumps({
+        "authoritative": True, "witness_commit": "abc1234", "tau": .6,
+        "false_injections": fi, "total": total, "point_estimate": pe,
+        "wilson_95": expected_wilson, "accepts": accepts, "repeatability": None,
+    }))
+    # One scored case, 445 marker rows (zero candidates)
+    scored = {"case_id": "case-0", "candidate_id": "case-0:candidate-0",
+              "path": "m.md", "heading": [], "presented_excerpt": "memory",
+              "score": 0.9, "coverage": True}
+    lines = [json.dumps(scored, sort_keys=True)]
+    for i in range(1, total):
+        lines.append(json.dumps({"case_id": f"case-{i}", "candidates": []}, sort_keys=True))
+    (tmp_path / "safety-scores.jsonl").write_text("\n".join(lines) + "\n")
+    # This should succeed — the CLI iterates and must skip marker rows
+    assert run.main(["posthoc-safety-curve", "--run", str(tmp_path)]) == 0
+    result = json.loads((tmp_path / "posthoc-safety-curve.json").read_text())
+    assert result["authoritative"] is False
+    # The total in the curve should count all cases (scored + markers)
+    assert result["curve"][0]["total"] == total
 
 
 def test_t7_failed_safety_validation_publishes_no_outputs(tmp_path):
@@ -146,6 +251,35 @@ def test_t7_failed_safety_validation_publishes_no_outputs(tmp_path):
         run.safety_result([_score_row("x", "x:candidate-0", coverage=False)], .6, witness_commit="w", output=tmp_path / "safety.json", scores_output=tmp_path / "safety-scores.jsonl")
     assert not (tmp_path / "safety.json").exists()
     assert not (tmp_path / "safety-scores.jsonl").exists()
+
+
+def test_t7_second_rename_failure_leaves_no_partial_outputs(tmp_path, monkeypatch):
+    """Fix 4: if the second artifact's publication fails, the first must be
+    cleaned up — no partial safety outputs may remain."""
+    # Build enough valid rows for freeze_safety (>=446 cases)
+    rows = [_score_row(f"case-{i}", f"case-{i}:candidate-0") for i in range(446)]
+    expected_ids = {f"case-{i}" for i in range(446)}
+    output = tmp_path / "safety.json"
+    scores_output = tmp_path / "safety-scores.jsonl"
+
+    original_replace = os.replace
+    call_count = [0]
+
+    def failing_replace(src, dst):
+        call_count[0] += 1
+        # Let the first replace (scores) succeed, fail the second (safety.json)
+        if call_count[0] >= 2:
+            raise OSError("simulated disk failure on second rename")
+        return original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", failing_replace)
+    with pytest.raises(OSError, match="simulated disk failure"):
+        run.safety_result(rows, .6, witness_commit="w", output=output,
+                          scores_output=scores_output,
+                          expected_case_ids=expected_ids)
+    # The invariant: NO partial outputs remain
+    assert not output.exists(), "safety.json should not exist after failed second rename"
+    assert not scores_output.exists(), "safety-scores.jsonl should be cleaned up after failed second rename"
 
 
 def test_t8_candidate_subprocess_fixture_and_locomo_boundaries(tmp_path):
@@ -162,7 +296,26 @@ def test_t8_candidate_subprocess_fixture_and_locomo_boundaries(tmp_path):
     with pytest.raises(ValueError): run.filter_locomo_category5([conversation] * 9)
 
 
-def test_t9_calibration_and_witnessed_safety_happy_paths(monkeypatch, tmp_path):
+def _make_locomo_dataset(questions_per_conv=None):
+    """Build a synthetic-but-locomo-SHAPED dataset with 10 conversations and 446 category-5 questions."""
+    if questions_per_conv is None:
+        questions_per_conv = [45] * 9 + [41]
+    assert len(questions_per_conv) == 10 and sum(questions_per_conv) == 446
+    dataset = []
+    for conv_idx, n_questions in enumerate(questions_per_conv):
+        questions = []
+        for q_idx in range(n_questions):
+            questions.append({
+                "category": "5",
+                "question": f"conversation-{conv_idx}-question-{q_idx}",
+                "retrieved": [{"excerpt": f"excerpt-{conv_idx}-{q_idx}", "path": f"memory-{conv_idx}.md", "heading": []}],
+            })
+        dataset.append({"id": f"conversation-{conv_idx}", "qa": questions})
+    return dataset
+
+
+def test_t9_flat_case_file_is_refused_by_safety_pipeline(monkeypatch, tmp_path):
+    """Fix 1: an arbitrary flat 446-case file must be refused by the safety CLI."""
     repo, bare = tmp_path / "work", tmp_path / "remote.git"
     repo.mkdir()
     subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
@@ -173,8 +326,41 @@ def test_t9_calibration_and_witnessed_safety_happy_paths(monkeypatch, tmp_path):
     tau = 0.731
     run.lock_witness(run_dir / "LOCK.json",
                      [run_dir / name for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")], tau)
+    # Write a flat (non-locomo-shaped) case file with 446 entries
     cases_path = repo / "cases.json"
     cases_path.write_text(json.dumps([_case(f"case-{i}") for i in range(446)]))
+    responses_path = repo / "responses.json"
+    responses_path.write_text(json.dumps([_response({}, configured="requested-model", served="gateway-model") for _ in range(446)]))
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=test", "commit", "-m", "lock"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True, capture_output=True)
+    witness = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    monkeypatch.chdir(repo)
+    # The flat file must be refused — it's not locomo-shaped
+    with pytest.raises((ValueError, TypeError, SystemExit)):
+        run.main(["score", "--lane", "safety", "--run", str(run_dir), "--cases", str(cases_path),
+                  "--responses", str(responses_path), "--model", "requested-model", "--witness", witness])
+    # No safety artifacts should have been created
+    assert not (run_dir / "safety.json").exists()
+
+
+def test_t9_locomo_shaped_dataset_through_real_filter_succeeds(monkeypatch, tmp_path):
+    """Fix 1: a locomo-shaped synthetic dataset through the real filter succeeds."""
+    repo, bare = tmp_path / "work", tmp_path / "remote.git"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, check=True)
+    run_dir = repo / "run"
+    shutil.copytree(HERE / "runs" / "fixture-dev", run_dir)
+    tau = 0.731
+    run.lock_witness(run_dir / "LOCK.json",
+                     [run_dir / name for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")], tau)
+    # Build a locomo-shaped dataset (10 conversations, 446 category-5 questions)
+    dataset = _make_locomo_dataset()
+    cases_path = repo / "cases.json"
+    cases_path.write_text(json.dumps(dataset))
+    # Each case produces 1 candidate, so we need 446 responses
     responses_path = repo / "responses.json"
     responses_path.write_text(json.dumps([_response({}, configured="requested-model", served="gateway-model") for _ in range(446)]))
     subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
