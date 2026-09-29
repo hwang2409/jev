@@ -107,3 +107,8 @@ checklist; each phase claims its subset.
   **DONE (2026-09-29):** test_t2 now invokes real judge() with fake transport + tmpdir CacheStore.
 - Second-rename failure test trips on freeze_safety's internal rename, never
   reaching run.py:565-570 rollback; fail on destination path instead.
+- OPEN (2026-09-29, from follow-ups gate): repeatability subset construction
+  silently skips candidate case_ids absent from the authoritative cases file;
+  raise an error listing unknown ids and strengthen the test with a
+  sufficient-but-contaminated fixture (observability debt, adjudicated
+  non-blocking).
