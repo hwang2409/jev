@@ -483,6 +483,51 @@ def _cache_key(request: Mapping[str, Any], model: str) -> str:
         })
 
 
+def _score_one_request(
+    request: Mapping[str, Any],
+    candidates: Sequence[Mapping[str, Any]],
+    client: Any,
+    model: str,
+    *,
+    cache_store: Any = None,
+    cache_file: Path | None = None,
+    bypass_cache: bool = False,
+    reject_placeholder_served: bool = False,
+) -> tuple[dict[str, Any], str | None, str, str]:
+    """Shared request→response→identity→scores logic.
+
+    Returns (scores_map, error, configured_model, served_model).  Both
+    ``score_cases`` and the calibration CLI lane call this so the
+    request/identity/error/score-row pipeline cannot drift.
+    """
+    error: str | None = None
+    configured_model = model
+    served_model = model
+    try:
+        if cache_file and cache_file.exists() and not bypass_cache:
+            response = json.loads(cache_file.read_text())
+        else:
+            response = _client_response(client, request, model=model,
+                                        cache_store=cache_store)
+            if cache_file:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                cache_file.write_text(json.dumps(response, sort_keys=True))
+        configured_raw = response.get("configured_model")
+        served_raw = response.get("served_model")
+        if not configured_raw or not served_raw:
+            raise ValueError("authoritative response omitted verified model identity")
+        configured_model = str(configured_raw)
+        served_model = str(served_raw)
+        if configured_model != model:
+            raise ValueError(f"configured model {configured_model!r} differs from requested {model!r}")
+        if reject_placeholder_served and served_model in {"unknown", "unscored", "configured", "None"}:
+            raise ValueError("authoritative response omitted served model identity")
+        scores: dict[str, Any] = pipeline.parse_scores(response, candidates)
+    except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
+        scores, error = {}, f"{type(exc).__name__}: {exc}"
+    return scores, error, configured_model, served_model
+
+
 def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
                 cache_dir: Path | None = None, bypass_cache: bool = False,
                 cache_store: Any = None) -> list[dict[str, Any]]:
@@ -500,31 +545,11 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
         request = pipeline.build_request(str(case["query"]), candidates)
         key = _cache_key(request, model)
         cache_file = cache_dir / f"{key.removeprefix('sha256:')}.json" if cache_dir else None
-        error = None
-        configured_model = model
-        served_model = model
-        try:
-            if cache_file and cache_file.exists() and not bypass_cache:
-                response = json.loads(cache_file.read_text())
-            else:
-                response = _client_response(client, request, model=model,
-                                            cache_store=cache_store)
-                if cache_file:
-                    cache_file.parent.mkdir(parents=True, exist_ok=True)
-                    cache_file.write_text(json.dumps(response, sort_keys=True))
-            configured_raw = response.get("configured_model")
-            served_raw = response.get("served_model")
-            if not configured_raw or not served_raw:
-                raise ValueError("authoritative response omitted verified model identity")
-            configured_model = str(configured_raw)
-            served_model = str(served_raw)
-            if configured_model != model:
-                raise ValueError(f"configured model {configured_model!r} differs from requested {model!r}")
-            if served_model in {"unknown", "unscored", "configured", "None"}:
-                raise ValueError("authoritative response omitted served model identity")
-            scores = pipeline.parse_scores(response, candidates)
-        except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:  # request errors invalidate the run
-            scores, error = {}, f"{type(exc).__name__}: {exc}"
+        scores, error, configured_model, served_model = _score_one_request(
+            request, candidates, client, model,
+            cache_store=cache_store, cache_file=cache_file, bypass_cache=bypass_cache,
+            reject_placeholder_served=True,
+        )
         if not candidates:
             raw_retrieved = case.get("retrieved", case.get("candidates", []))
             marker: dict[str, Any] = {"case_id": case["case_id"], "candidates": []}
@@ -566,6 +591,99 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
             )
             rows.append(row)
     return rows
+
+
+
+
+
+def build_repeatability_subset(
+    run_dir: Path,
+    *,
+    cases_file: Path,
+) -> list[dict[str, Any]]:
+    """Construct the stratified repeatability subset from a run directory.
+
+    Stratification uses the authoritative ``category`` field from
+    *cases_file* (keyed by ``id``).  Prefix-based inference was removed
+    because real cases (e.g. ``paraphrase-worker-isolation``) carry
+    ``category: "verbatim"`` and would be mis-stratified by prefix.
+
+    - **verbatim** (4): calibration candidates whose authoritative
+      category is ``"verbatim"``.
+    - **paraphrase** (4): calibration candidates whose authoritative
+      category is ``"paraphrase"``.
+    - **abstain** (4): the first four LOCOMO category-5 cases from
+      ``safety-cases.json`` in the run directory (unchanged).
+
+    Each calibration case is reconstructed from ``candidates.jsonl``: the
+    retrieved items are the candidate rows themselves (presented_excerpt,
+    path, heading), and the query comes from the first row in each group.
+    """
+    # Load authoritative category mapping from cases_file
+    auth_cases = load_cases(cases_file)
+    category_by_id: dict[str, str] = {}
+    for ac in auth_cases:
+        case_id = ac.get("id") or ac.get("case_id")
+        cat = ac.get("category")
+        if case_id is None or cat is None:
+            continue
+        category_by_id[str(case_id)] = str(cat)
+
+    candidates_path = run_dir / "candidates.jsonl"
+    if not candidates_path.exists():
+        raise FileNotFoundError(f"repeatability requires {candidates_path}")
+
+    # Reconstruct per-case entries from candidates.jsonl
+    rows = read_jsonl(candidates_path)
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_case.setdefault(row["case_id"], []).append(row)
+
+    verbatim: list[dict[str, Any]] = []
+    paraphrase: list[dict[str, Any]] = []
+    for case_id, group in by_case.items():
+        if case_id not in category_by_id:
+            continue
+        cat = category_by_id[case_id]
+        if cat not in ("verbatim", "paraphrase"):
+            continue
+        case: dict[str, Any] = {
+            "case_id": case_id,
+            "query": group[0]["query"],
+            "category": cat,
+            "retrieved": [
+                {"excerpt": r["presented_excerpt"], "path": r["path"], "heading": r["heading"]}
+                for r in group
+            ],
+        }
+        scope = group[0].get("retrieval_scope")
+        if scope is not None:
+            case["retrieval_scope"] = scope
+        if cat == "verbatim":
+            verbatim.append(case)
+        elif cat == "paraphrase":
+            paraphrase.append(case)
+
+    # Abstain stratum: from safety-cases.json (unchanged)
+    abstain: list[dict[str, Any]] = []
+    safety_path = run_dir / "safety-cases.json"
+    if safety_path.exists():
+        dataset = load_cases(safety_path)
+        try:
+            locomo = safety_cases(dataset)
+        except (ValueError, TypeError):
+            locomo = []
+        for sc in locomo[:4]:
+            abstain.append({**sc, "category": "abstain"})
+
+    if len(verbatim) < 4:
+        raise ValueError(f"repeatability needs ≥4 verbatim cases, found {len(verbatim)}")
+    if len(paraphrase) < 4:
+        raise ValueError(f"repeatability needs ≥4 paraphrase cases, found {len(paraphrase)}")
+    if len(abstain) < 4:
+        raise ValueError(f"repeatability needs ≥4 abstain cases (from safety-cases.json), found {len(abstain)}")
+
+    return verbatim[:4] + paraphrase[:4] + abstain[:4]
 
 
 def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
@@ -995,6 +1113,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_posthoc = sub.add_parser("posthoc-safety-curve")
     p_posthoc.add_argument("--run", required=True, type=Path, dest="run_dir")
 
+    # -- repeatability --
+    p_repeat = sub.add_parser("repeatability")
+    p_repeat.add_argument("--run", required=True, type=Path, dest="run_dir")
+    p_repeat.add_argument("--tau", type=float, required=True)
+    p_repeat.add_argument("--model", default="typesafe-ai/jev")
+    p_repeat.add_argument("--cases", type=Path, required=True)
+
     parser.epilog = "Safety verification fetches the configured remote with pruning before accepting a witness."
 
     args = parser.parse_args(argv)
@@ -1125,28 +1250,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     for row in cand_group
                 ]
                 request = pipeline.build_request(query, request_candidates)
-                error = None
-                configured_model = args.model
-                served_model = args.model
-                try:
-                    response = _client_response(
-                        cal_client, request, model=args.model,
-                        cache_store=cal_cache_store,
-                    )
-                    configured_raw = response.get("configured_model")
-                    served_raw = response.get("served_model")
-                    if not configured_raw or not served_raw:
-                        raise ValueError("response omitted verified model identity")
-                    configured_model = str(configured_raw)
-                    served_model = str(served_raw)
-                    if configured_model != args.model:
-                        raise ValueError(
-                            f"configured model {configured_model!r} differs "
-                            f"from requested {args.model!r}"
-                        )
-                    scores_map = pipeline.parse_scores(response, request_candidates)
-                except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
-                    scores_map, error = {}, f"{type(exc).__name__}: {exc}"
+                scores_map, error, configured_model, served_model = _score_one_request(
+                    request, request_candidates, cal_client, args.model,
+                    cache_store=cal_cache_store,
+                )
 
                 for row in cand_group:
                     cid = row["candidate_id"]
@@ -1278,6 +1385,22 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "total": len(by_case), "rate": ratio(injected, len(by_case)),
             })
         posthoc_curve(run_dir, curve)
+        return 0
+
+    # ---- repeatability ----
+    if args.command == "repeatability":
+        run_dir = args.run_dir
+        output_path = run_dir / "repeatability.json"
+        if output_path.exists():
+            raise SystemExit(f"refusing to overwrite existing {output_path}")
+        cases_file = args.cases
+        subset = build_repeatability_subset(run_dir, cases_file=cases_file)
+        live_client, live_cache = build_live_client()
+        result = run_repeatability(
+            subset, live_client, model=args.model,
+            cache_dir=run_dir / "cache", tau=args.tau,
+        )
+        output_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         return 0
 
     # ---- candidates ----

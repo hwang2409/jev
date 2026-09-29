@@ -6,14 +6,20 @@
 
 ## OPEN follow-ups (from post-approval C2 gate review)
 
-- **T2 cache key test strengthening:** expected cache key still computed via shared
+- ~~**T2 cache key test strengthening:** expected cache key still computed via shared
   helpers (behavioral equality with jm runner confirmed by reviewer scratch probe);
-  strengthen to invoke `runner.records_for_state` directly.
+  strengthen to invoke `runner.records_for_state` directly.~~
+  **DONE (2026-09-29):** reworked test_t2 to use real judge() with fake transport + tmpdir CacheStore; expected key now read from the store the runner wrote to.
 - **Second-rename failure test:** trips on `freeze_safety`'s internal rename, never
   reaching run.py rollback; fail on destination path instead.
-- **Consolidate calibration response scoring with score_cases:** calibration
+- ~~**Consolidate calibration response scoring with score_cases:** calibration
   response scoring (run.py:830-879) duplicates the structure of `score_cases`
-  (run.py:280-339); consolidate so the paths cannot drift.
+  (run.py:280-339); consolidate so the paths cannot drift.~~
+  **DONE (2026-09-29):** extracted `_score_one_request` shared helper; calibration lane and `score_cases` both call it.
+- ~~**Repeatability CLI subcommand:** `run_repeatability` had no CLI entry point
+  (the real run drove it via a Python heredoc); add `run.py repeatability
+  --run <dir> --tau <t>` wiring subset construction and output.~~
+  **DONE (2026-09-29):** added `repeatability` subcommand with stratified subset construction (`build_repeatability_subset`), overwrite refusal, and tests.
 
 ---
 
@@ -95,8 +101,14 @@ checklist; each phase claims its subset.
 - Suite-wide no-live-network (autouse socket refusal)
 
 ## Post-approval follow-ups (C2 gate round 2, both minor, non-blocking)
-- test_contract_required T2: expected cache key still computed via shared helpers
+- ~~test_contract_required T2: expected cache key still computed via shared helpers
   (behavioral equality with jm runner confirmed by reviewer scratch probe);
-  strengthen to invoke runner.records_for_state directly.
+  strengthen to invoke runner.records_for_state directly.~~
+  **DONE (2026-09-29):** test_t2 now invokes real judge() with fake transport + tmpdir CacheStore.
 - Second-rename failure test trips on freeze_safety's internal rename, never
   reaching run.py:565-570 rollback; fail on destination path instead.
+- OPEN (2026-09-29, from follow-ups gate): repeatability subset construction
+  silently skips candidate case_ids absent from the authoritative cases file;
+  raise an error listing unknown ids and strengthen the test with a
+  sufficient-but-contaminated fixture (observability debt, adjudicated
+  non-blocking).
