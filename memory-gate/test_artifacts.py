@@ -148,3 +148,16 @@ def test_authoritative_builder_fingerprint_tracks_imported_source(monkeypatch):
 
     monkeypatch.setattr(artifacts, "build_memory_relevance_request", substitute)
     assert artifacts.authoritative_production_builder_hash() != artifacts.sha256(inspect.getsource(original).encode())
+
+
+def test_retrieval_scope_rejects_extra_keys(tmp_path):
+    """retrieval_scope must have EXACTLY the valid key set — no extra keys."""
+    copy_fixture(tmp_path)
+    candidates = rows("candidates.jsonl")
+    # Inject a scope with a valid key plus an unexpected extra key
+    candidates[0]["retrieval_scope"] = {"project": "alpha", "unexpected": True}
+    (tmp_path / "candidates.jsonl").write_text(
+        "".join(json.dumps(row, sort_keys=True) + "\n" for row in candidates)
+    )
+    with pytest.raises(artifacts.ArtifactValidationError, match="unexpected keys"):
+        artifacts.validate_run(tmp_path)

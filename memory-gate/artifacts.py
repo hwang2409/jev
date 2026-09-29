@@ -96,14 +96,19 @@ def _validate_rows(rows: list[dict[str, Any]], fields: Sequence[str], kind: str)
     for row in rows:
         _required(row, fields, kind)
         _provenance(row, kind)
-        # retrieval_scope: must be a dict with exactly one valid key
+        # retrieval_scope: must be a dict with EXACTLY the key set of one
+        # valid shape — no extra keys allowed.
         scope = row.get("retrieval_scope")
         if scope is not None:
             if not isinstance(scope, dict):
                 raise ArtifactValidationError(f"{kind}: retrieval_scope must be a dict")
-            valid_keys = {"root", "project", "all_projects"}
-            present = valid_keys & scope.keys()
-            if len(present) != 1:
+            scope_keys = set(scope.keys())
+            if scope_keys not in ({"root"}, {"project"}, {"all_projects"}):
+                extra = scope_keys - {"root", "project", "all_projects"}
+                if extra:
+                    raise ArtifactValidationError(
+                        f"{kind}: retrieval_scope contains unexpected keys {sorted(extra)}"
+                    )
                 raise ArtifactValidationError(f"{kind}: retrieval_scope must have exactly one of root/project/all_projects")
             if "root" in scope and (not isinstance(scope["root"], str) or not scope["root"]):
                 raise ArtifactValidationError(f"{kind}: retrieval_scope.root must be a non-empty string")

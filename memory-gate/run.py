@@ -217,6 +217,9 @@ def _resolve_scope(case: Mapping[str, Any]) -> dict[str, Any]:
       {"all_projects": True}
 
     Raises ScopeResolutionError for missing/empty/malformed scope.
+    Enforces strict XOR: exactly one of root/project/all_projects may be
+    present.  Multi-selector scopes (e.g. {"project":"x","all_projects":true})
+    are rejected rather than silently resolved by priority.
     """
     scope = case.get("scope")
     if not isinstance(scope, Mapping) or not scope:
@@ -224,18 +227,37 @@ def _resolve_scope(case: Mapping[str, Any]) -> dict[str, Any]:
             f"case {case.get('id', case.get('case_id', '?'))!r}: "
             f"missing or empty scope — refusing to silently broaden"
         )
-    root = scope.get("root")
-    if isinstance(root, str) and root:
+    selector_keys = {"root", "project", "all_projects"}
+    present = selector_keys & scope.keys()
+    if len(present) != 1:
+        raise ScopeResolutionError(
+            f"case {case.get('id', case.get('case_id', '?'))!r}: "
+            f"scope must contain exactly one of root/project/all_projects, "
+            f"found {sorted(present) if present else 'none'}"
+        )
+    if "root" in present:
+        root = scope["root"]
+        if not isinstance(root, str) or not root:
+            raise ScopeResolutionError(
+                f"case {case.get('id', case.get('case_id', '?'))!r}: "
+                f"malformed scope {scope!r} — root must be a non-empty string"
+            )
         return {"root": root}
-    project = scope.get("project")
-    if isinstance(project, str) and project:
+    if "project" in present:
+        project = scope["project"]
+        if not isinstance(project, str) or not project:
+            raise ScopeResolutionError(
+                f"case {case.get('id', case.get('case_id', '?'))!r}: "
+                f"malformed scope {scope!r} — project must be a non-empty string"
+            )
         return {"project": project}
-    if scope.get("all_projects") is True:
-        return {"all_projects": True}
-    raise ScopeResolutionError(
-        f"case {case.get('id', case.get('case_id', '?'))!r}: "
-        f"malformed scope {scope!r} — no recognised root/project/all_projects key"
-    )
+    # all_projects
+    if scope["all_projects"] is not True:
+        raise ScopeResolutionError(
+            f"case {case.get('id', case.get('case_id', '?'))!r}: "
+            f"malformed scope {scope!r} — all_projects must be true"
+        )
+    return {"all_projects": True}
 
 
 def _resolve_scope_flags(case: Mapping[str, Any]) -> list[str]:
