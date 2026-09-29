@@ -42,6 +42,7 @@ parse_production_scores = pipeline.parse_scores
 _production_adapter = pipeline.production_adapter
 prepare_candidates = pipeline.prepare_candidates
 select_blocks = pipeline.select_blocks
+validate_scores = pipeline.validate_scores
 
 BOOTSTRAPS = 10_000
 BOOTSTRAP_SEED = 20260929
@@ -163,11 +164,15 @@ def metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) 
     valid = [c for c in cases if c.get("valid", True)]
     answerable = [c for c in valid if c.get("answerable", True)]
     eligible = [c for c in answerable if any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"])]
-    injected = [select_blocks(c["candidates"], c["scores"], tau) for c in valid]
+    validated_scores = {
+        id(c): validate_scores(c["candidates"], c["scores"])
+        for c in valid
+    }
+    injected = [select_blocks(c["candidates"], validated_scores[id(c)], tau) for c in valid]
     positive_injected = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) == "positive")
     nonambiguous = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) in {"positive", "negative"})
-    recall = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in blocks) for blocks in [select_blocks(c["candidates"], c["scores"], tau) for c in eligible]), len(eligible))
-    no_gate = [select_blocks(c["candidates"], c["scores"], tau, no_gate=True) for c in eligible]
+    recall = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in blocks) for blocks in [select_blocks(c["candidates"], validated_scores[id(c)], tau) for c in eligible]), len(eligible))
+    no_gate = [select_blocks(c["candidates"], validated_scores[id(c)], tau, no_gate=True) for c in eligible]
     baseline = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in b) for b in no_gate), len(eligible))
     forbidden = sum(any(x["path"] in c.get("forbidden_paths", []) for x in b) for c, b in zip(valid, injected))
     return {

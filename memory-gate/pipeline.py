@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sys
 from collections.abc import Mapping, Sequence
 from datetime import datetime
@@ -97,7 +98,7 @@ def _known_hashes(case: Mapping[str, object]) -> set[str]:
 
 
 def prepare_candidates(
-    case: Mapping[str, object], retrieved: Sequence[Mapping[str, object]]
+    case: Mapping[str, object], retrieved: Sequence[object]
 ) -> list[dict[str, object]]:
     """Apply fresh-session production routing, returning at most ``TOP_K`` items.
 
@@ -108,18 +109,19 @@ def prepare_candidates(
 
     raw: list[dict[str, object]] = []
     for item in retrieved:
-        excerpt, path, heading = item.get("excerpt"), item.get("path"), item.get("heading", [])
-        if not isinstance(excerpt, str) or not excerpt or not isinstance(path, str):
+        if not isinstance(item, Mapping):
             continue
-        if isinstance(heading, str):
-            heading = [heading]
-        if not isinstance(heading, list) or not all(isinstance(part, str) for part in heading):
+        excerpt = item.get("excerpt")
+        if not isinstance(excerpt, str) or not excerpt:
             continue
         digest = content_hash(excerpt)
+        key = RoutingMixin._memory_key({**item, "content_hash": digest})
+        if key is None:
+            continue
         raw.append({
             "id": f"candidate-{len(raw)}",
-            "path": path,
-            "heading": list(heading),
+            "path": key[0],
+            "heading": list(key[1]),
             "excerpt": excerpt[:EXCERPT_CHARS],
             "content_hash": digest,
         })
@@ -160,17 +162,42 @@ def formation_state(request: Mapping[str, Any]) -> Any:
     return State("harness", json.dumps(request["state"], ensure_ascii=False, sort_keys=True))
 
 
+class ScoreValidationError(ValueError):
+    """A score artifact cannot safely drive memory gating."""
+
+
+def validate_scores(
+    candidates: Sequence[Mapping[str, object]], scores: Mapping[str, object] | None,
+) -> dict[str, float]:
+    """Require exactly one finite, in-range score for every candidate."""
+
+    expected = {
+        str(candidate.get("id", candidate.get("candidate_id", f"candidate-{i}")))
+        for i, candidate in enumerate(candidates)
+    }
+    if scores is None or set(scores) != expected or len(expected) != len(candidates):
+        raise ScoreValidationError("incomplete or non-one-to-one score coverage")
+    validated: dict[str, float] = {}
+    for identifier, score in scores.items():
+        if (
+            not isinstance(identifier, str)
+            or isinstance(score, bool)
+            or not isinstance(score, (int, float))
+            or not math.isfinite(score)
+            or not 0 <= score <= 1
+        ):
+            raise ScoreValidationError(f"invalid score for {identifier!r}")
+        validated[identifier] = float(score)
+    return validated
+
+
 def parse_scores(response: Mapping[str, Any], candidates: list[dict[str, Any]]) -> dict[str, float]:
-    """Parse through production and require complete candidate coverage."""
+    """Parse through production and require valid complete candidate coverage."""
 
     answers = response.get("answers")
     if not isinstance(answers, Mapping):
         raise TypeError("missing adapter answers")
-    scores = _parse_memory_relevance(dict(answers), candidates)
-    expected = {str(candidate.get("id", f"candidate-{i}")) for i, candidate in enumerate(candidates)}
-    if set(scores) != expected:
-        raise ValueError("partial score coverage")
-    return scores
+    return validate_scores(candidates, _parse_memory_relevance(dict(answers), candidates))
 
 
 def render_block(candidate: Mapping[str, object]) -> str:
@@ -190,13 +217,14 @@ def select_blocks(
     *,
     no_gate: bool = False,
 ) -> list[Mapping[str, object]]:
-    """Preserve retrieval order; strict gate and full-block first-over-budget break."""
+    """Validate scores, then preserve order and apply the strict gate."""
 
+    validated_scores = validate_scores(candidates, scores)
     selected: list[Mapping[str, object]] = []
     total = 0
     for candidate in candidates:
         identifier = str(candidate.get("id", candidate.get("candidate_id")))
-        score = scores.get(identifier) if scores is not None else None
+        score = validated_scores[identifier]
         if not no_gate and (score is None or not score > tau):
             continue
         block = render_block(candidate)

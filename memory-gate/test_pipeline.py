@@ -24,11 +24,23 @@ def test_hash_before_truncation_and_normalization():
     assert pipeline.content_hash(" a  b\n c ") == pipeline.content_hash("a b c")
 
 
-def test_cross_path_content_dedupe_and_top_two_before_scoring():
-    candidates = pipeline.prepare_candidates({}, [item("same", "a"), item("same", "b"), item("third", "c")])
-    assert [x["id"] for x in candidates] == ["candidate-0", "candidate-2"]
+def test_top_two_cap_excludes_third_candidate_from_state_and_questions():
+    candidates = pipeline.prepare_candidates({}, [item("one", "a"), item("two", "b"), item("three", "c")])
+    assert [x["id"] for x in candidates] == ["candidate-0", "candidate-1"]
     request = pipeline.build_request("q", candidates)
-    assert [x["id"] for x in request["state"]["memory_candidates"]] == ["candidate-0", "candidate-2"]
+    assert [x["id"] for x in request["state"]["memory_candidates"]] == ["candidate-0", "candidate-1"]
+    assert all("candidate-2" not in question["instructions"]["item_field"] for question in request["questions"].values())
+
+
+def test_retrieval_normalization_skips_non_mapping_and_keeps_none_heading():
+    candidates = pipeline.prepare_candidates({}, ["not a candidate", {"excerpt": "valid", "path": "p", "heading": None}])
+    assert candidates == [{
+        "id": "candidate-0",
+        "path": "p",
+        "heading": [],
+        "excerpt": "valid",
+        "content_hash": pipeline.content_hash("valid"),
+    }]
 
 
 def test_candidate_id_after_invalid_discard():
@@ -50,7 +62,8 @@ def test_retrieval_order_not_score_order_and_strict_gate():
     cs = pipeline.prepare_candidates({}, cs)
     scores = {str(cs[0]["id"]): .9, str(cs[1]["id"]): .95}
     assert [x["path"] for x in pipeline.select_blocks(cs, scores, .5)] == ["1", "2"]
-    assert pipeline.select_blocks(cs, {str(cs[0]["id"]): .5}, .5) == []
+    with pytest.raises(pipeline.ScoreValidationError, match="coverage"):
+        pipeline.select_blocks(cs, {str(cs[0]["id"]): .5}, .5)
 
 
 def test_exact_serialization_real_prefix():
@@ -88,3 +101,10 @@ def test_golden_canonical_request_bytes_and_parsed_scores():
 def test_parse_rejects_incomplete_scores():
     with pytest.raises((KeyError, ValueError)):
         pipeline.parse_scores({"answers": {}}, [{"id": "a", "excerpt": "x"}])
+
+
+def test_selection_rejects_invalid_scores_without_partial_injection():
+    candidates = [{"id": "a", "path": "a", "heading": [], "excerpt": "a"}, {"id": "b", "path": "b", "heading": [], "excerpt": "b"}]
+    for scores in ({"a": .9}, {"a": .9, "b": float("nan")}, {"a": .9, "b": 1.1}):
+        with pytest.raises(pipeline.ScoreValidationError):
+            pipeline.select_blocks(candidates, scores, .5)

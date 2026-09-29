@@ -20,14 +20,27 @@ FIXTURE = HERE / "runs" / "fixture-dev"
 def test_fixture_schema_and_replay():
     run.validate_artifact(FIXTURE)
     candidates = run.read_jsonl(FIXTURE / "candidates.jsonl")
-    scores = {row["candidate_id"]: row["score"] for row in run.read_jsonl(FIXTURE / "scores.jsonl")}
+    all_scores = {row["candidate_id"]: row["score"] for row in run.read_jsonl(FIXTURE / "scores.jsonl")}
     labels = {row["candidate_id"]: row["label"] for row in run.read_jsonl(FIXTURE / "labels.jsonl")}
     grouped = {}
     for row in candidates:
         grouped.setdefault(row["case_id"], []).append(row)
     assert {len(v) for v in grouped.values()} <= {1, 2}
-    assert run.select_blocks(grouped["case-1"], scores, 0.6)[0]["candidate_id"] == "case-1:candidate-0"
-    assert run.metrics([{"case_id": cid, "candidates": rows, "scores": scores, "answerable": True} for cid, rows in grouped.items()], .6, labels)["packet_precision"] == 1.0
+    scores = {
+        cid: {row["candidate_id"]: all_scores[row["candidate_id"]] for row in rows}
+        for cid, rows in grouped.items()
+    }
+    assert run.select_blocks(grouped["case-1"], scores["case-1"], 0.6)[0]["candidate_id"] == "case-1:candidate-0"
+    assert run.metrics([{"case_id": cid, "candidates": rows, "scores": scores[cid], "answerable": True} for cid, rows in grouped.items()], .6, labels)["packet_precision"] == 1.0
+
+
+def test_partial_score_artifact_aborts_metrics():
+    candidates = [
+        {"candidate_id": "a", "path": "a", "heading": [], "excerpt": "a"},
+        {"candidate_id": "b", "path": "b", "heading": [], "excerpt": "b"},
+    ]
+    with pytest.raises(run.pipeline.ScoreValidationError):
+        run.metrics([{"candidates": candidates, "scores": {"a": 0.9}}], 0.6, {})
 
 
 def test_locomo_category5_filter_and_assertion():
