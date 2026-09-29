@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 import pytest
+
 import run
 
 
@@ -12,7 +13,8 @@ def test_fake_client_scoring_records_complete_coverage_and_cache(tmp_path):
     def fake(request):
         calls.append(request)
         return {"answers": {f"memory_relevance_{i}": {"noul": .7 + i / 10}
-                              for i in range(len(request["state"]["memory_candidates"]))}}
+                              for i in range(len(request["state"]["memory_candidates"]))},
+                "configured_model": "m", "served_model": "m"}
 
     cases = [{"case_id": "c", "query": "q", "retrieved": [
         {"path": "a.md", "heading": [], "excerpt": "a"},
@@ -41,12 +43,12 @@ def test_repeatability_identity_and_crossing_fraction():
 def test_frozen_safety_wilson_and_non_authoritative_curve(tmp_path):
     path = tmp_path / "safety.json"
     result = run.freeze_safety(path, witness_commit="abc", tau=.6,
-                               false_injections=1, total=100)
-    assert result["point_estimate"] == .01
-    assert result["wilson_95"][1] == pytest.approx(.054486, abs=1e-5)
-    assert result["accepts"] is False
+                               false_injections=1, total=446)
+    assert result["point_estimate"] == pytest.approx(1 / 446)
+    assert result["wilson_95"][1] == pytest.approx(.01258969, abs=1e-5)
+    assert result["accepts"] is True
     with pytest.raises(FileExistsError):
-        run.freeze_safety(path, witness_commit="abc", tau=.6, false_injections=0, total=100)
+        run.freeze_safety(path, witness_commit="abc", tau=.6, false_injections=0, total=446)
     curve = tmp_path / "posthoc-safety-curve.json"
     run.write_posthoc_curve(curve, [{"tau": .6}])
     assert json.loads(curve.read_text())["authoritative"] is False

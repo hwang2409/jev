@@ -8,6 +8,7 @@ sequence in ``runtime/loop/routing.py:413-460`` and ``:535-580``.
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 import sys
@@ -167,6 +168,22 @@ class AdapterError(RuntimeError):
     """The complete production judgment path could not produce valid coverage."""
 
 
+def _decode_records(records: Sequence[Any]) -> Any:
+    """Decode terminal records in production order, retaining error context."""
+    coverage = next((r for r in records if r.to_dict().get("record_type") == "coverage"), None)
+    if coverage is None:
+        raise AdapterError("missing coverage: Jev judgment produced no coverage record")
+    coverage_payload = coverage.to_dict()
+    if coverage_payload.get("coverage") != "complete":
+        raise AdapterError(f"partial coverage: {coverage_payload.get('coverage', 'incomplete')}")
+    result = next((r for r in records if r.to_dict().get("record_type") == "result"), None)
+    if result is not None:
+        return result
+    error = next((r for r in records if r.to_dict().get("record_type") == "error"), None)
+    detail = error.to_dict().get("error", {}) if error is not None else {}
+    raise AdapterError(f"result error: {detail or 'Jev judgment failed'}")
+
+
 def evaluate_production(
     request: Mapping[str, Any], client: Any = None, *, cache_store: Any = None,
     model: str | None = None,
@@ -206,11 +223,16 @@ def evaluate_production(
 
             return response
     else:
+        # The legacy one-argument adapter is selected before invocation.  Never
+        # use a TypeError from inside a transport as protocol negotiation.
+        try:
+            parameters = inspect.signature(client).parameters
+            legacy_callable = len(parameters) == 1
+        except (TypeError, ValueError):
+            legacy_callable = False
+
         def judge_fn(call_state: Any, call_questions: Any, configured_model: str) -> Any:
-            try:
-                response = client(call_state, call_questions, configured_model)
-            except TypeError:
-                response = client(request)
+            response = client(request) if legacy_callable else client(call_state, call_questions, configured_model)
             if isinstance(response, Mapping):
                 from jm.answers import parse_judge_response
                 payload = response
@@ -229,14 +251,7 @@ def evaluate_production(
         preset, (state,), formation_report=FormationReport(),
         cache_store=cache_store, judge_fn=judge_fn,
     ))
-    coverage = next((record for record in records if record.to_dict().get("record_type") == "coverage"), None)
-    if coverage is None or coverage.to_dict().get("coverage") != "complete":
-        raise AdapterError("Jev judgment did not produce complete terminal coverage")
-    result = next((record for record in records if record.to_dict().get("record_type") == "result"), None)
-    if result is None:
-        error = next((record for record in records if record.to_dict().get("record_type") == "error"), None)
-        detail = error.to_dict().get("error", {}) if error is not None else {}
-        raise AdapterError(str(detail) or "Jev judgment failed")
+    result = _decode_records(records)
     payload = result.to_dict()
     return {
         "answers": payload["answers"],
