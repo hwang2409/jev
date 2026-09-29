@@ -1,6 +1,6 @@
 # Memory-Gate Calibration Eval — Design
 
-Status: DRAFT v4 (revised after design review rounds 1-3)
+Status: DRAFT v5 (revised after design review rounds 1-4)
 Owner: henry / zeta-orchestrated
 Depends on: pausanias (frozen eval cases + locomo10 benchmark runner), jm (Jev client + cache), harness (production adapter)
 
@@ -221,15 +221,21 @@ deterministically from the pinned fetch; regeneration documented in run.py).
    `runs/<...>/LOCK.json`, and that file is **committed and pushed to the
    remote before any safety-lane scoring** — the pushed commit hash is the
    witness that the lock preceded unblinding (a hash sitting in a mutable
-   local directory proves nothing). `run.py score --lane safety` REFUSES to
-   run if: no LOCK.json, LOCK.json hashes disagree with the present
-   calibration artifacts, or safety outputs already exist. The locked-tau
-   pass/fail result is computed and frozen first; only then does a separate
-   `run.py posthoc-safety-curve` command exist, whose artifact is permanently
-   labeled non-authoritative — it cannot authorize a revised threshold;
-   revision requires new held-out data. The §5 sweep applies to the
-   calibration lane only; the safety lane is evaluated at the locked tau
-   (plus the labeled post-hoc artifact).
+   local directory proves nothing). `run.py score --lane safety` takes
+   `--witness <commit>` as a REQUIRED input and refuses to run unless ALL
+   hold, verified at invocation time: (a) LOCK.json exists and its hashes
+   match the present calibration artifacts; (b) the exact bytes of LOCK.json
+   are contained in the witness commit (`git show <commit>:<path>` compared
+   byte-for-byte); (c) after a fresh `git fetch` of the designated remote,
+   the witness commit is reachable from the remote-tracking ref — i.e. the
+   lock is provably published, not merely local; (d) no safety outputs
+   already exist. The verified witness commit hash is recorded inside the
+   frozen safety artifact. The locked-tau pass/fail result is computed and
+   frozen first; only then does a separate `run.py posthoc-safety-curve`
+   command exist, whose artifact is permanently labeled non-authoritative —
+   it cannot authorize a revised threshold; revision requires new held-out
+   data. The §5 sweep applies to the calibration lane only; the safety lane
+   is evaluated at the locked tau (plus the labeled post-hoc artifact).
 4. Safety acceptance (REQUIRED): at the locked tau, on the 446-question lane
    with complete coverage: false-injection point estimate <= 2% AND Wilson
    95% upper bound <= 4%. (Lexical baseline: 6/446 = 1.35%, which passes
