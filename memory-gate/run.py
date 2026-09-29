@@ -189,13 +189,34 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
     return [dict(case) for case in data if isinstance(case, Mapping)]
 
 
+def _resolve_scope_flags(case: Mapping[str, Any]) -> list[str]:
+    """Derive pausanias --project / --all-projects flags from case scope.
+
+    Case schema:
+      scope.project  -> --project <name>
+      scope.all_projects true (or absent scope / absent scope.project) -> --all-projects
+    """
+    scope = case.get("scope")
+    if isinstance(scope, Mapping):
+        project = scope.get("project")
+        if isinstance(project, str) and project:
+            return ["--project", project]
+        if scope.get("all_projects"):
+            return ["--all-projects"]
+    # No scope block at all -> all-projects (backward-compatible default)
+    return ["--all-projects"]
+
+
 def _search_pausanias(case: Mapping[str, Any], *, executable: str, config: Path | None,
                       cwd: Path | None = None) -> list[dict[str, Any]]:
     """Run the pinned pausanias CLI; stdout is deliberately the only protocol."""
     command = [executable, "-m", "pausanias"]
     if config is not None:
         command += ["--config", str(config)]
-    command += ["search", "--json", str(case.get("query", ""))]
+    command += ["search", "--json"]
+    command += ["--retrieval-mode", "fused"]
+    command += _resolve_scope_flags(case)
+    command += [str(case.get("query", ""))]
     completed = subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
     payload = json.loads(completed.stdout)
     if isinstance(payload, dict):
@@ -205,29 +226,88 @@ def _search_pausanias(case: Mapping[str, Any], *, executable: str, config: Path 
     return [dict(item) for item in payload if isinstance(item, Mapping)]
 
 
+def _corpus_fingerprint(config_path: Path | None) -> str:
+    """Deterministic corpus fingerprint: SHA-256 of the config file bytes.
+
+    When no config is available, returns 'unavailable' rather than the
+    previous 'unknown' — honesty over placeholders.
+    """
+    if config_path is not None and config_path.exists():
+        return sha256_bytes(config_path.read_bytes())
+    return "unavailable"
+
+
+def _git_revision(repo: Path | None, label: str = "revision") -> str:
+    """Best-effort git rev-parse HEAD for a checkout; 'unavailable' on failure."""
+    if repo is None:
+        return "unavailable"
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo,
+            capture_output=True, text=True, timeout=5, check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+    return "unavailable"
+
+
+# Maximum fraction of zero-candidate cases before generation fails.
+# DESIGN §4 spirit: "silent mass-emptiness must be impossible."
+# If >20% of cases retrieve zero candidates, the run is refused.
+EMPTY_RETRIEVAL_THRESHOLD = 0.20
+
+
+class EmptyRetrievalError(RuntimeError):
+    """Raised when too many cases retrieve zero candidates."""
+
+
 def generate_candidates(case_path: Path, output: Path, *, pausanias_executable: str = sys.executable,
                          pausanias_config: Path | None = None, pausanias_cwd: Path | None = None,
                          provenance: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
     cases = load_cases(case_path)
     base = dict(provenance or {})
     base.setdefault("case_set_fingerprint", sha256_bytes(case_path.read_bytes()))
-    base.setdefault("corpus_fingerprint", "unknown")
-    base.setdefault("pausanias_revision", "unknown")
-    base.setdefault("retrieval_config", {"config": str(pausanias_config) if pausanias_config else None,
-                                          "command": "python -m pausanias --config <config> search --json"})
+    base.setdefault("corpus_fingerprint", _corpus_fingerprint(pausanias_config))
+    pausanias_checkout = Path("/tmp/pausanias")
+    base.setdefault("pausanias_revision", _git_revision(
+        pausanias_checkout if pausanias_checkout.is_dir() else None))
+    base.setdefault("retrieval_config", {
+        "config": str(pausanias_config) if pausanias_config else None,
+        "retrieval_mode": "fused",
+        "command": "python -m pausanias --config <config> search --json --retrieval-mode fused",
+    })
     base.setdefault("production_builder_hash", artifacts.authoritative_production_builder_hash())
     base.setdefault("configured_model_id", "unscored")
     base.setdefault("served_model_id", "unscored")
-    base.setdefault("harness_revision", "unknown")
-    base.setdefault("jm_revision", "unknown")
+    base.setdefault("harness_revision", _git_revision(ROOT / "harness" if (ROOT / "harness").is_dir() else None))
+    base.setdefault("jm_revision", _git_revision(ROOT / "jm" if (ROOT / "jm").is_dir() else None))
     enriched = []
+    empty_count = 0
     for case in cases:
         current = dict(case)
         current.setdefault("case_id", current.get("id"))
         if not isinstance(current["case_id"], str):
             raise TypeError("each case requires id/case_id")
-        current["retrieved"] = _search_pausanias(case, executable=pausanias_executable, config=pausanias_config, cwd=pausanias_cwd)
+        retrieved = _search_pausanias(case, executable=pausanias_executable, config=pausanias_config, cwd=pausanias_cwd)
+        current["retrieved"] = retrieved
+        # Record per-case retrieval config in provenance
+        scope_flags = _resolve_scope_flags(case)
+        current["retrieval_config"] = {
+            "retrieval_mode": "fused",
+            "scope": scope_flags,
+        }
+        if not retrieved:
+            empty_count += 1
         enriched.append(current)
+    # Guard: refuse generation if too many cases are empty (DESIGN §4)
+    if cases and empty_count / len(cases) > EMPTY_RETRIEVAL_THRESHOLD:
+        raise EmptyRetrievalError(
+            f"{empty_count}/{len(cases)} cases ({empty_count / len(cases):.0%}) "
+            f"retrieved zero candidates — exceeds {EMPTY_RETRIEVAL_THRESHOLD:.0%} "
+            f"threshold; refusing generation (scope or config likely misconfigured)"
+        )
     rows = candidate_rows(enriched, base)
     for case_id in {row["case_id"] for row in rows}:
         group = [row for row in rows if row["case_id"] == case_id]

@@ -284,7 +284,13 @@ def test_t7_second_rename_failure_leaves_no_partial_outputs(tmp_path, monkeypatc
 
 def test_t8_candidate_subprocess_fixture_and_locomo_boundaries(tmp_path):
     executable = tmp_path / "fake-pausanias"
-    executable.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps([{'excerpt':'x','path':'x.md','heading':[]}]))\n")
+    executable.write_text(
+        "#!/usr/bin/env python3\nimport json, sys\n"
+        "args = sys.argv[1:]\n"
+        "assert '--retrieval-mode' in args, f'missing --retrieval-mode in {args}'\n"
+        "assert '--all-projects' in args or '--project' in args, f'missing scope flag in {args}'\n"
+        "print(json.dumps([{'excerpt':'x','path':'x.md','heading':[]}]))\n"
+    )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
     cases = tmp_path / "cases.json"; cases.write_text(json.dumps([_case()]))
     output = tmp_path / "candidates.jsonl"
@@ -373,3 +379,198 @@ def test_t9_locomo_shaped_dataset_through_real_filter_succeeds(monkeypatch, tmp_
     artifact = json.loads((run_dir / "safety.json").read_text())
     assert artifact["authoritative"] and artifact["witness_commit"] == witness
     assert artifact["tau"] == json.loads((run_dir / "LOCK.json").read_text())["tau"] == tau
+
+
+# ---------------------------------------------------------------------------
+# T10: Scope flags + retrieval-mode fidelity (Fix 1, Fix 2, Fix 5)
+# ---------------------------------------------------------------------------
+
+def test_t10_resolve_scope_flags():
+    """_resolve_scope_flags must produce --project <name> for project-scoped
+    cases and --all-projects for unscoped / all_projects cases."""
+    assert run._resolve_scope_flags({"scope": {"project": "phoebe"}}) == ["--project", "phoebe"]
+    assert run._resolve_scope_flags({"scope": {"all_projects": True}}) == ["--all-projects"]
+    assert run._resolve_scope_flags({"scope": {}}) == ["--all-projects"]
+    assert run._resolve_scope_flags({}) == ["--all-projects"]
+    assert run._resolve_scope_flags({"scope": {"project": ""}}) == ["--all-projects"]
+
+
+def _fake_pausanias_asserting_script() -> str:
+    """Fake pausanias that asserts scope and retrieval-mode flags, then
+    echoes the received args as JSON metadata alongside a dummy result."""
+    return (
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "args = sys.argv[1:]\n"
+        "# Strict seam: must receive --retrieval-mode fused\n"
+        "assert '--retrieval-mode' in args, f'missing --retrieval-mode in {args}'\n"
+        "rm_idx = args.index('--retrieval-mode')\n"
+        "assert args[rm_idx + 1] == 'fused', f'expected fused, got {args[rm_idx + 1]}'\n"
+        "# Strict seam: must receive a scope flag\n"
+        "has_project = '--project' in args\n"
+        "has_all = '--all-projects' in args\n"
+        "assert has_project or has_all, f'missing scope flag in {args}'\n"
+        "assert not (has_project and has_all), f'both --project and --all-projects in {args}'\n"
+        "# Encode which scope we received for test assertion\n"
+        "scope_kind = 'project' if has_project else 'all_projects'\n"
+        "scope_value = args[args.index('--project') + 1] if has_project else None\n"
+        "print(json.dumps([{"
+        "'excerpt': f'scope={scope_kind}:{scope_value}', "
+        "'path': 'test.md', 'heading': []}]))\n"
+    )
+
+
+def test_t10_project_scoped_case_passes_project_flag(tmp_path):
+    """A case with scope.project='phoebe' must produce --project phoebe in
+    the pausanias subprocess; the fake asserts and echoes."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "scoped-1", "query": "where?",
+         "scope": {"project": "phoebe"}},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    assert len(rows) == 1
+    assert "scope=project:phoebe" in rows[0]["presented_excerpt"]
+
+
+def test_t10_all_projects_case_passes_all_projects_flag(tmp_path):
+    """A case with scope.all_projects=true must produce --all-projects."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "global-1", "query": "anything",
+         "scope": {"all_projects": True}},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    assert len(rows) == 1
+    assert "scope=all_projects:None" in rows[0]["presented_excerpt"]
+
+
+def test_t10_mixed_scope_cases(tmp_path):
+    """Both a project-scoped and an all-projects case in one generation."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "proj-1", "query": "q1", "scope": {"project": "phoebe"}},
+        {"case_id": "glob-1", "query": "q2", "scope": {"all_projects": True}},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    proj_rows = [r for r in rows if r["case_id"] == "proj-1"]
+    glob_rows = [r for r in rows if r["case_id"] == "glob-1"]
+    assert proj_rows and "scope=project:phoebe" in proj_rows[0]["presented_excerpt"]
+    assert glob_rows and "scope=all_projects:None" in glob_rows[0]["presented_excerpt"]
+
+
+# ---------------------------------------------------------------------------
+# T11: Zero-candidate guard (Fix 4)
+# ---------------------------------------------------------------------------
+
+def test_t11_mass_empty_retrieval_raises(tmp_path):
+    """If >20% of cases return zero candidates, generation must fail loudly."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "# Accept any args but return empty\n"
+        "print(json.dumps([]))\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": f"case-{i}", "query": f"query-{i}"} for i in range(10)
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    with pytest.raises(run.EmptyRetrievalError, match="10/10.*100%.*threshold"):
+        run.generate_candidates(cases, output, pausanias_executable=str(executable))
+
+
+def test_t11_below_threshold_succeeds(tmp_path):
+    """If <=20% of cases return zero candidates, generation proceeds."""
+    # 1/5 = 20% -> exactly at threshold, should pass (> not >=)
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "query = sys.argv[-1]\n"
+        "if 'empty' in query:\n"
+        "    print(json.dumps([]))\n"
+        "else:\n"
+        "    print(json.dumps([{'excerpt':'data','path':'f.md','heading':[]}]))\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    case_list = [{"case_id": f"case-{i}", "query": f"query-{i}"} for i in range(4)]
+    case_list.append({"case_id": "case-empty", "query": "empty"})
+    cases.write_text(json.dumps(case_list))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    # 4 cases have 1 candidate each, 1 case has 0 -> 4 rows total
+    assert len(rows) == 4
+
+
+# ---------------------------------------------------------------------------
+# T12: Provenance placeholders are real values (Fix 3)
+# ---------------------------------------------------------------------------
+
+def test_t12_corpus_fingerprint_is_not_unknown(tmp_path):
+    """corpus_fingerprint must be computed from config file, not 'unknown'."""
+    config = tmp_path / "corpus.toml"
+    config.write_text("[corpus]\npath = '/tmp'\n")
+    fp = run._corpus_fingerprint(config)
+    assert fp != "unknown"
+    assert fp != "unavailable"
+    assert len(fp) == 64  # sha256 hex
+    # Deterministic
+    assert fp == run._corpus_fingerprint(config)
+
+
+def test_t12_corpus_fingerprint_unavailable_without_config():
+    """No config -> 'unavailable', not 'unknown'."""
+    assert run._corpus_fingerprint(None) == "unavailable"
+    assert run._corpus_fingerprint(Path("/nonexistent")) == "unavailable"
+
+
+def test_t12_git_revision_returns_hash_in_real_repo():
+    """In the jev-work checkout, _git_revision should return a commit hash."""
+    rev = run._git_revision(Path("/tmp/jev-work"))
+    assert rev != "unavailable"
+    assert len(rev) == 40  # full SHA-1
+
+
+def test_t12_git_revision_unavailable_for_nonexistent():
+    assert run._git_revision(None) == "unavailable"
+    assert run._git_revision(Path("/nonexistent")) == "unavailable"
+
+
+def test_t12_retrieval_config_records_mode_in_candidates(tmp_path):
+    """retrieval_config in provenance must include retrieval_mode: fused."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(
+        "#!/usr/bin/env python3\n"
+        "import json, sys\n"
+        "assert '--retrieval-mode' in sys.argv, f'missing --retrieval-mode in {sys.argv}'\n"
+        "assert '--all-projects' in sys.argv or '--project' in sys.argv\n"
+        "print(json.dumps([{'excerpt':'x','path':'x.md','heading':[]}]))\n"
+    )
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([{"case_id": "c1", "query": "q"}]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    assert rows[0]["retrieval_config"]["retrieval_mode"] == "fused"
