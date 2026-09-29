@@ -8,9 +8,14 @@ sibling ``jm`` checkout to sys.path, matching harness/pyproject.toml's local
 regeneration is intentionally local-only; locomo regeneration is documented
 below and must use pausanias' pinned runner/fetch, not a vendored dataset.
 
-No command in this module performs a Jev request.  ``score`` consumes a
-committed/cache response JSON file; a live adapter is supplied by the eventual
-homelab invocation outside this offline contractor.
+When ``--responses`` is supplied, ``score`` replays from a JSON fixture file.
+When ``--responses`` is absent, ``score`` constructs a live Jev client using
+``jm.client.JevClient`` (see ``jm/jm/runner.py:1132-1134``) with env
+``VERCEL_AI_GATEWAY`` (resolved via ``jm/jm/_transport.py:60-72``,
+``_resolve_gateway_key``), wired through ``jm.cache.CacheStore`` (see
+``jm/jm/cache.py:296``) so repeat runs replay from the content-addressed
+cache.  Live requests route through the same ``evaluate_production`` adapter
+seam (``pipeline.py``) used by fixtures and offline scoring.
 """
 from __future__ import annotations
 
@@ -390,12 +395,68 @@ def generate_candidates(case_path: Path, output: Path, *, pausanias_executable: 
     return rows
 
 
-def _client_response(client: Any, request: Mapping[str, Any], *, model: str) -> Mapping[str, Any]:
+def _client_response(client: Any, request: Mapping[str, Any], *, model: str,
+                     cache_store: Any = None) -> Mapping[str, Any]:
     """Cross the one production-adapter seam and retain response metadata."""
-    response = pipeline.evaluate_production(request, client, model=model)
+    response = pipeline.evaluate_production(
+        request, client, model=model, cache_store=cache_store,
+    )
     if not isinstance(response, Mapping):
         raise TypeError("production adapter response must be a mapping")
     return response
+
+
+class LiveClientError(RuntimeError):
+    """Raised when the live client cannot be constructed."""
+
+
+# Default model: ``typesafe-ai/jev`` — the gateway model id used by jm's
+# transport (``jm/jm/_transport.py:8``), the ``runtime_preset`` builder
+# (``jm/jm/client.py:413``), and this runner's ``--model`` default.
+_LIVE_DEFAULT_MODEL = "typesafe-ai/jev"
+
+
+def build_live_client(
+    *, _client_factory: Any = None,
+) -> tuple[Any, Any]:
+    """Construct a live ``JevClient`` and ``CacheStore`` for real scoring.
+
+    Requires env ``VERCEL_AI_GATEWAY`` (or one of the fallback key names
+    checked by ``jm/jm/_transport.py:60-72``, ``_resolve_gateway_key``).
+
+    The ``_client_factory`` parameter is a test seam: when provided, it is
+    called instead of constructing a real ``JevClient``.  Production callers
+    never pass it.
+
+    Returns ``(client, cache_store)`` — the client has an ``.evaluate`` method
+    compatible with ``pipeline.evaluate_production``'s ``client`` parameter.
+
+    Construction mirrors ``jm/jm/runner.py:1132-1134``:
+        from .client import JevClient
+        client = JevClient()
+    """
+    # Eagerly check the env var so the user gets a clear error before any
+    # network I/O or heavyweight imports.
+    from jm._transport import _resolve_gateway_key
+
+    if _resolve_gateway_key() is None:
+        raise LiveClientError(
+            "live scoring requires env VERCEL_AI_GATEWAY "
+            "(or AI_GATEWAY_API_KEY / VERCEL_JEV_KEY)"
+        )
+
+    from jm.cache import CacheStore as _CacheStore
+
+    cache_store = _CacheStore()
+
+    if _client_factory is not None:
+        client = _client_factory()
+    else:
+        # Real construction — matches jm/jm/runner.py:1132-1134.
+        from jm.client import JevClient
+        client = JevClient()
+
+    return client, cache_store
 
 
 def _formed_state(request: Mapping[str, Any]) -> Any:
@@ -423,7 +484,8 @@ def _cache_key(request: Mapping[str, Any], model: str) -> str:
 
 
 def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
-                cache_dir: Path | None = None, bypass_cache: bool = False) -> list[dict[str, Any]]:
+                cache_dir: Path | None = None, bypass_cache: bool = False,
+                cache_store: Any = None) -> list[dict[str, Any]]:
     """Score the exact production batteries, with a small content-addressed replay cache."""
     rows: list[dict[str, Any]] = []
     provenance_defaults = {
@@ -445,7 +507,8 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
             if cache_file and cache_file.exists() and not bypass_cache:
                 response = json.loads(cache_file.read_text())
             else:
-                response = _client_response(client, request, model=model)
+                response = _client_response(client, request, model=model,
+                                            cache_store=cache_store)
                 if cache_file:
                     cache_file.parent.mkdir(parents=True, exist_ok=True)
                     cache_file.write_text(json.dumps(response, sort_keys=True))
@@ -932,21 +995,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                 repo=repo,
             )
             if args.responses is None:
-                raise SystemExit("offline score requires --responses JSON")
-            response_data = json.loads(args.responses.read_text())
-            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+                # Live mode: construct real client and score over the network.
+                live_client, live_cache = build_live_client()
+                cases = safety_cases(load_cases(args.cases))
+                scores = score_cases(
+                    cases, live_client, model=args.model,
+                    cache_dir=run_dir / "cache", bypass_cache=True,
+                    cache_store=live_cache,
+                )
+            else:
+                response_data = json.loads(args.responses.read_text())
+                responses = iter(response_data if isinstance(response_data, list) else [response_data])
 
-            def file_client_safety(_request):
-                try:
-                    return next(responses)
-                except StopIteration as exc:
-                    raise RuntimeError("response fixture exhausted") from exc
+                def file_client_safety(_request):
+                    try:
+                        return next(responses)
+                    except StopIteration as exc:
+                        raise RuntimeError("response fixture exhausted") from exc
 
-            cases = safety_cases(load_cases(args.cases))
-            scores = score_cases(
-                cases, file_client_safety, model=args.model,
-                cache_dir=run_dir / "cache", bypass_cache=True,
-            )
+                cases = safety_cases(load_cases(args.cases))
+                scores = score_cases(
+                    cases, file_client_safety, model=args.model,
+                    cache_dir=run_dir / "cache", bypass_cache=True,
+                )
             expected_case_ids = {str(case["case_id"]) for case in cases}
             safety_result(
                 scores,
@@ -960,9 +1031,6 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         # -- calibration lane --
         if lane == "calibration":
-            if args.responses is None:
-                raise SystemExit("offline score requires --responses JSON")
-
             # Blocker 1: CONSUME existing candidates, never regenerate
             candidates_path = run_dir / "candidates.jsonl"
             if not candidates_path.exists():
@@ -982,14 +1050,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             for row in existing_candidates:
                 cases_by_id.setdefault(row["case_id"], []).append(row)
 
-            response_data = json.loads(args.responses.read_text())
-            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+            if args.responses is not None:
+                # Offline fixture path (unchanged).
+                response_data = json.loads(args.responses.read_text())
+                responses = iter(response_data if isinstance(response_data, list) else [response_data])
 
-            def file_client_cal(_request):
-                try:
-                    return next(responses)
-                except StopIteration as exc:
-                    raise RuntimeError("response fixture exhausted") from exc
+                def file_client_cal(_request):
+                    try:
+                        return next(responses)
+                    except StopIteration as exc:
+                        raise RuntimeError("response fixture exhausted") from exc
+
+                cal_client: Any = file_client_cal
+                cal_cache_store: Any = None
+            else:
+                # Live mode: real client over the network.
+                cal_client, cal_cache_store = build_live_client()
 
             score_rows: list[dict[str, Any]] = []
             for cand_group in cases_by_id.values():
@@ -1005,7 +1081,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 configured_model = args.model
                 served_model = args.model
                 try:
-                    response = file_client_cal(request)
+                    response = _client_response(
+                        cal_client, request, model=args.model,
+                        cache_store=cal_cache_store,
+                    )
                     configured_raw = response.get("configured_model")
                     served_raw = response.get("served_model")
                     if not configured_raw or not served_raw:
@@ -1039,23 +1118,29 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 0
 
-        # Generic offline scoring with --cases
+        # Generic scoring with --cases
         if args.cases is not None:
-            if args.responses is None:
-                raise SystemExit("offline score requires --responses JSON")
-            response_data = json.loads(args.responses.read_text())
-            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+            if args.responses is not None:
+                response_data = json.loads(args.responses.read_text())
+                responses = iter(response_data if isinstance(response_data, list) else [response_data])
 
-            def file_client_gen(_request):
-                try:
-                    return next(responses)
-                except StopIteration as exc:
-                    raise RuntimeError("response fixture exhausted") from exc
+                def file_client_gen(_request):
+                    try:
+                        return next(responses)
+                    except StopIteration as exc:
+                        raise RuntimeError("response fixture exhausted") from exc
+
+                gen_client: Any = file_client_gen
+                gen_cache: Any = None
+            else:
+                # Live mode: real client over the network.
+                gen_client, gen_cache = build_live_client()
 
             cases = load_cases(args.cases)
             scores = score_cases(
-                cases, file_client_gen, model=args.model,
+                cases, gen_client, model=args.model,
                 cache_dir=run_dir / "cache",
+                cache_store=gen_cache,
             )
             provenance = {
                 "case_set_fingerprint": "runtime",

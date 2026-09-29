@@ -43,7 +43,7 @@ def test_t1_configured_model_must_equal_requested_model(monkeypatch):
 
 
 def test_t1_score_rows_carry_verified_identities(monkeypatch):
-    monkeypatch.setattr(run, "_client_response", lambda request, client, model: _response(request, configured=model, served="served-by-gateway"))
+    monkeypatch.setattr(run, "_client_response", lambda client, request, model="", **kw: _response(request, configured=model, served="served-by-gateway"))
     rows = run.score_cases([_case()], object(), model="requested-model")
     assert rows[0]["configured_model_id"] == "requested-model"
     assert rows[0]["served_model_id"] == "served-by-gateway"
