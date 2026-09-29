@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
 import math
 from collections import Counter
@@ -61,6 +62,11 @@ def _required(record: Mapping[str, Any], fields: Sequence[str], kind: str) -> No
     missing = set(fields) - record.keys()
     if missing:
         raise ArtifactValidationError(f"{kind} {record.get('candidate_id', '?')}: missing {sorted(missing)}")
+
+
+def authoritative_production_builder_hash() -> str:
+    """Hash the imported production builder, independently of the artifact."""
+    return sha256(inspect.getsource(pipeline.build_request).encode())
 
 
 def _provenance(record: Mapping[str, Any], kind: str) -> None:
@@ -132,17 +138,25 @@ def validate_run(run_dir: Path) -> None:
         if len(values) != 1:
             raise ArtifactValidationError(f"mixed provenance/model identity in {field}")
     by_id = {r["candidate_id"]: r for r in candidates}
+    authoritative_hash = authoritative_production_builder_hash()
+    if any(row["production_builder_hash"] != authoritative_hash for row in candidates):
+        raise ArtifactValidationError("production builder hash mismatch")
+    duplicated_fields = set(CANDIDATE_FIELDS)
     for row in scores + labels:
         candidate = by_id[row["candidate_id"]]
-        for field in PROVENANCE_FIELDS:
-            if row[field] != candidate[field]:
-                raise ArtifactValidationError(f"provenance drift in {field}")
-    # Hash is over the full source when supplied; this makes truncation errors
-    # observable while retaining the DESIGN's compact committed representation.
+        for field in duplicated_fields:
+            if field in row and row[field] != candidate[field]:
+                raise ArtifactValidationError(f"candidate drift in {field}")
+    # The raw source is deliberately not committed.  Offline validation checks
+    # the presented representation and that every copy of the source hash is
+    # identical; generation verifies the full source before writing it.
     for row in candidates:
-        source = row.get("untruncated_excerpt", row["presented_excerpt"])
-        if not isinstance(source, str) or pipeline.content_hash(source) != row["untruncated_excerpt_hash"]:
-            raise ArtifactValidationError("untruncated excerpt hash mismatch")
+        excerpt = row["presented_excerpt"]
+        if len(excerpt) > pipeline.EXCERPT_CHARS:
+            raise ArtifactValidationError("presented excerpt exceeds production limit")
+        digest = row["untruncated_excerpt_hash"]
+        if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+            raise ArtifactValidationError("invalid untruncated excerpt hash")
     grouped: dict[str, list[dict[str, Any]]] = {}
     for row in candidates:
         grouped.setdefault(row["case_id"], []).append(row)

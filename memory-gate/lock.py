@@ -42,7 +42,7 @@ def lock_contained_in_witness(lock_path: Path, witness: str, repo: Path) -> bool
 
 
 def witness_reachable_after_fresh_fetch(witness: str, repo: Path, remote: str = "origin") -> bool:
-    fetched = subprocess.run(["git", "fetch", remote], cwd=repo, capture_output=True, check=False)
+    fetched = subprocess.run(["git", "fetch", "--prune", remote], cwd=repo, capture_output=True, check=False)
     if fetched.returncode:
         return False
     refs = subprocess.run(["git", "for-each-ref", "--format=%(refname)", f"refs/remotes/{remote}/"], cwd=repo, text=True, capture_output=True, check=False)

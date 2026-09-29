@@ -190,7 +190,17 @@ def filter_locomo_category5(dataset: Sequence[Mapping[str, Any]], *, expected_co
 def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for case in cases:
-        for rank, item in enumerate(prepare_candidates(case, case.get("retrieved", case.get("candidates", [])))):
+        retrieved = case.get("retrieved", case.get("candidates", []))
+        selected = prepare_candidates(case, retrieved)
+        sources = {
+            pipeline.content_hash(item["excerpt"]): item["excerpt"]
+            for item in retrieved
+            if isinstance(item, Mapping) and isinstance(item.get("excerpt"), str) and item["excerpt"]
+        }
+        for rank, item in enumerate(selected):
+            source = sources.get(str(item["content_hash"]))
+            if source is None or source[:pipeline.EXCERPT_CHARS] != item["excerpt"]:
+                raise ValueError("selected candidate source changed during artifact generation")
             rows.append({"case_id": case["case_id"], "candidate_id": item["id"], "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance})
     return rows
 
@@ -200,7 +210,14 @@ def validate_artifact(run_dir: Path) -> None:
 
 
 def lock_witness(lock_path: Path, calibration_paths: Sequence[Path], tau: float) -> dict[str, Any]:
-    return lock_module.write_lock(lock_path, calibration_paths, tau)
+    paths = tuple(calibration_paths)
+    run_dir = lock_path.parent
+    stream_names = {path.name for path in paths}
+    if {"candidates.jsonl", "scores.jsonl", "labels.jsonl"} <= stream_names:
+        report = run_dir / "report.md"
+        paths = (*paths, report) if report not in paths else paths
+        validate_artifact(run_dir)
+    return lock_module.write_lock(lock_path, paths, tau)
 
 
 def verify_witness(lock: Path, witness: str, remote: str = "origin", *, safety_outputs: Sequence[Path] = (), repo: Path = ROOT) -> str:
@@ -215,23 +232,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
     for name in ("candidates", "score", "label-template", "lock", "report", "posthoc-safety-curve"):
-        sub.add_parser(name)
+        command_parser = sub.add_parser(name)
+        if name == "score":
+            command_parser.add_argument("--remote", default="origin", help="Git remote for witness verification (default: origin)")
+    parser.epilog = "Safety verification fetches the configured remote with pruning before accepting a witness."
     args, unknown = parser.parse_known_args(argv)
     if args.command == "label-template":
         run_dir = Path(unknown[unknown.index("--candidates") + 1]) if "--candidates" in unknown else Path("memory-gate/runs/fixture-dev")
         for row in read_jsonl(run_dir / "candidates.jsonl"):
-            print(json.dumps({"case_id": row["case_id"], "candidate_id": row["candidate_id"], "presented_excerpt": row["presented_excerpt"], "label": None}, ensure_ascii=False, sort_keys=True))
+            output = dict(row)
+            output["label"] = None
+            print(json.dumps(output, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "lock":
         p = Path(unknown[unknown.index("--run") + 1]) if "--run" in unknown else Path("memory-gate/runs/fixture-dev")
         tau = float(unknown[unknown.index("--tau") + 1]) if "--tau" in unknown else TAU_REFERENCE
-        lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl"], tau)
+        lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl", p / "report.md"], tau)
         return 0
     if args.command == "score" and "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety":
         if "--witness" not in unknown:
             raise SystemExit("safety scoring requires --witness <commit>")
         run = Path(unknown[unknown.index("--run") + 1])
-        verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
+        remote = args.remote
+        verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], remote=remote, safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
         raise SystemExit("phase C not implemented: safety scoring is deferred")
     if args.command in {"report", "posthoc-safety-curve"}:
         run = Path(unknown[unknown.index("--run") + 1])
