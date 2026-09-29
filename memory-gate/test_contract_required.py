@@ -49,20 +49,31 @@ def test_t1_score_rows_carry_verified_identities(monkeypatch):
     assert rows[0]["served_model_id"] == "served-by-gateway"
 
 
-def test_t2_eval_cache_key_matches_jm_projected_wire_request_and_protocol_miss(monkeypatch):
-    """Fix 6: obtain the expected key by invoking jm's own runner/cache path,
-    not the same helper being tested.  The miss test bumps jm's CACHE_SCHEMA."""
-    request = pipeline.build_request("where?", pipeline.prepare_candidates({}, [{"excerpt": "memory", "path": "m.md", "heading": []}]))
-    # Obtain expected key through jm's build_cache_envelope (the same envelope
-    # construction the runner uses at jm/jm/runner.py:1227-1239) rather than
-    # build_cache_preimage which is what _cache_key itself calls.
+def test_t2_eval_cache_key_matches_jm_projected_wire_request_and_protocol_miss(monkeypatch, tmp_path):
+    """Obtain the expected key from jm's OWN runner/CacheStore (the authority),
+    not via shared helpers.  A real judge() call with a fake transport and a
+    tmpdir CacheStore writes one entry; the key that store recorded is the
+    ground truth.  The miss test bumps jm's real CACHE_SCHEMA constant."""
     import jm.cache as jm_cache
-    from jm.cache import _project_state, build_cache_envelope, cache_key
-    formed = run._formed_state(request)
-    wire_state = _project_state(formed.payload, request["questions"], include_uid=False)
-    envelope = build_cache_envelope(wire_state=wire_state, questions=request["questions"], model="m")
-    expected = cache_key(envelope)
+    from jm.answers import JudgeResponse, NoulAnswer
+    from jm.cache import CacheStore
+
+    request = pipeline.build_request("where?", pipeline.prepare_candidates({}, [{"excerpt": "memory", "path": "m.md", "heading": []}]))
+
+    # Run the real runner/CacheStore path with a fake transport
+    store = CacheStore(tmp_path / "cache")
+
+    def fake_transport(state, questions, model):
+        return JudgeResponse({"memory_relevance_0": NoulAnswer(0.9)}, served_model="test-served")
+
+    pipeline.evaluate_production(request, fake_transport, model="m", cache_store=store)
+    entries = list(store.entries())
+    assert len(entries) == 1, f"expected exactly one cached entry, got {len(entries)}"
+    expected = entries[0].cache_key
+
+    # _cache_key must agree with the runner's stored key
     assert run._cache_key(request, "m") == expected
+
     # The miss test bumps the REAL jm cache schema constant, proving the key
     # is sensitive to jm's protocol version, not a synthetic question mutation.
     monkeypatch.setattr(jm_cache, "CACHE_SCHEMA", "jm-answer/v999-bumped")
@@ -746,3 +757,176 @@ def test_t12_retrieval_config_records_mode_in_candidates(tmp_path):
     output = tmp_path / "candidates.jsonl"
     rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
     assert rows[0]["retrieval_config"]["retrieval_mode"] == "fused"
+
+
+# ---------------------------------------------------------------------------
+# T13: Repeatability CLI — subset construction, overwrite refusal, output schema
+# ---------------------------------------------------------------------------
+
+def _make_candidate_row(case_id, rank=0, excerpt="memory"):
+    """Build a minimal candidates.jsonl row."""
+    return {
+        "case_id": case_id,
+        "candidate_id": f"{case_id}:candidate-{rank}",
+        "query": f"query for {case_id}",
+        "path": "m.md",
+        "heading": [],
+        "rank": rank,
+        "presented_excerpt": excerpt,
+        "untruncated_excerpt_hash": "abc123",
+        "retrieval_scope": {"project": "test"},
+        "case_set_fingerprint": "x",
+        "corpus_fingerprint": "x",
+        "pausanias_revision": "x",
+        "retrieval_config": {"mode": "test"},
+        "production_builder_hash": "x",
+        "configured_model_id": "x",
+        "served_model_id": "x",
+        "harness_revision": "x",
+        "jm_revision": "x",
+        "canonical_request_hash": "x",
+    }
+
+
+def _make_safety_cases_json():
+    """Build a minimal locomo-shaped safety-cases.json with 10 convs / 446 cat-5 questions."""
+    questions_per_conv = [45] * 9 + [41]
+    dataset = []
+    for conv_idx, n in enumerate(questions_per_conv):
+        questions = []
+        for q_idx in range(n):
+            questions.append({
+                "category": "5",
+                "question": f"conv-{conv_idx}-q-{q_idx}",
+                "retrieved": [{"excerpt": f"excerpt-{conv_idx}-{q_idx}", "path": f"m-{conv_idx}.md", "heading": []}],
+                "retrieval_provenance": {"pipeline": "locomo-pinned"},
+            })
+        dataset.append({"qa": questions, "sample_id": f"conv-{conv_idx}"})
+    return dataset
+
+
+def _write_repeatability_run_dir(run_dir):
+    """Set up a run dir with enough verbatim/paraphrase candidates + safety-cases.json."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    verbatim_ids = [f"prior-case-{i}" for i in range(4)] + [f"exact-case-{i}" for i in range(2)]
+    paraphrase_ids = [f"paraphrase-case-{i}" for i in range(5)]
+    other_ids = ["other-case-0"]
+    rows = []
+    for cid in verbatim_ids + paraphrase_ids + other_ids:
+        rows.append(_make_candidate_row(cid))
+    (run_dir / "candidates.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    )
+    (run_dir / "safety-cases.json").write_text(json.dumps(_make_safety_cases_json()))
+
+
+def test_t13_subset_construction_stratification(tmp_path):
+    """build_repeatability_subset produces 4 verbatim + 4 paraphrase + 4 abstain."""
+    run_dir = tmp_path / "run"
+    _write_repeatability_run_dir(run_dir)
+    subset = run.build_repeatability_subset(run_dir)
+    assert len(subset) == 12
+    cats = [c["category"] for c in subset]
+    assert cats.count("verbatim") == 4
+    assert cats.count("paraphrase") == 4
+    assert cats.count("abstain") == 4
+    # Verbatim cases come from prior-/exact- prefix
+    verbatim_ids = [c["case_id"] for c in subset if c["category"] == "verbatim"]
+    assert all(cid.startswith(("prior-", "exact-")) for cid in verbatim_ids)
+    # Paraphrase from paraphrase- prefix
+    para_ids = [c["case_id"] for c in subset if c["category"] == "paraphrase"]
+    assert all(cid.startswith("paraphrase-") for cid in para_ids)
+    # Abstain from locomo
+    abstain_ids = [c["case_id"] for c in subset if c["category"] == "abstain"]
+    assert all(cid.startswith("locomo-") for cid in abstain_ids)
+
+
+def test_t13_subset_abstain_sourced_from_safety_cases(tmp_path):
+    """Abstain stratum is sourced from safety-cases.json, not calibration candidates."""
+    run_dir = tmp_path / "run"
+    _write_repeatability_run_dir(run_dir)
+    subset = run.build_repeatability_subset(run_dir)
+    abstain = [c for c in subset if c["category"] == "abstain"]
+    assert len(abstain) == 4
+    # Each abstain case must have the answerable=False marker from safety_cases()
+    for c in abstain:
+        assert c["answerable"] is False
+    # Without safety-cases.json, must fail
+    run_dir2 = tmp_path / "run2"
+    run_dir2.mkdir(parents=True)
+    # Copy candidates but not safety-cases.json
+    import shutil
+    shutil.copy(run_dir / "candidates.jsonl", run_dir2 / "candidates.jsonl")
+    with pytest.raises(ValueError, match="abstain"):
+        run.build_repeatability_subset(run_dir2)
+
+
+def test_t13_subset_insufficient_verbatim_raises(tmp_path):
+    """Must raise if fewer than 4 verbatim cases available."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    # Only 2 verbatim, enough paraphrase
+    rows = []
+    for i in range(2):
+        rows.append(_make_candidate_row(f"exact-case-{i}"))
+    for i in range(4):
+        rows.append(_make_candidate_row(f"paraphrase-case-{i}"))
+    (run_dir / "candidates.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    )
+    (run_dir / "safety-cases.json").write_text(json.dumps(_make_safety_cases_json()))
+    with pytest.raises(ValueError, match="verbatim"):
+        run.build_repeatability_subset(run_dir)
+
+
+def test_t13_overwrite_refusal(tmp_path):
+    """repeatability CLI must refuse to overwrite existing repeatability.json."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "repeatability.json").write_text("{}")
+    with pytest.raises(SystemExit, match="refusing to overwrite"):
+        run.main(["repeatability", "--run", str(run_dir), "--tau", "0.6"])
+
+
+def test_t13_output_schema(tmp_path, monkeypatch):
+    """repeatability CLI writes a well-formed repeatability.json."""
+    run_dir = tmp_path / "run"
+    _write_repeatability_run_dir(run_dir)
+
+    call_count = [0]
+    def fake_client(request):
+        call_count[0] += 1
+        # Return a plausible response for any number of candidates
+        answers = {}
+        for key in request.get("questions", {}):
+            answers[key] = {"noul": 0.7}
+        return {"answers": answers, "configured_model": "test-model", "served_model": "test-served"}
+
+    monkeypatch.setattr(run, "build_live_client", lambda: (fake_client, None))
+    monkeypatch.setattr(run, "_client_response",
+                        lambda client, req, model="", **kw: client(req))
+
+    exit_code = run.main(["repeatability", "--run", str(run_dir), "--tau", "0.58", "--model", "test-model"])
+    assert exit_code == 0
+
+    output = json.loads((run_dir / "repeatability.json").read_text())
+    assert output["replicates"] == 6
+    assert output["tau"] == 0.58
+    assert "strata" in output
+    assert set(output["strata"].keys()) == {"abstain", "verbatim", "paraphrase"}
+    for stratum_cases in output["strata"].values():
+        assert len(stratum_cases) == 4
+    assert "worst_spread" in output
+    assert "fraction_crossing_tau" in output
+    assert "model_identity" in output
+    assert "per_candidate" in output
+
+
+def test_t13_categorize_case_id():
+    """_categorize_case_id correctly maps prefixes to strata."""
+    assert run._categorize_case_id("prior-sandbox") == "verbatim"
+    assert run._categorize_case_id("exact-pho-123") == "verbatim"
+    assert run._categorize_case_id("paraphrase-cache") == "paraphrase"
+    assert run._categorize_case_id("locomo-0") == "abstain"
+    assert run._categorize_case_id("other-case") is None
+    assert run._categorize_case_id("concept-query") is None
