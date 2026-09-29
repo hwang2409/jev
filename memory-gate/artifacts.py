@@ -21,8 +21,8 @@ PROVENANCE_FIELDS = (
     "presented_excerpt", "canonical_request_hash", "production_builder_hash",
     "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
 )
-CANDIDATE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "rank", *PROVENANCE_FIELDS)
-SCORE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "score", "request_error", "coverage", *PROVENANCE_FIELDS)
+CANDIDATE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "rank", "retrieval_scope", *PROVENANCE_FIELDS)
+SCORE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "score", "request_error", "coverage", "retrieval_scope", *PROVENANCE_FIELDS)
 LABEL_FIELDS = (*CANDIDATE_FIELDS, "label")
 LABELS = {"positive", "negative", "ambiguous"}
 # Phase C frozen safety records add this field after witness verification.
@@ -96,6 +96,26 @@ def _validate_rows(rows: list[dict[str, Any]], fields: Sequence[str], kind: str)
     for row in rows:
         _required(row, fields, kind)
         _provenance(row, kind)
+        # retrieval_scope: must be a dict with EXACTLY the key set of one
+        # valid shape — no extra keys allowed.
+        scope = row.get("retrieval_scope")
+        if scope is not None:
+            if not isinstance(scope, dict):
+                raise ArtifactValidationError(f"{kind}: retrieval_scope must be a dict")
+            scope_keys = set(scope.keys())
+            if scope_keys not in ({"root"}, {"project"}, {"all_projects"}):
+                extra = scope_keys - {"root", "project", "all_projects"}
+                if extra:
+                    raise ArtifactValidationError(
+                        f"{kind}: retrieval_scope contains unexpected keys {sorted(extra)}"
+                    )
+                raise ArtifactValidationError(f"{kind}: retrieval_scope must have exactly one of root/project/all_projects")
+            if "root" in scope and (not isinstance(scope["root"], str) or not scope["root"]):
+                raise ArtifactValidationError(f"{kind}: retrieval_scope.root must be a non-empty string")
+            if "project" in scope and (not isinstance(scope["project"], str) or not scope["project"]):
+                raise ArtifactValidationError(f"{kind}: retrieval_scope.project must be a non-empty string")
+            if "all_projects" in scope and scope["all_projects"] is not True:
+                raise ArtifactValidationError(f"{kind}: retrieval_scope.all_projects must be true")
         if kind == "candidate" and not isinstance(row["query"], str):
             raise ArtifactValidationError("candidate: query must be a string")
         if kind == "score":
@@ -181,6 +201,14 @@ def validate_run(run_dir: Path) -> None:
         expected = _canonical_hash(group)
         if any(row["canonical_request_hash"] != expected for row in group):
             raise ArtifactValidationError("canonical request hash mismatch")
+    # Intra-case retrieval_scope agreement: rows of the same case must share
+    # the same retrieval_scope value.  Cross-case may (and should) differ.
+    for case_id, group in grouped.items():
+        scopes = {json.dumps(row["retrieval_scope"], sort_keys=True) for row in group}
+        if len(scopes) > 1:
+            raise ArtifactValidationError(
+                f"mixed retrieval_scope within case {case_id}"
+            )
 
 
 def is_valid_for_gating(run_dir: Path) -> bool:

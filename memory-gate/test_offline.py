@@ -43,8 +43,10 @@ def test_candidate_rows_namespaces_ids_and_two_case_generated_shape_validates(tm
         "harness_revision": "h", "jm_revision": "j",
     }
     cases = [
-        {"case_id": "one", "query": "q1", "retrieved": [{"excerpt": "one", "path": "one.md", "heading": []}]},
-        {"case_id": "two", "query": "q2", "retrieved": [{"excerpt": "two", "path": "two.md", "heading": []}]},
+        {"case_id": "one", "query": "q1", "scope": {"project": "test"},
+         "retrieved": [{"excerpt": "one", "path": "one.md", "heading": []}]},
+        {"case_id": "two", "query": "q2", "scope": {"project": "test"},
+         "retrieved": [{"excerpt": "two", "path": "two.md", "heading": []}]},
     ]
     candidates = run.candidate_rows(cases, provenance)
     assert [row["candidate_id"] for row in candidates] == ["one:candidate-0", "two:candidate-0"]
@@ -144,3 +146,38 @@ def test_lock_requires_exact_published_witness(tmp_path):
     (work / "memory-gate" / "runs" / "x" / "safety.json").write_text("done")
     with pytest.raises(ValueError, match="already exist"):
         run.verify_witness(lock, witness, repo=work, safety_outputs=[work / "memory-gate" / "runs" / "x" / "safety.json"])
+
+
+# --- strict XOR enforcement for _resolve_scope ---
+
+class TestResolveScopeStrictXOR:
+    """_resolve_scope must reject multi-selector scopes instead of silently
+    normalizing by priority."""
+
+    def _case(self, scope):
+        return {"case_id": "test", "scope": scope}
+
+    def test_project_and_all_projects_raises(self):
+        with pytest.raises(run.ScopeResolutionError, match="exactly one"):
+            run._resolve_scope(self._case({"project": "alpha", "all_projects": True}))
+
+    def test_root_and_project_raises(self):
+        with pytest.raises(run.ScopeResolutionError, match="exactly one"):
+            run._resolve_scope(self._case({"root": "r1", "project": "alpha"}))
+
+    def test_root_and_all_projects_raises(self):
+        with pytest.raises(run.ScopeResolutionError, match="exactly one"):
+            run._resolve_scope(self._case({"root": "r1", "all_projects": True}))
+
+    def test_all_three_raises(self):
+        with pytest.raises(run.ScopeResolutionError, match="exactly one"):
+            run._resolve_scope(self._case({"root": "r1", "project": "alpha", "all_projects": True}))
+
+    def test_single_root_accepted(self):
+        assert run._resolve_scope(self._case({"root": "r1"})) == {"root": "r1"}
+
+    def test_single_project_accepted(self):
+        assert run._resolve_scope(self._case({"project": "alpha"})) == {"project": "alpha"}
+
+    def test_single_all_projects_accepted(self):
+        assert run._resolve_scope(self._case({"all_projects": True})) == {"all_projects": True}

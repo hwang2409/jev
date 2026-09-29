@@ -73,7 +73,14 @@ class TestW1CalibrationWorkflow:
         fake_pausanias = tmp_path / "fake-pausanias"
         fake_pausanias.write_text(
             "#!/usr/bin/env python3\n"
-            "import json\n"
+            "import json, sys\n"
+            "args = sys.argv[1:]\n"
+            "# Seam fidelity: assert scope + retrieval-mode flags are present\n"
+            "assert '--retrieval-mode' in args, f'missing --retrieval-mode in {args}'\n"
+            "rm_idx = args.index('--retrieval-mode')\n"
+            "assert args[rm_idx + 1] == 'fused', f'expected fused, got {args[rm_idx + 1]}'\n"
+            "assert '--all-projects' in args or '--project' in args or '--root' in args, "
+            "f'missing scope flag in {args}'\n"
             "print(json.dumps(["
             "{'excerpt': 'The cache is in SQLite.', 'path': 'docs/cache.md', 'heading': ['Storage']},"
             "{'excerpt': 'Old cache plan.', 'path': 'docs/old.md', 'heading': ['Old']}"
@@ -82,8 +89,8 @@ class TestW1CalibrationWorkflow:
         fake_pausanias.chmod(fake_pausanias.stat().st_mode | stat.S_IXUSR)
 
         cases = [
-            {"case_id": "w1-case-1", "query": "Where is the cache?", "answerable": True},
-            {"case_id": "w1-case-2", "query": "Unanswerable question", "answerable": False},
+            {"case_id": "w1-case-1", "query": "Where is the cache?", "answerable": True, "scope": {"project": "test"}},
+            {"case_id": "w1-case-2", "query": "Unanswerable question", "answerable": False, "scope": {"project": "test"}},
         ]
         cases_file = tmp_path / "cases.json"
         cases_file.write_text(json.dumps(cases))
