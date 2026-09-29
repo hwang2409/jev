@@ -1,108 +1,127 @@
 # Battery Redesign Experiments — Design
 
-Status: DRAFT v1 (design review pending)
-Context: memory-gate RESULTS.md (2026-09-29) — the standalone memory_relevance
-Noul cannot separate answer-bearing memories from topically-adjacent garbage
-(28.25% false-injection at tau=0.58; no viable tau). Target use case is now
-POINTER INJECTION ("N memories may be relevant: [titles]"), where a false
-positive costs a noise line, not a poisoned turn. This is an EXPERIMENT
-series: it ranks candidate batteries; it grants no enablement authority and
-uses no lock/witness ceremony. A winning battery graduates to its own
-authoritative run under the full DESIGN.md protocol before any production
-change.
+Status: DRAFT v2 (after design review round 1)
+Context: memory-gate RESULTS.md (2026-09-29). Target use case: POINTER
+INJECTION. This is an EXPERIMENT series: non-authoritative, no lock/witness,
+ranks candidate batteries only. Every artifact carries machine-readable
+`"authority": "experimental"`. Graduation of a winner requires the full
+production protocol ON A FRESH SAFETY CORPUS — locomo category-5 becomes
+development data the moment these experiments use it for selection, and
+rerunning the ceremony on it cannot grant held-out acceptance. The graduation
+corpus is chosen at graduation time (options noted in §7); nothing here can
+be promoted directly.
 
 ## 1. Candidate batteries
 
-All scored over the SAME inputs (reused artifacts, §3). Battery A is the
-current baseline (already scored — free).
+- **A (baseline): independent relevance Nouls** — current production
+  question. RESCORED interleaved with B and C in this experiment (the
+  existing run's scores are historically confounded — no proof of same model
+  snapshot; A/B/C requests are interleaved case-by-case in one session to
+  control service drift).
+- **B (sharper question): answer-bearing Nouls** — independent-Noul shape,
+  criteria demand contained information: true = "the excerpt CONTAINS the
+  specific information the query asks for"; not_for = "topically related but
+  does not contain the requested information".
+- **C (forced choice): case-level Choice** — options = candidates present +
+  `none_of_these_help`. Scored as a CASE-LEVEL POLICY, never per-candidate
+  calibration: surface the argmax candidate iff `1 - P(none) > tau`.
+  Evaluated on (a) abstention correctness and (b) selected-candidate
+  correctness (was the argmax a labeled positive?). No per-candidate Brier
+  or pooled per-candidate sweep from Choice probabilities — they are
+  normalized against option count and not comparable to Nouls. All C
+  analyses are reported within fixed-arity strata (1-candidate cases vs
+  2-candidate cases separately) plus pooled-with-caveat; the arity skew
+  (calibration mostly 1-candidate, safety mostly 2-candidate) makes pooled
+  cross-lane C numbers descriptive only.
+- **D (richer state): deferred** — real-session context capture required;
+  fabricating task context onto eval queries measures nothing (unchanged
+  rationale, review-endorsed).
 
-- **A (baseline): independent Nouls** — "is this excerpt relevant to the
-  agent's next step?" Existing scores from runs/20260929-jev-b.
-- **B (sharper question): answer-bearing Nouls** — same independent-Noul
-  shape, criteria rewritten to demand answer-bearing content: true = "the
-  excerpt CONTAINS the specific information the query asks for"; not_for =
-  "topically related but does not contain the requested information".
-  Cheapest change; directly attacks the observed failure mode.
-- **C (forced choice): Choice over candidates + none** — one Choice question
-  per case: options = candidate_0, candidate_1 (when present), and
-  none_of_these_help, with per-option probabilities. Mirrors the router
-  battery shape whose calibration was excellent (router RESULTS: Brier
-  0.0046). Abstention becomes a first-class option instead of an absent
-  pressure.
-- **D (richer state): B's question + auto-route-shaped state** — adds
-  task/last_assistant context fields to the state. DEFERRED unless B and C
-  both fail (real sessions have this context; eval cases only have a query,
-  so D on eval data would fabricate context — noted as the reason for
-  deferral, revisit with real-session data).
+## 2. Lanes and controls
 
-## 2. What we measure (pointer framing)
+- **Calibration lane** (reused): candidates.jsonl + adjudicated labels from
+  runs/20260929-jev-b. Construct gap noted: labels judge "useful and safe to
+  inject", which is broader than B's "contains the information"; B may
+  legitimately score some labeled-positives low (e.g. pointer-worthy context
+  that answers indirectly). Reported as a named limitation; label-vs-battery
+  disagreement rows are listed in ANALYSIS.md for eyeballing, not silently
+  averaged.
+- **Safety lane** (reused): 446 locomo category-5 questions with verified
+  retrieval (adapter v3). All candidates negative.
+- **NEW — within-corpus control lane**: ~60 sampled locomo ANSWERABLE
+  questions (categories 1-4, stratified across the 10 conversations), same
+  rendering/index (already built), retrieval via the same pausanias
+  runner path, production truncate/dedupe/cap-2. Ground truth is AUTOMATIC:
+  locomo's evidence annotations — a candidate is positive iff its source
+  session/turn matches the question's evidence ids (the PAUS benchmark
+  machinery already maps evidence targets; reuse it). This control holds
+  corpus, query style, and heading format CONSTANT between positives and
+  negatives, isolating battery quality from corpus style. The cross-lane
+  separation stat (calibration-positive vs safety-candidate) is demoted to
+  an operational descriptive table; the WITHIN-CORPUS control is the
+  battery-quality headline.
 
-Per battery, both lanes:
+## 3. Metrics
 
-- **Separation**: score distributions of calibration positives vs locomo
-  safety candidates (all negative by construction). Report AUC treating
-  {calibration positive} vs {safety candidate} as the two classes, plus
-  overlap plots as percentile tables (P10/50/90 per class). This is the
-  headline number: can ANY threshold separate answer-bearing from
-  adversarial-adjacent?
-- **Pointer operating points**: for tau in the observed-boundary sweep,
-  calibration pointer-recall (>=1 positive-labeled candidate surfaced among
-  cases with >=1 positive) vs safety pointer-rate (fraction of the 446
-  unanswerable cases surfacing >=1 pointer). Report the frontier and three
-  named operating points: max-recall@safety<=5%, @<=10%, @<=20% (pointer
-  tolerances; explicitly NOT the 2% content-injection bar).
-- **Calibration-lane label agreement (L1)**: ROC-AUC/PR-AUC/Brier against the
-  existing adjudicated labels, as before. For battery C, the per-candidate
-  score is that candidate's Choice probability; abstention probability
-  reported separately (C-specific metric: none-probability distribution on
-  safety vs calibration-abstainable cases).
-- **Cost/latency** per battery (C halves the question count; report it).
+Per battery:
+- **Within-corpus control**: AUC (Noul batteries A/B, per-candidate) /
+  policy accuracy by arity stratum (C); this is the headline comparison.
+- **Pointer frontier**: full recall-vs-safety-pointer-rate frontier is
+  PRIMARY. Illustrative cuts at 5/10/20% safety pointer-rate are display
+  points only (no product budget exists yet; explicitly labeled
+  illustrative). Calibration pointer-recall for A/B = >=1 labeled-positive
+  candidate above tau among cases with >=1 positive; for C = policy surfaces
+  a labeled positive. Safety pointer-rate = fraction of 446 cases surfacing
+  >=1 pointer (A/B: any candidate above tau; C: policy surfaces).
+- **L1 vs adjudicated labels** (A/B only, per-candidate): ROC/PR-AUC, Brier.
+  C: abstention-probability distributions per lane + arity stratum.
+- **Cost/latency**: honest accounting — A/B and C are all ~1 request per
+  case (~50 calibration + 446 safety + ~60 control each); C reduces
+  QUESTIONS per request, not requests. Token/latency/cache metrics recorded
+  from jm; "pennies" claim replaced by measured numbers in ANALYSIS.md.
 
-## 3. Reuse and new artifacts
+## 4. Artifacts (experiment schema, not production artifacts.py)
 
-REUSED (no regeneration): calibration candidates.jsonl + labels.jsonl
-(labels judge excerpt usefulness — battery-independent by construction);
-safety-cases.json (446 questions with verified retrieval, adapter v3);
-production pipeline semantics (truncate/dedupe/cap-2) via pipeline.py.
-
-NEW: memory-gate/experiments/batteries.py — battery definitions (question
-builders + parsers per battery, same evaluate_production seam and jm cache);
-experiments/run_experiments.py — score a battery over both lanes, write
-experiments/results/<battery>-<stamp>/{scores.jsonl, analysis.md};
-experiments/ANALYSIS.md — cross-battery comparison, auto-generated tables
-plus a hand-written conclusions section.
-
-Experimental question shapes live in experiments/ ONLY — providers/jev.py is
-untouched until a winner graduates (production fidelity machinery, golden
-tests, and the full protocol apply at graduation, not before).
-
-## 4. Validity guards (inherited, lightened where honest)
-
-- Coverage rule unchanged: missing/invalid scores invalidate a battery run
-  (artifacts.py validators reused where shapes allow; experiment scores carry
-  the same provenance fields incl. configured/served model identity).
-- No lock/witness: results are labeled NON-AUTHORITATIVE in every artifact
-  header. The safety lane here is an experiment input, not a gate.
-- The mass-discard and zero-batteries guards apply (reuse run.py machinery).
-- Battery C parser: per-option probabilities must sum sanely (tolerance
-  documented); malformed Choice responses are request errors, not zeros.
-- Seed/model identity recorded; batteries scored against the same served
-  model or the comparison is refused.
+`experiments/results/<battery>-<stamp>/scores.jsonl` + `meta.json` with a
+SMALL dedicated validator (production artifacts.py cannot represent Choice
+distributions and enforces the production builder hash — not reused for
+experiment rows). Fields: authority:"experimental", battery id, full question
+battery hash (experimental builder source hash), per-case: request hash,
+option order/count (C), full Choice distribution incl. none (C) or
+per-candidate Nouls (A/B), configured+served model ids, error/coverage
+records, input-artifact hashes (candidates/labels/safety/control files),
+jm/harness/pausanias revisions. Coverage rule inherited: any missing/invalid
+score invalidates that battery's run (all-or-nothing per battery per lane).
+Same-served-model check across ALL batteries in the comparison; mismatch
+refuses the comparison table.
 
 ## 5. Execution plan
 
-1. Implement batteries.py (B, C) + runner + offline tests (fake transports,
-   fixture parity with existing patterns; suite additions, ruff clean).
-2. Live-score B and C on neenerair (each: 62 calibration + 886 safety
-   batteries for B; ~50+446 Choice calls for C — pennies, cached).
-3. Generate ANALYSIS.md; if neither battery reaches max-recall>=80% @
-   safety<=10% pointer-rate, D gets designed properly (with real-session
-   state capture) rather than faked on eval data.
-4. Present analysis; graduation decision is the user's.
+1. Build: experiments/batteries.py (A/B/C builders+parsers over the
+   evaluate_production seam, C parser validates option-probability sanity,
+   malformed = request error), experiments/control_lane.py (answerable
+   sampling + evidence-derived labels via the pausanias benchmark mappers),
+   experiments/run_experiments.py (interleaved A/B/C scoring, per-lane),
+   experiments/validator.py + offline tests (fake transports; fixture for
+   evidence-mapping correctness; arity-stratum accounting tests).
+2. Live: generate control lane (retrieval for ~60 answerable questions);
+   score A/B/C interleaved on neenerair; produce ANALYSIS.md (auto tables +
+   hand conclusions).
+3. Decision heuristic (NOT acceptance): if neither B nor C dominates A on
+   the within-corpus control AND the pointer frontier, D gets designed with
+   real-session capture. Presented to the user with the frontier in hand.
 
 ## 6. Non-goals
 
-- No production changes, no enablement, no threshold selection authority.
-- No battery D on fabricated context (deferral rationale in §1).
-- No new labeling (existing adjudicated labels only).
-- No auto-injection revival — pointer framing only.
+Unchanged from v1 (no production changes, no enablement, no new hand
+labeling, no D-on-fabricated-context) plus: no reuse of these lanes for
+graduation acceptance (§ preamble), no per-candidate calibration claims from
+Choice probabilities.
+
+## 7. Graduation note (for later, recorded now)
+
+A winner needs: production builder integration + golden tests, the full
+DESIGN.md ceremony, and a FRESH held-out adversarial corpus — candidates:
+a second adversarial memory benchmark, a newly constructed locomo-style
+split from unused conversational data, or user-curated adversarial queries
+over the real vault. Decided then; precommitted as required now.
