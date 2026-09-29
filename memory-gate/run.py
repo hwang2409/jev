@@ -31,30 +31,28 @@ for _path in (ROOT / "harness" / "src", ROOT / "jm", Path("/tmp/pausanias") / "s
     if _path.exists() and str(_path) not in sys.path:
         sys.path.insert(0, str(_path))
 
-def _production_adapter() -> tuple[Any, Any]:
-    """Load harness lazily so schema/replay commands remain stdlib-only."""
-    from zeta.providers.jev import (
-        _parse_memory_relevance,
-        build_memory_relevance_request,
-    )
-    return build_memory_relevance_request, _parse_memory_relevance
+THIS_DIR = Path(__file__).resolve().parent
+if str(THIS_DIR) not in sys.path:
+    sys.path.insert(0, str(THIS_DIR))
 
+import pipeline
 
-EXCERPT_CHARS = 600
-TOP_K = 2
-TOTAL_CHARS = 1500
-TAU_REFERENCE = 0.6
+production_request = pipeline.build_request
+parse_production_scores = pipeline.parse_scores
+_production_adapter = pipeline.production_adapter
+prepare_candidates = pipeline.prepare_candidates
+select_blocks = pipeline.select_blocks
+
 BOOTSTRAPS = 10_000
 BOOTSTRAP_SEED = 20260929
+TAU_REFERENCE = 0.6
 LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json"
-
 REQUIRED_PROVENANCE = {
     "case_set_fingerprint", "corpus_fingerprint", "pausanias_revision",
     "retrieval_config", "rank", "untruncated_excerpt_hash",
     "presented_excerpt", "canonical_request_hash", "production_builder_hash",
     "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
 }
-
 
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
@@ -122,86 +120,6 @@ def validate_artifact(run_dir: Path) -> None:
     if len({r["case_id"] for r in candidates}) == 0:
         raise ValueError("empty candidate artifact")
 
-
-def production_request(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
-    """The one canonical request path used by both eval and production."""
-    builder, _ = _production_adapter()
-    return builder(query, candidates)
-
-
-def parse_production_scores(response: Mapping[str, Any], candidates: list[dict[str, Any]]) -> dict[str, float]:
-    """Parse the complete adapter-shaped response, refusing partial coverage."""
-    answers = response.get("answers")
-    if not isinstance(answers, Mapping):
-        raise TypeError("missing adapter answers")
-    _, parser = _production_adapter()
-    scores = parser(dict(answers), candidates)
-    if set(scores) != {str(c["id"]) for c in candidates}:
-        raise ValueError("partial score coverage")
-    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= 1 for v in scores.values()):
-        raise ValueError("invalid score")
-    return scores
-
-
-def content_hash(excerpt: str) -> str:
-    return sha256_bytes(excerpt.encode())
-
-
-def prepare_candidates(case: Mapping[str, Any], retrieved: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Faithful fresh-session routing: hash, truncate, skip, dedupe, then cap 2."""
-    selected: list[dict[str, Any]] = []
-    seen: set[tuple[str, tuple[str, ...], str]] = set()
-    skips: list[dict[str, str]] = []
-    for rank, raw in enumerate(retrieved):
-        excerpt = raw.get("excerpt")
-        path = raw.get("path")
-        heading = raw.get("heading", [])
-        if not isinstance(excerpt, str) or not excerpt or not isinstance(path, str) or not isinstance(heading, list):
-            skips.append({"candidate_id": f"candidate-{rank}", "reason": "invalid"})
-            continue
-        untruncated_hash = content_hash(excerpt)
-        key = (path, tuple(heading), untruncated_hash)
-        if key in seen:
-            skips.append({"candidate_id": f"candidate-{rank}", "reason": "deduped"})
-            continue
-        seen.add(key)
-        if raw.get("actively_modified"):
-            skips.append({"candidate_id": f"candidate-{rank}", "reason": "actively_modified"})
-            continue
-        if raw.get("superseded"):
-            skips.append({"candidate_id": f"candidate-{rank}", "reason": "superseded"})
-            continue
-        if len(selected) >= TOP_K:
-            break
-        selected.append({
-            "id": f"candidate-{rank}", "path": path, "heading": list(heading),
-            "excerpt": excerpt[:EXCERPT_CHARS], "content_hash": untruncated_hash,
-            "rank": rank, "untruncated_excerpt_hash": untruncated_hash,
-            "skipped": skips,
-        })
-    return selected
-
-
-def render_block(candidate: Mapping[str, Any]) -> str:
-    heading = " > ".join(candidate["heading"]) or "(document)"
-    excerpt = candidate.get("excerpt", candidate.get("presented_excerpt", ""))
-    return f"[Relevant memory]\npath: {candidate['path']}\nheading: {heading}\n{excerpt}"
-
-
-def select_blocks(candidates: Sequence[Mapping[str, Any]], scores: Mapping[str, float] | None, tau: float, *, no_gate: bool = False) -> list[Mapping[str, Any]]:
-    """Production order, strict > tau, full-block budget and first-over-budget break."""
-    result: list[Mapping[str, Any]] = []
-    total = 0
-    for candidate in candidates:
-        score = scores.get(str(candidate["candidate_id"]), scores.get(str(candidate.get("id")))) if scores else None
-        if not no_gate and (score is None or not score > tau):
-            continue
-        block = render_block(candidate)
-        if total + len(block) > TOTAL_CHARS:
-            break
-        result.append(candidate)
-        total += len(block)
-    return result
 
 
 def wilson(successes: int, total: int, z: float = 1.959963984540054) -> list[float] | None:
@@ -287,8 +205,8 @@ def filter_locomo_category5(dataset: Sequence[Mapping[str, Any]], *, expected_co
 def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for case in cases:
-        for item in prepare_candidates(case, case.get("retrieved", case.get("candidates", []))):
-            rows.append({"case_id": case["case_id"], "candidate_id": item["id"], "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": item["rank"], "untruncated_excerpt_hash": item["untruncated_excerpt_hash"], "presented_excerpt": item["excerpt"], **provenance})
+        for rank, item in enumerate(prepare_candidates(case, case.get("retrieved", case.get("candidates", [])))):
+            rows.append({"case_id": case["case_id"], "candidate_id": item["id"], "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance})
     return rows
 
 
