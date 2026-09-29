@@ -20,7 +20,8 @@ import pipeline
 
 
 def _case(case_id="case", text="memory"):
-    return {"case_id": case_id, "query": "where?", "retrieved": [{"excerpt": text, "path": "m.md", "heading": []}]}
+    return {"case_id": case_id, "query": "where?", "scope": {"project": "test"},
+            "retrieved": [{"excerpt": text, "path": "m.md", "heading": []}]}
 
 
 def _response(request, *, configured="requested-model", served="served-model"):
@@ -288,7 +289,7 @@ def test_t8_candidate_subprocess_fixture_and_locomo_boundaries(tmp_path):
         "#!/usr/bin/env python3\nimport json, sys\n"
         "args = sys.argv[1:]\n"
         "assert '--retrieval-mode' in args, f'missing --retrieval-mode in {args}'\n"
-        "assert '--all-projects' in args or '--project' in args, f'missing scope flag in {args}'\n"
+        "assert '--all-projects' in args or '--project' in args or '--root' in args, f'missing scope flag in {args}'\n"
         "print(json.dumps([{'excerpt':'x','path':'x.md','heading':[]}]))\n"
     )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
@@ -386,13 +387,33 @@ def test_t9_locomo_shaped_dataset_through_real_filter_succeeds(monkeypatch, tmp_
 # ---------------------------------------------------------------------------
 
 def test_t10_resolve_scope_flags():
-    """_resolve_scope_flags must produce --project <name> for project-scoped
-    cases and --all-projects for unscoped / all_projects cases."""
+    """_resolve_scope_flags must produce --root <id>, --project <name>, or
+    --all-projects; missing/empty/malformed scope raises ScopeResolutionError."""
     assert run._resolve_scope_flags({"scope": {"project": "phoebe"}}) == ["--project", "phoebe"]
     assert run._resolve_scope_flags({"scope": {"all_projects": True}}) == ["--all-projects"]
-    assert run._resolve_scope_flags({"scope": {}}) == ["--all-projects"]
-    assert run._resolve_scope_flags({}) == ["--all-projects"]
-    assert run._resolve_scope_flags({"scope": {"project": ""}}) == ["--all-projects"]
+    assert run._resolve_scope_flags({"scope": {"root": "pausanias"}}) == ["--root", "pausanias"]
+    assert run._resolve_scope_flags({"scope": {"root": "atlas"}}) == ["--root", "atlas"]
+    # Missing, empty, or malformed scope must raise (not silently broaden)
+    with pytest.raises(run.ScopeResolutionError):
+        run._resolve_scope_flags({"scope": {}})
+    with pytest.raises(run.ScopeResolutionError):
+        run._resolve_scope_flags({})
+    with pytest.raises(run.ScopeResolutionError):
+        run._resolve_scope_flags({"scope": {"project": ""}})
+    with pytest.raises(run.ScopeResolutionError):
+        run._resolve_scope_flags({"scope": {"all_projects": False}})
+    with pytest.raises(run.ScopeResolutionError):
+        run._resolve_scope_flags({"scope": {"root": ""}})
+
+
+def test_t10_resolve_scope_real_root_shapes():
+    """The two real root-scoped cases from cases.json parse correctly."""
+    # cases.json:156 — {"root": "pausanias"}
+    assert run._resolve_scope_flags({"id": "packet-budget-root", "scope": {"root": "pausanias"}}) == ["--root", "pausanias"]
+    assert run._resolve_scope({"scope": {"root": "pausanias"}}) == {"root": "pausanias"}
+    # cases.json:493 — {"root": "atlas"}
+    assert run._resolve_scope_flags({"id": "global-security-root", "scope": {"root": "atlas"}}) == ["--root", "atlas"]
+    assert run._resolve_scope({"scope": {"root": "atlas"}}) == {"root": "atlas"}
 
 
 def _fake_pausanias_asserting_script() -> str:
@@ -409,11 +430,19 @@ def _fake_pausanias_asserting_script() -> str:
         "# Strict seam: must receive a scope flag\n"
         "has_project = '--project' in args\n"
         "has_all = '--all-projects' in args\n"
-        "assert has_project or has_all, f'missing scope flag in {args}'\n"
-        "assert not (has_project and has_all), f'both --project and --all-projects in {args}'\n"
+        "has_root = '--root' in args\n"
+        "assert has_project or has_all or has_root, f'missing scope flag in {args}'\n"
+        "assert sum([has_project, has_all, has_root]) == 1, f'multiple scope flags in {args}'\n"
         "# Encode which scope we received for test assertion\n"
-        "scope_kind = 'project' if has_project else 'all_projects'\n"
-        "scope_value = args[args.index('--project') + 1] if has_project else None\n"
+        "if has_root:\n"
+        "    scope_kind = 'root'\n"
+        "    scope_value = args[args.index('--root') + 1]\n"
+        "elif has_project:\n"
+        "    scope_kind = 'project'\n"
+        "    scope_value = args[args.index('--project') + 1]\n"
+        "else:\n"
+        "    scope_kind = 'all_projects'\n"
+        "    scope_value = None\n"
         "print(json.dumps([{"
         "'excerpt': f'scope={scope_kind}:{scope_value}', "
         "'path': 'test.md', 'heading': []}]))\n"
@@ -474,6 +503,149 @@ def test_t10_mixed_scope_cases(tmp_path):
     assert glob_rows and "scope=all_projects:None" in glob_rows[0]["presented_excerpt"]
 
 
+def test_t10_root_scoped_case_passes_root_flag(tmp_path):
+    """A case with scope.root='pausanias' must produce --root pausanias."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "root-1", "query": "packet budget?",
+         "scope": {"root": "pausanias"}},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    assert len(rows) == 1
+    assert "scope=root:pausanias" in rows[0]["presented_excerpt"]
+    assert rows[0]["retrieval_scope"] == {"root": "pausanias"}
+
+
+def test_t10_mixed_scope_with_root(tmp_path):
+    """Root, project, and all-projects cases in one generation."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "root-1", "query": "q1", "scope": {"root": "atlas"}},
+        {"case_id": "proj-1", "query": "q2", "scope": {"project": "phoebe"}},
+        {"case_id": "glob-1", "query": "q3", "scope": {"all_projects": True}},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
+    root_rows = [r for r in rows if r["case_id"] == "root-1"]
+    proj_rows = [r for r in rows if r["case_id"] == "proj-1"]
+    glob_rows = [r for r in rows if r["case_id"] == "glob-1"]
+    assert root_rows and "scope=root:atlas" in root_rows[0]["presented_excerpt"]
+    assert root_rows[0]["retrieval_scope"] == {"root": "atlas"}
+    assert proj_rows and "scope=project:phoebe" in proj_rows[0]["presented_excerpt"]
+    assert proj_rows[0]["retrieval_scope"] == {"project": "phoebe"}
+    assert glob_rows and "scope=all_projects:None" in glob_rows[0]["presented_excerpt"]
+    assert glob_rows[0]["retrieval_scope"] == {"all_projects": True}
+
+
+def test_t10_missing_scope_raises_in_generate_candidates(tmp_path):
+    """Cases without scope must raise ScopeResolutionError, not silently broaden."""
+    executable = tmp_path / "fake-pausanias"
+    executable.write_text(_fake_pausanias_asserting_script())
+    executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
+
+    cases = tmp_path / "cases.json"
+    cases.write_text(json.dumps([
+        {"case_id": "no-scope", "query": "q1"},
+    ]))
+    output = tmp_path / "candidates.jsonl"
+    with pytest.raises(run.ScopeResolutionError, match="missing or empty"):
+        run.generate_candidates(cases, output, pausanias_executable=str(executable))
+
+
+# ---------------------------------------------------------------------------
+# T10b: Per-case retrieval_scope provenance
+# ---------------------------------------------------------------------------
+
+def test_t10b_candidate_rows_carry_per_case_scope():
+    """candidate_rows must attach retrieval_scope from each case's scope."""
+    provenance = {
+        "case_set_fingerprint": "x", "corpus_fingerprint": "x",
+        "pausanias_revision": "x", "retrieval_config": {"mode": "test"},
+        "production_builder_hash": "x",
+        "configured_model_id": "x", "served_model_id": "x",
+        "harness_revision": "x", "jm_revision": "x",
+    }
+    cases = [
+        {"case_id": "proj-a", "query": "q1", "scope": {"project": "alpha"},
+         "retrieved": [{"excerpt": "data", "path": "a.md", "heading": []}]},
+        {"case_id": "root-b", "query": "q2", "scope": {"root": "beta"},
+         "retrieved": [{"excerpt": "data2", "path": "b.md", "heading": []}]},
+        {"case_id": "all-c", "query": "q3", "scope": {"all_projects": True},
+         "retrieved": [{"excerpt": "data3", "path": "c.md", "heading": []}]},
+    ]
+    rows = run.candidate_rows(cases, provenance)
+    assert rows[0]["retrieval_scope"] == {"project": "alpha"}
+    assert rows[1]["retrieval_scope"] == {"root": "beta"}
+    assert rows[2]["retrieval_scope"] == {"all_projects": True}
+
+
+def test_t10b_validator_rejects_mismatched_intra_case_scope(tmp_path):
+    """Rows from the same case_id must agree on retrieval_scope."""
+    import artifacts
+    provenance = {
+        "case_set_fingerprint": "x", "corpus_fingerprint": "x",
+        "pausanias_revision": "x", "retrieval_config": {"mode": "test"},
+        "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+        "configured_model_id": "model", "served_model_id": "model",
+        "harness_revision": "x", "jm_revision": "x",
+    }
+    cases = [
+        {"case_id": "c1", "query": "q", "scope": {"project": "alpha"},
+         "retrieved": [
+             {"excerpt": "one", "path": "a.md", "heading": []},
+             {"excerpt": "two", "path": "b.md", "heading": []},
+         ]},
+    ]
+    rows = run.candidate_rows(cases, provenance)
+    assert len(rows) == 2
+    # Tamper: give the two rows different scopes
+    rows[0]["retrieval_scope"] = {"project": "alpha"}
+    rows[1]["retrieval_scope"] = {"project": "beta"}
+    for row in rows:
+        row["canonical_request_hash"] = artifacts._canonical_hash(rows)
+    scores = [{**row, "score": 0.9, "request_error": None, "coverage": True} for row in rows]
+    labels = [{**row, "label": "positive"} for row in rows]
+    artifacts.write_artifact(tmp_path, rows, scores, labels, "report")
+    with pytest.raises(artifacts.ArtifactValidationError, match="mixed retrieval_scope"):
+        artifacts.validate_run(tmp_path)
+
+
+def test_t10b_validator_allows_different_scope_across_cases(tmp_path):
+    """Different cases may (and should) have different retrieval_scope values."""
+    import artifacts
+    provenance = {
+        "case_set_fingerprint": "x", "corpus_fingerprint": "x",
+        "pausanias_revision": "x", "retrieval_config": {"mode": "test"},
+        "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+        "configured_model_id": "model", "served_model_id": "model",
+        "harness_revision": "x", "jm_revision": "x",
+    }
+    cases = [
+        {"case_id": "proj", "query": "q1", "scope": {"project": "alpha"},
+         "retrieved": [{"excerpt": "data", "path": "a.md", "heading": []}]},
+        {"case_id": "root", "query": "q2", "scope": {"root": "beta"},
+         "retrieved": [{"excerpt": "data2", "path": "b.md", "heading": []}]},
+    ]
+    rows = run.candidate_rows(cases, provenance)
+    for row in rows:
+        row["canonical_request_hash"] = artifacts._canonical_hash(
+            [r for r in rows if r["case_id"] == row["case_id"]]
+        )
+    scores = [{**row, "score": 0.9, "request_error": None, "coverage": True} for row in rows]
+    labels = [{**row, "label": "positive"} for row in rows]
+    artifacts.write_artifact(tmp_path, rows, scores, labels, "report")
+    artifacts.validate_run(tmp_path)
+
+
 # ---------------------------------------------------------------------------
 # T11: Zero-candidate guard (Fix 4)
 # ---------------------------------------------------------------------------
@@ -491,7 +663,7 @@ def test_t11_mass_empty_retrieval_raises(tmp_path):
 
     cases = tmp_path / "cases.json"
     cases.write_text(json.dumps([
-        {"case_id": f"case-{i}", "query": f"query-{i}"} for i in range(10)
+        {"case_id": f"case-{i}", "query": f"query-{i}", "scope": {"all_projects": True}} for i in range(10)
     ]))
     output = tmp_path / "candidates.jsonl"
     with pytest.raises(run.EmptyRetrievalError, match="10/10.*100%.*threshold"):
@@ -514,8 +686,8 @@ def test_t11_below_threshold_succeeds(tmp_path):
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     cases = tmp_path / "cases.json"
-    case_list = [{"case_id": f"case-{i}", "query": f"query-{i}"} for i in range(4)]
-    case_list.append({"case_id": "case-empty", "query": "empty"})
+    case_list = [{"case_id": f"case-{i}", "query": f"query-{i}", "scope": {"project": "test"}} for i in range(4)]
+    case_list.append({"case_id": "case-empty", "query": "empty", "scope": {"project": "test"}})
     cases.write_text(json.dumps(case_list))
     output = tmp_path / "candidates.jsonl"
     rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
@@ -564,13 +736,13 @@ def test_t12_retrieval_config_records_mode_in_candidates(tmp_path):
         "#!/usr/bin/env python3\n"
         "import json, sys\n"
         "assert '--retrieval-mode' in sys.argv, f'missing --retrieval-mode in {sys.argv}'\n"
-        "assert '--all-projects' in sys.argv or '--project' in sys.argv\n"
+        "assert '--all-projects' in sys.argv or '--project' in sys.argv or '--root' in sys.argv\n"
         "print(json.dumps([{'excerpt':'x','path':'x.md','heading':[]}]))\n"
     )
     executable.chmod(executable.stat().st_mode | stat.S_IXUSR)
 
     cases = tmp_path / "cases.json"
-    cases.write_text(json.dumps([{"case_id": "c1", "query": "q"}]))
+    cases.write_text(json.dumps([{"case_id": "c1", "query": "q", "scope": {"project": "test"}}]))
     output = tmp_path / "candidates.jsonl"
     rows = run.generate_candidates(cases, output, pausanias_executable=str(executable))
     assert rows[0]["retrieval_config"]["retrieval_mode"] == "fused"

@@ -43,8 +43,10 @@ def test_candidate_rows_namespaces_ids_and_two_case_generated_shape_validates(tm
         "harness_revision": "h", "jm_revision": "j",
     }
     cases = [
-        {"case_id": "one", "query": "q1", "retrieved": [{"excerpt": "one", "path": "one.md", "heading": []}]},
-        {"case_id": "two", "query": "q2", "retrieved": [{"excerpt": "two", "path": "two.md", "heading": []}]},
+        {"case_id": "one", "query": "q1", "scope": {"project": "test"},
+         "retrieved": [{"excerpt": "one", "path": "one.md", "heading": []}]},
+        {"case_id": "two", "query": "q2", "scope": {"project": "test"},
+         "retrieved": [{"excerpt": "two", "path": "two.md", "heading": []}]},
     ]
     candidates = run.candidate_rows(cases, provenance)
     assert [row["candidate_id"] for row in candidates] == ["one:candidate-0", "two:candidate-0"]

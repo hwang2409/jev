@@ -134,7 +134,8 @@ def safety_cases(dataset: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
                     )
             cases.append({"case_id": f"locomo-{conversation_index}-{question_index}",
                           "query": query, "retrieved": retrieved, "answerable": False,
-                          "retrieval_provenance": question.get("retrieval_provenance")})
+                          "retrieval_provenance": question.get("retrieval_provenance"),
+                          "retrieval_scope": {"all_projects": True}})
     if len(cases) != 446:
         raise ValueError(f"LOCOMO safety export has {len(cases)} questions, expected 446")
     return cases
@@ -149,11 +150,20 @@ def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, 
         for item in retrieved:
             if isinstance(item, Mapping) and isinstance(item.get("excerpt"), str) and item["excerpt"]:
                 sources.setdefault(pipeline.content_hash(item["excerpt"]), item["excerpt"])
+        # Per-case scope: carried on every row, allowed to vary across cases.
+        # Uses the case's own scope (or the scope already resolved into
+        # retrieval_scope by generate_candidates).
+        case_scope = case.get("retrieval_scope")
+        if case_scope is None and "scope" in case:
+            case_scope = _resolve_scope(case)
         for rank, item in enumerate(selected):
             source = sources.get(str(item["content_hash"]))
             if source is None or source[:pipeline.EXCERPT_CHARS] != item["excerpt"]:
                 raise ValueError("selected candidate source changed during artifact generation")
-            rows.append({"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{item['id']}", "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance})
+            row = {"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{item['id']}", "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance}
+            if case_scope is not None:
+                row["retrieval_scope"] = case_scope
+            rows.append(row)
     return rows
 
 
@@ -189,21 +199,59 @@ def load_cases(path: Path) -> list[dict[str, Any]]:
     return [dict(case) for case in data if isinstance(case, Mapping)]
 
 
-def _resolve_scope_flags(case: Mapping[str, Any]) -> list[str]:
-    """Derive pausanias --project / --all-projects flags from case scope.
+class ScopeResolutionError(ValueError):
+    """Raised when a case has missing, empty, or malformed scope.
 
-    Case schema:
-      scope.project  -> --project <name>
-      scope.all_projects true (or absent scope / absent scope.project) -> --all-projects
+    Silent broadening (defaulting to --all-projects) is a semantics change:
+    pausanias with no flags searches only global paths, so an absent scope
+    must be a hard error, not a silent default.
+    """
+
+
+def _resolve_scope(case: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the normalised retrieval_scope dict for a case.
+
+    Returns one of:
+      {"root": <id>}
+      {"project": <name>}
+      {"all_projects": True}
+
+    Raises ScopeResolutionError for missing/empty/malformed scope.
     """
     scope = case.get("scope")
-    if isinstance(scope, Mapping):
-        project = scope.get("project")
-        if isinstance(project, str) and project:
-            return ["--project", project]
-        if scope.get("all_projects"):
-            return ["--all-projects"]
-    # No scope block at all -> all-projects (backward-compatible default)
+    if not isinstance(scope, Mapping) or not scope:
+        raise ScopeResolutionError(
+            f"case {case.get('id', case.get('case_id', '?'))!r}: "
+            f"missing or empty scope — refusing to silently broaden"
+        )
+    root = scope.get("root")
+    if isinstance(root, str) and root:
+        return {"root": root}
+    project = scope.get("project")
+    if isinstance(project, str) and project:
+        return {"project": project}
+    if scope.get("all_projects") is True:
+        return {"all_projects": True}
+    raise ScopeResolutionError(
+        f"case {case.get('id', case.get('case_id', '?'))!r}: "
+        f"malformed scope {scope!r} — no recognised root/project/all_projects key"
+    )
+
+
+def _resolve_scope_flags(case: Mapping[str, Any]) -> list[str]:
+    """Derive pausanias --root / --project / --all-projects flags from case scope.
+
+    Case schema (real cases.json shapes):
+      scope.root         -> --root <id>        (e.g. {"root": "pausanias"})
+      scope.project      -> --project <name>   (e.g. {"project": "phoebe"})
+      scope.all_projects -> --all-projects      (e.g. {"all_projects": true})
+      missing / empty / malformed scope -> ScopeResolutionError
+    """
+    resolved = _resolve_scope(case)
+    if "root" in resolved:
+        return ["--root", resolved["root"]]
+    if "project" in resolved:
+        return ["--project", resolved["project"]]
     return ["--all-projects"]
 
 
@@ -292,7 +340,9 @@ def generate_candidates(case_path: Path, output: Path, *, pausanias_executable: 
             raise TypeError("each case requires id/case_id")
         retrieved = _search_pausanias(case, executable=pausanias_executable, config=pausanias_config, cwd=pausanias_cwd)
         current["retrieved"] = retrieved
-        # Record per-case retrieval config in provenance
+        # Record per-case retrieval scope (carried per-row by candidate_rows)
+        current["retrieval_scope"] = _resolve_scope(case)
+        # Record per-case retrieval config in provenance (kept for compat)
         scope_flags = _resolve_scope_flags(case)
         current["retrieval_config"] = {
             "retrieval_mode": "fused",
@@ -394,10 +444,20 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
             rows.append({"case_id": case["case_id"], "candidates": []})
         for rank, candidate in enumerate(candidates):
             cid = str(candidate["id"])
+            # Derive per-case retrieval_scope if the case has scope info
+            case_scope = case.get("retrieval_scope")
+            if case_scope is None and "scope" in case:
+                try:
+                    case_scope = _resolve_scope(case)
+                except ScopeResolutionError:
+                    case_scope = {"project": "unknown"}
+            if case_scope is None:
+                case_scope = {"project": "unknown"}
             row = {"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{cid}",
                    "query": case["query"], "path": candidate["path"], "heading": candidate["heading"],
                    "rank": rank, "score": scores.get(cid), "request_error": error,
                    "coverage": error is None and cid in scores,
+                   "retrieval_scope": case_scope,
                    "untruncated_excerpt_hash": candidate["content_hash"], "presented_excerpt": candidate["excerpt"]}
             row.update({**provenance_defaults, "configured_model_id": configured_model,
                         "served_model_id": served_model})
