@@ -22,10 +22,12 @@ def _locomo_fixture_with_bad_shape(
 ) -> list[dict]:
     """Build a locomo-shaped fixture where retrieved items have invalid shape.
 
-    This reproduces the real incident shape: items have fields that cause
-    prepare_candidates to discard every item (e.g. heading as a nested dict
-    instead of a list, missing path, etc.).  The per-item discard is
-    production-faithful; the fix detects that ALL items were discarded.
+    This reproduces the EXACT real incident shape: checkpoint export records
+    carry ``source_path`` (not ``path``) and a STRING heading.  Production
+    normalization accepts string headings (routing.py:346-351) but requires a
+    string ``path``; its absence makes ``_memory_key`` return ``None`` and
+    every item is discarded.  The per-item discard is production-faithful;
+    the fix detects that ALL items were discarded.
     """
     conversations: list[dict] = []
     total = 0
@@ -38,12 +40,16 @@ def _locomo_fixture_with_bad_shape(
         for j in range(n_q):
             q_index = total + j
             if q_index < n_bad:
-                # BAD shape: heading as a dict triggers _memory_key -> None
+                # EXACT incident shape: source_path instead of path, string
+                # heading.  String heading alone is fine in production; the
+                # missing ``path`` is what discards the item.
                 retrieved = [
                     {
                         "excerpt": f"Some memory content for q{j} conv{i}",
-                        "path": f"memories/conv{i}/doc{j}.md",
-                        "heading": {"text": f"Section {j}"},  # dict, not list
+                        "source_path": f"conversation-{i:02d}--session-{j}.md",
+                        "heading": f"turn D{j}:1 | speaker: test",  # string
+                        "project": f"locomo-{i}",
+                        "rank": 1,
                     }
                 ]
             else:
