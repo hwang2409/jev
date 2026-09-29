@@ -1,0 +1,13 @@
+{
+ "annotation_provenance": "model-annotated (design deviation: user delegated labeling)",
+ "primary": "claude-opus-4-6",
+ "independent_b": "gpt-5.5 (full 62, blind)",
+ "tiebreak": "claude-sonnet-4-6 (2 disputed rows, blind)",
+ "raw_agreement_a_b": "60/62 = 96.8%",
+ "ambiguous_identical_across_annotators": true,
+ "adjudication_rule": "pre-committed majority-of-three per disputed row",
+ "flips": {
+  "paraphrase-cache-retention:candidate-1": "negative"
+ },
+ "labels_sha256": "906b2b0692fb0ed3ae3b4c8227e8d10997d14f66bf3c2e7f847da0e827b1e866"
+}

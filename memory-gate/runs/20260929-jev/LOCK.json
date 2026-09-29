@@ -1,0 +1,10 @@
+{
+  "calibration_artifact_hashes": {
+    "memory-gate/runs/20260929-jev/candidates.jsonl": "0d63fb70802d105c1a443eb527c58b7ac3ca2528398985282cd9cd68b34edc69",
+    "memory-gate/runs/20260929-jev/labels.jsonl": "906b2b0692fb0ed3ae3b4c8227e8d10997d14f66bf3c2e7f847da0e827b1e866",
+    "memory-gate/runs/20260929-jev/report.md": "553322631670412ede7995e6d05401876b65d7502d54f6068c2fe90966d6fc67",
+    "memory-gate/runs/20260929-jev/scores.jsonl": "9cfc30a3a0f15c4164cd94042adef2d1e6b5933b05a810f6e7974b53d491f2c4"
+  },
+  "schema_version": 1,
+  "tau": 0.58
+}
