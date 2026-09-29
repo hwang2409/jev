@@ -276,10 +276,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         for row in result["table"]:
             strata = ", ".join(f"{name}={value['cases']}/{value['total']} ({value['rate']!r})" for name, value in row["any_injection_rate_by_stratum"].items())
             lines.append(f"tau={row['tau']:.6g}: {strata}")
+        lines += ["", "Bootstrap 95% CIs (10,000 resamples; seed 20260929; percentile):"]
+        for row in result["table"]:
+            entries = []
+            for name in ("any_injection_rate", "packet_recall", "packet_precision", "exact_packet_rate", "forbidden_injection_rate"):
+                bootstrap = row["bootstrap"][name]
+                ci = bootstrap["ci"]
+                ci_text = "null" if ci is None else "[" + ", ".join(f"{value:.6g}" for value in ci) + "]"
+                entries.append(f"{name}={ci_text}; null-replicates={bootstrap['null_replicates']}")
+            lines.append(f"tau={row['tau']:.6g}: " + " | ".join(entries))
         lines += ["", "Pareto frontier (abstain any-injection, packet recall):"]
-        lines += [f"tau={r['tau']:.6g} any={r['any_injection_rate']!r} recall={r['packet_recall']!r}" for r in result["pareto"]]
+        lines += [f"tau={r['tau']:.6g} abstain={r['any_injection_rate_by_stratum'].get('abstain', {}).get('rate')!r} recall={r['packet_recall']!r}" for r in result["pareto"]]
         lines += ["", "Selection: " + json.dumps(result["selection"], sort_keys=True)]
-        text = "\\n".join(lines) + "\\n"
+        text = "\n".join(lines) + "\n"
         (run_dir / "results.txt").write_text(text)
         print(text, end="")
         return 0

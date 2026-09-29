@@ -72,15 +72,17 @@ def _pr_auc(scores: Sequence[float], labels: Sequence[bool]) -> float | None:
     positives = sum(labels)
     if not positives or positives == len(labels):
         return None
-    order = sorted(range(len(scores)), key=lambda i: (-scores[i], i))
+    thresholds = sorted(set(scores), reverse=True)
     tp = fp = 0
     previous_recall = 0.0
     area = 0.0
-    for i in order:
-        if labels[i]:
-            tp += 1
-        else:
-            fp += 1
+    for threshold in thresholds:
+        for score, label in zip(scores, labels):
+            if score == threshold:
+                if label:
+                    tp += 1
+                else:
+                    fp += 1
         recall = tp / positives
         precision = tp / (tp + fp)
         area += (recall - previous_recall) * precision
@@ -134,7 +136,7 @@ def metrics(cases: Sequence[Mapping[str, Any]], tau: float, labels: Mapping[str,
         pc = [x for x in c["candidates"] if c["labels"].get(x["candidate_id"]) == "positive"]
         ps = {x["candidate_id"]: c["scores"][x["candidate_id"]] for x in pc}
         optimal[c.get("case_id", str(id(c)))] = {x["candidate_id"] for x in pipeline.select_blocks(pc, ps, tau, no_gate=True)}
-        actual = {x["candidate_id"] for x in injected_for(c) if c["labels"].get(x["candidate_id"]) == "positive"}
+        actual = {x["candidate_id"] for x in injected_for(c)}
         exact.append(actual == optimal[c.get("case_id", str(id(c)))])
     forbidden_blocks = [x for c, blocks in zip(valid, injected) for x in blocks if x.get("path") in set(c.get("forbidden_paths", []))]
     forbidden_cases = sum(any(x.get("path") in set(c.get("forbidden_paths", [])) for x in b) for c, b in zip(valid, injected))
@@ -182,7 +184,7 @@ def metrics(cases: Sequence[Mapping[str, Any]], tau: float, labels: Mapping[str,
         "any_injection_rate": bootstrap_cases(valid, lambda sample: ratio(sum(bool(injected_for(c)) for c in sample), len(sample))),
         "packet_recall": bootstrap_cases(eligible, lambda sample: ratio(sum(bool(positives(injected_for(c), c)) for c in sample), len(sample))),
         "packet_precision": bootstrap_cases(valid, lambda sample: ratio(sum(positives(injected_for(c), c) for c in sample), sum(nonambiguous(injected_for(c), c) for c in sample))),
-        "exact_packet_rate": bootstrap_cases(eligible, lambda sample: ratio(sum(({x["candidate_id"] for x in injected_for(c) if c["labels"].get(x["candidate_id"]) == "positive"} == optimal[c.get("case_id", str(id(c)))]) for c in sample), len(sample))),
+        "exact_packet_rate": bootstrap_cases(eligible, lambda sample: ratio(sum(({x["candidate_id"] for x in injected_for(c)} == optimal[c.get("case_id", str(id(c)))]) for c in sample), len(sample))),
         "forbidden_injection_rate": bootstrap_cases(valid, lambda sample: ratio(sum(any(x.get("path") in set(c.get("forbidden_paths", [])) for x in injected_for(c)) for c in sample), len(sample))),
     }
     return result

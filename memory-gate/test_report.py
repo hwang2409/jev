@@ -14,12 +14,15 @@ def test_report_snapshot_is_deterministic(tmp_path, capsys):
     target = tmp_path / "run"
     shutil.copytree(FIXTURE, target)
     assert run.main(["report", "--run", str(target)]) == 0
-    first = (target / "results.txt").read_text()
-    assert "RESULTS — memory-gate metrics" in first
-    assert "tau | any-injection | recall | precision" in first
+    first = (target / "results.txt").read_bytes()
+    expected = (Path(__file__).with_name("testdata-report-fixture.txt")).read_bytes()
+    assert first == expected
+    assert b"\\\\n" not in first
+    assert b"Bootstrap 95% CIs (10,000 resamples; seed 20260929; percentile):" in first
+    assert b"precision=null" in first
     capsys.readouterr()
     assert run.main(["report", "--run", str(target)]) == 0
-    assert (target / "results.txt").read_text() == first
+    assert (target / "results.txt").read_bytes() == expected
 
 
 def test_report_refuses_invalid_run(tmp_path):
