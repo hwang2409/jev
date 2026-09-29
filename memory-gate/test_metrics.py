@@ -3,8 +3,9 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import artifacts
 import pytest
+
+import artifacts
 
 HERE = Path(__file__).parent
 spec = importlib.util.spec_from_file_location("memory_gate_metrics_test_run", HERE / "run.py")

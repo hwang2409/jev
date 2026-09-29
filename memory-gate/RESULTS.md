@@ -43,7 +43,7 @@ Mixed configured/served identities invalidate the probe.
 
 ## Authority and limitations
 
-` safety.json` is written once and is authoritative only when the witness,
+`safety.json` is written once and is authoritative only when the witness,
 coverage, and acceptance checks pass. `posthoc-safety-curve.json` is explicitly
 non-authoritative and cannot change the locked result. The fixed LOCOMO
 conversations are clustered (not an iid population); calibration labels are

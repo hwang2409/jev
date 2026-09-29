@@ -8,13 +8,14 @@ from __future__ import annotations
 
 import json
 import shutil
+import stat
 import subprocess
 from pathlib import Path
 
+import pytest
+
 import artifacts
 import lock as lock_module
-import pipeline
-import pytest
 import run
 
 HERE = Path(__file__).parent
@@ -23,23 +24,6 @@ FIXTURE = HERE / "runs" / "fixture-dev"
 
 def _git(cwd: Path, *args: str, check: bool = True):
     return subprocess.run(["git", *args], cwd=cwd, check=check, capture_output=True, text=True)
-
-
-def _make_candidate_row(case_id: str, index: int, query: str, path: str,
-                        heading: list[str], excerpt: str, provenance: dict) -> dict:
-    """Build one canonical candidate row with all required fields."""
-    candidate_id = f"{case_id}:candidate-{index}"
-    return {
-        "case_id": case_id,
-        "candidate_id": candidate_id,
-        "query": query,
-        "path": path,
-        "heading": heading,
-        "rank": index,
-        "untruncated_excerpt_hash": pipeline.content_hash(excerpt),
-        "presented_excerpt": excerpt[:pipeline.EXCERPT_CHARS],
-        **provenance,
-    }
 
 
 def _build_fake_response(n_candidates: int, scores: list[float] | None = None):
@@ -61,12 +45,15 @@ def _build_fake_response(n_candidates: int, scores: list[float] | None = None):
 # ---------------------------------------------------------------------------
 
 class TestW1CalibrationWorkflow:
-    """candidates -> label-template -> (fill labels) -> score --lane calibration
-    -> report -> lock, in ONE run dir under a git repo mimicking
+    """candidates CLI -> label-template CLI -> fill labels -> score CLI
+    -> report CLI -> lock CLI, in ONE run dir under a git repo mimicking
     memory-gate/runs/<stamp>-<model>/ nesting.
+    Candidates are generated via the real CLI path with a fake-pausanias
+    executable; labels are derived from captured label-template output;
+    candidates.jsonl bytes are proven immutable through scoring.
     artifacts.validate_run passes; the lock verifies."""
 
-    def test_full_calibration_workflow(self, tmp_path):
+    def test_full_calibration_workflow(self, tmp_path, capsys):
         # Set up a git repo with nested run dir: memory-gate/runs/20250101-test-model/
         repo = tmp_path / "repo"
         repo.mkdir()
@@ -81,85 +68,79 @@ class TestW1CalibrationWorkflow:
         run_dir = repo / "memory-gate" / "runs" / "20250101-test-model"
         run_dir.mkdir(parents=True)
 
-        # 1. candidates command: write candidates.jsonl from a cases file
+        # ---- 1. candidates CLI with fake-pausanias executable ----
+        # The fake-pausanias script returns two retrieval results for every
+        # query, exercising the same subprocess path as the real runner.
+        fake_pausanias = tmp_path / "fake-pausanias"
+        fake_pausanias.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json\n"
+            "print(json.dumps(["
+            "{'excerpt': 'The cache is in SQLite.', 'path': 'docs/cache.md', 'heading': ['Storage']},"
+            "{'excerpt': 'Old cache plan.', 'path': 'docs/old.md', 'heading': ['Old']}"
+            "]))\n"
+        )
+        fake_pausanias.chmod(fake_pausanias.stat().st_mode | stat.S_IXUSR)
+
         cases = [
-            {"case_id": "w1-case-1", "query": "Where is the cache?", "answerable": True,
-             "retrieved": [
-                 {"excerpt": "The cache is in SQLite.", "path": "docs/cache.md", "heading": ["Storage"]},
-                 {"excerpt": "Old cache plan.", "path": "docs/old.md", "heading": ["Old"]},
-             ]},
-            {"case_id": "w1-case-2", "query": "Unanswerable question", "answerable": False,
-             "retrieved": [
-                 {"excerpt": "Nothing relevant here.", "path": "docs/misc.md", "heading": ["Misc"]},
-             ]},
+            {"case_id": "w1-case-1", "query": "Where is the cache?", "answerable": True},
+            {"case_id": "w1-case-2", "query": "Unanswerable question", "answerable": False},
         ]
         cases_file = tmp_path / "cases.json"
         cases_file.write_text(json.dumps(cases))
 
-        # Generate candidates using the module directly (candidates CLI calls
-        # pausanias which we cannot run; instead we use candidate_rows which
-        # is what the offline path uses)
-        provenance = {
-            "case_set_fingerprint": "test-fingerprint",
-            "corpus_fingerprint": "test-corpus",
-            "pausanias_revision": "test-pausanias",
-            "retrieval_config": {"mode": "synthetic"},
-            "production_builder_hash": artifacts.authoritative_production_builder_hash(),
-            "configured_model_id": "unscored",
-            "served_model_id": "unscored",
-            "harness_revision": "test-harness",
-            "jm_revision": "test-jm",
-        }
-        candidates = run.candidate_rows(cases, provenance)
-        # Set canonical_request_hash
-        by_case: dict[str, list[dict]] = {}
-        for row in candidates:
-            by_case.setdefault(row["case_id"], []).append(row)
-        for group in by_case.values():
-            digest = artifacts._canonical_hash(group)
-            for row in group:
-                row["canonical_request_hash"] = digest
-        artifacts.write_candidates(run_dir / "candidates.jsonl", candidates)
+        candidates_path = run_dir / "candidates.jsonl"
+        exit_code = run.main([
+            "candidates",
+            "--cases", str(cases_file),
+            "--output", str(candidates_path),
+            "--pausanias-python", str(fake_pausanias),
+        ])
+        assert exit_code == 0
+        assert candidates_path.exists()
+        written_candidates = run.read_jsonl(candidates_path)
+        assert len(written_candidates) == 4  # 2 cases x 2 candidates each
 
-        # Verify candidates written
-        assert (run_dir / "candidates.jsonl").exists()
-        written_candidates = run.read_jsonl(run_dir / "candidates.jsonl")
-        assert len(written_candidates) == 3  # 2 + 1
+        # ---- 2. label-template CLI: capture its stdout ----
+        capsys.readouterr()  # drain
+        exit_code = run.main(["label-template", "--candidates", str(run_dir)])
+        assert exit_code == 0
+        template_output = capsys.readouterr().out
 
-        # 2. label-template: generate label template from candidates
-        result = run.main(["label-template", "--candidates", str(run_dir)])
-        assert result == 0
+        # ---- 3. Fill labels from captured template output ----
+        template_rows = [json.loads(line) for line in template_output.strip().splitlines()]
+        assert len(template_rows) == len(written_candidates)
+        for row in template_rows:
+            assert row["label"] is None  # template must emit null labels
 
-        # 3. Simulate human filling labels: write labels.jsonl
         labels = []
-        for row in written_candidates:
-            label_row = dict(row)
-            # w1-case-1 candidates: first is positive, second negative
-            # w1-case-2 candidate: negative (abstain case)
-            if row["candidate_id"] == "w1-case-1:candidate-0":
-                label_row["label"] = "positive"
+        for row in template_rows:
+            filled = dict(row)
+            if "w1-case-1" in row["candidate_id"] and row["rank"] == 0:
+                filled["label"] = "positive"
             else:
-                label_row["label"] = "negative"
-            labels.append(label_row)
+                filled["label"] = "negative"
+            labels.append(filled)
         (run_dir / "labels.jsonl").write_text(
             "".join(json.dumps(row, sort_keys=True) + "\n" for row in labels)
         )
 
-        # 4. score --lane calibration: must CONSUME existing candidates, NOT regenerate
-        # Build fake responses for each case
+        # ---- 4. Snapshot candidates.jsonl bytes before scoring ----
+        candidates_bytes_before = candidates_path.read_bytes()
+
+        # Build fake responses: one per case group
+        by_case: dict[str, list[dict]] = {}
+        for row in written_candidates:
+            by_case.setdefault(row["case_id"], []).append(row)
         responses = []
-        for case in cases:
-            retrieved = case.get("retrieved", [])
-            n = min(len(retrieved), pipeline.TOP_K)
-            if n > 0:
-                scores_list = [0.8, 0.2][:n]
-                responses.append(_build_fake_response(n, scores_list))
+        for group in by_case.values():
+            n = len(group)
+            scores_list = [0.8, 0.2][:n]
+            responses.append(_build_fake_response(n, scores_list))
 
         response_file = tmp_path / "responses.json"
         response_file.write_text(json.dumps(responses))
 
-        # The score command must consume the existing candidates.jsonl and
-        # produce scores.jsonl WITHOUT overwriting labels.jsonl
         labels_before = (run_dir / "labels.jsonl").read_text()
         exit_code = run.main([
             "score", "--lane", "calibration",
@@ -168,6 +149,10 @@ class TestW1CalibrationWorkflow:
             "--model", "test-model",
         ])
         assert exit_code == 0
+
+        # ---- candidates.jsonl must be byte-identical after scoring ----
+        assert candidates_path.read_bytes() == candidates_bytes_before, \
+            "candidates.jsonl was modified by scoring — immutability violated"
 
         # Labels must NOT have been overwritten
         assert (run_dir / "labels.jsonl").read_text() == labels_before
@@ -184,17 +169,17 @@ class TestW1CalibrationWorkflow:
             assert score_row["served_model_id"] == "test-served"
             assert score_row["coverage"] is True
 
-        # 5. report: write report.md (authoritative)
+        # ---- 5. report CLI ----
         exit_code = run.main(["report", "--run", str(run_dir)])
         assert exit_code == 0
         assert (run_dir / "report.md").exists()
         report_content = (run_dir / "report.md").read_text()
         assert "tau" in report_content.lower() or "Threshold" in report_content or "RESULTS" in report_content
 
-        # 6. validate_run must pass
+        # ---- 6. validate_run must pass ----
         artifacts.validate_run(run_dir)
 
-        # 7. lock: create LOCK.json
+        # ---- 7. lock CLI ----
         exit_code = run.main(["lock", "--run", str(run_dir), "--tau", "0.6"])
         assert exit_code == 0
         assert (run_dir / "LOCK.json").exists()
@@ -204,13 +189,12 @@ class TestW1CalibrationWorkflow:
         # Lock must hash report.md
         assert any("report.md" in str(k) for k in lock_data["calibration_artifact_hashes"])
 
-        # 8. Commit and push, verify witness
+        # ---- 8. Commit, push, verify witness ----
         _git(repo, "add", ".")
         _git(repo, "commit", "-m", "calibration run")
         witness = _git(repo, "rev-parse", "HEAD").stdout.strip()
         _git(repo, "push", "origin", "main")
 
-        # Verify witness with nested path (memory-gate/runs/<stamp>-<model>/)
         verified = run.verify_witness(
             run_dir / "LOCK.json", witness, repo=repo
         )
@@ -224,7 +208,7 @@ class TestW1CalibrationWorkflow:
         shutil.copy(FIXTURE / "candidates.jsonl", run_dir / "candidates.jsonl")
         response_file = tmp_path / "responses.json"
         response_file.write_text("[]")
-        with pytest.raises((SystemExit, ValueError, artifacts.ArtifactValidationError)):
+        with pytest.raises(ValueError, match="calibration scoring requires labels.jsonl"):
             run.main([
                 "score", "--lane", "calibration",
                 "--run", str(run_dir),
@@ -245,7 +229,7 @@ class TestW1CalibrationWorkflow:
         )
         response_file = tmp_path / "responses.json"
         response_file.write_text("[]")
-        with pytest.raises((SystemExit, ValueError)):
+        with pytest.raises(ValueError, match="unfilled template labels"):
             run.main([
                 "score", "--lane", "calibration",
                 "--run", str(run_dir),
@@ -376,24 +360,56 @@ class TestW2SafetyWorkflow:
 
     def test_safety_refuses_dataset_without_retrieval_provenance(self, tmp_path):
         """A locomo dataset WITHOUT retrieval fields must be refused.
-        This is the 0/446 false-pass hole."""
+        This is the 0/446 false-pass hole.
+
+        The refusal must come from safety_cases (retrieval enforcement),
+        NOT from verify_witness failing on a missing LOCK.json.
+        """
+        # ---- Build a valid pushed lock + witness (reuse W2 fixture machinery) ----
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "-b", "main")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "test")
+        bare = tmp_path / "remote.git"
+        bare.mkdir()
+        _git(bare, "init", "--bare")
+        _git(repo, "remote", "add", "origin", str(bare))
+
+        run_dir = repo / "memory-gate" / "runs" / "20250101-test-model"
+        run_dir.mkdir(parents=True)
+
+        # Valid calibration run for the lock
+        for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl"):
+            shutil.copy(FIXTURE / name, run_dir / name)
+        (run_dir / "report.md").write_text("# Test report\n\nSynthetic calibration.\n")
+        lock_module.write_lock(
+            run_dir / "LOCK.json",
+            [run_dir / n for n in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")],
+            0.55,
+        )
+        _git(repo, "add", ".")
+        _git(repo, "commit", "-m", "calibration lock")
+        witness = _git(repo, "rev-parse", "HEAD").stdout.strip()
+        _git(repo, "push", "origin", "main")
+
+        # ---- Dataset WITHOUT retrieval fields ----
         locomo_no_retrieval = _locomo_fixture(with_retrieval=False)
         cases_file = tmp_path / "locomo-no-retrieval.json"
         cases_file.write_text(json.dumps(locomo_no_retrieval))
 
-        run_dir = tmp_path / "run"
-        run_dir.mkdir()
         response_file = tmp_path / "responses.json"
         response_file.write_text("[]")
 
-        with pytest.raises((SystemExit, ValueError, TypeError)):
+        # ---- Narrow assertion: must match retrieval-provenance error from safety_cases ----
+        with pytest.raises(ValueError, match="no.*'retrieved' field.*retrieval never ran"):
             run.main([
                 "score", "--lane", "safety",
                 "--run", str(run_dir),
                 "--cases", str(cases_file),
                 "--responses", str(response_file),
                 "--model", "m",
-                "--witness", "abc",
+                "--witness", witness,
             ])
 
     def test_zero_candidate_without_retrieval_provenance_is_refused(self, tmp_path):
@@ -406,7 +422,7 @@ class TestW2SafetyWorkflow:
         cases_file = tmp_path / "cases.json"
         cases_file.write_text(json.dumps(locomo))
 
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError, match="no.*'retrieved' field.*retrieval never ran"):
             run.safety_cases(locomo)
 
 
@@ -529,7 +545,7 @@ class TestRetrievalEnforcement:
         for conv in dataset:
             for q in conv["qa"]:
                 q.pop("retrieved", None)
-        with pytest.raises((ValueError, TypeError)):
+        with pytest.raises(ValueError, match="no.*'retrieved' field.*retrieval never ran"):
             run.safety_cases(dataset)
 
     def test_safety_cases_accepts_genuine_zero_retrieval_with_provenance(self):

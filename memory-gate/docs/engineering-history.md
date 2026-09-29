@@ -11,6 +11,9 @@
   strengthen to invoke `runner.records_for_state` directly.
 - **Second-rename failure test:** trips on `freeze_safety`'s internal rename, never
   reaching run.py rollback; fail on destination path instead.
+- **Consolidate calibration response scoring with score_cases:** calibration
+  response scoring (run.py:830-879) duplicates the structure of `score_cases`
+  (run.py:280-339); consolidate so the paths cannot drift.
 
 ---
 

@@ -51,13 +51,6 @@ BOOTSTRAPS = 10_000
 BOOTSTRAP_SEED = 20260929
 TAU_REFERENCE = 0.6
 LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json"
-REQUIRED_PROVENANCE = {
-    "case_set_fingerprint", "corpus_fingerprint", "pausanias_revision",
-    "retrieval_config", "rank", "untruncated_excerpt_hash",
-    "presented_excerpt", "canonical_request_hash", "production_builder_hash",
-    "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
-}
-
 sha256_bytes = artifacts.sha256
 canonical_json = artifacts.canonical_json
 
