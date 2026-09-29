@@ -1,0 +1,4 @@
+{"candidate_id": "case-1:candidate-0", "case_id": "case-1", "label": "positive"}
+{"candidate_id": "case-1:candidate-1", "case_id": "case-1", "label": "negative"}
+{"candidate_id": "case-2:candidate-0", "case_id": "case-2", "label": "positive"}
+{"candidate_id": "case-3:candidate-0", "case_id": "case-3", "label": "ambiguous"}

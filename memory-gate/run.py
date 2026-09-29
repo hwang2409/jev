@@ -1,0 +1,356 @@
+#!/usr/bin/env python3
+"""Offline/replayable memory-gate calibration runner.
+
+The eval imports the production request builder/parser from ``harness/src``.
+In a checkout (rather than an installed wheel), this bootstrap also adds the
+sibling ``jm`` checkout to sys.path, matching harness/pyproject.toml's local
+``jm`` editable dependency and its pausanias file dependency.  Candidate
+regeneration is intentionally local-only; locomo regeneration is documented
+below and must use pausanias' pinned runner/fetch, not a vendored dataset.
+
+No command in this module performs a Jev request.  ``score`` consumes a
+committed/cache response JSON file; a live adapter is supplied by the eventual
+homelab invocation outside this offline contractor.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import math
+import random
+import statistics
+import subprocess
+import sys
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+for _path in (ROOT / "harness" / "src", ROOT / "jm", Path("/tmp/pausanias") / "src"):
+    if _path.exists() and str(_path) not in sys.path:
+        sys.path.insert(0, str(_path))
+
+def _production_adapter() -> tuple[Any, Any]:
+    """Load harness lazily so schema/replay commands remain stdlib-only."""
+    from zeta.providers.jev import (
+        _parse_memory_relevance,
+        build_memory_relevance_request,
+    )
+    return build_memory_relevance_request, _parse_memory_relevance
+
+
+EXCERPT_CHARS = 600
+TOP_K = 2
+TOTAL_CHARS = 1500
+TAU_REFERENCE = 0.6
+BOOTSTRAPS = 10_000
+BOOTSTRAP_SEED = 20260929
+LOCOMO_URL = "https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json"
+
+REQUIRED_PROVENANCE = {
+    "case_set_fingerprint", "corpus_fingerprint", "pausanias_revision",
+    "retrieval_config", "rank", "untruncated_excerpt_hash",
+    "presented_excerpt", "canonical_request_hash", "production_builder_hash",
+    "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
+}
+
+
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def canonical_json(value: Any) -> bytes:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+
+
+def fingerprint(value: Any) -> str:
+    return sha256_bytes(canonical_json(value))
+
+
+def read_jsonl(path: Path) -> list[dict[str, Any]]:
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
+def write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
+    path.write_text("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n")
+
+
+def validate_record(record: Mapping[str, Any], kind: str) -> None:
+    if not isinstance(record, Mapping) or not isinstance(record.get("case_id"), str):
+        raise TypeError(f"{kind}: case_id is required")
+    if kind in {"candidate", "score"}:
+        missing = REQUIRED_PROVENANCE - record.keys()
+        if missing:
+            raise ValueError(f"{kind} {record['case_id']}: missing provenance {sorted(missing)}")
+        if not isinstance(record["presented_excerpt"], str) or not isinstance(record["untruncated_excerpt_hash"], str):
+            raise ValueError(f"{kind} {record['case_id']}: excerpt/hash types")
+    if kind == "candidate":
+        for field in ("candidate_id", "query", "path", "heading", "rank"):
+            if field not in record:
+                raise ValueError(f"candidate {record['case_id']}: missing {field}")
+        if not isinstance(record["heading"], list) or not all(isinstance(x, str) for x in record["heading"]):
+            raise ValueError("candidate heading must be a string list")
+    elif kind == "score":
+        score = record.get("score")
+        if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1):
+            raise ValueError(f"score {record['case_id']}: invalid score")
+        if not isinstance(record.get("coverage", False), bool):
+            raise ValueError("coverage must be boolean")
+    elif kind == "label":
+        if record.get("label") not in {"positive", "negative", "ambiguous"}:
+            raise ValueError("label must be positive, negative, or ambiguous")
+
+
+def validate_artifact(run_dir: Path) -> None:
+    required = {"candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md"}
+    missing = required - {p.name for p in run_dir.iterdir()} if run_dir.exists() else required
+    if missing:
+        raise ValueError(f"artifact missing {sorted(missing)}")
+    candidates = read_jsonl(run_dir / "candidates.jsonl")
+    scores = read_jsonl(run_dir / "scores.jsonl")
+    labels = read_jsonl(run_dir / "labels.jsonl")
+    for row in candidates:
+        validate_record(row, "candidate")
+    for row in scores:
+        validate_record(row, "score")
+    for row in labels:
+        validate_record(row, "label")
+    ids = {r["candidate_id"] for r in candidates}
+    if any(r.get("candidate_id") not in ids for r in scores + labels):
+        raise ValueError("score/label references unknown candidate")
+    if len({r["case_id"] for r in candidates}) == 0:
+        raise ValueError("empty candidate artifact")
+
+
+def production_request(query: str, candidates: list[dict[str, Any]]) -> dict[str, Any]:
+    """The one canonical request path used by both eval and production."""
+    builder, _ = _production_adapter()
+    return builder(query, candidates)
+
+
+def parse_production_scores(response: Mapping[str, Any], candidates: list[dict[str, Any]]) -> dict[str, float]:
+    """Parse the complete adapter-shaped response, refusing partial coverage."""
+    answers = response.get("answers")
+    if not isinstance(answers, Mapping):
+        raise TypeError("missing adapter answers")
+    _, parser = _production_adapter()
+    scores = parser(dict(answers), candidates)
+    if set(scores) != {str(c["id"]) for c in candidates}:
+        raise ValueError("partial score coverage")
+    if any(not isinstance(v, (int, float)) or isinstance(v, bool) or not 0 <= v <= 1 for v in scores.values()):
+        raise ValueError("invalid score")
+    return scores
+
+
+def content_hash(excerpt: str) -> str:
+    return sha256_bytes(excerpt.encode())
+
+
+def prepare_candidates(case: Mapping[str, Any], retrieved: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Faithful fresh-session routing: hash, truncate, skip, dedupe, then cap 2."""
+    selected: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[str, ...], str]] = set()
+    skips: list[dict[str, str]] = []
+    for rank, raw in enumerate(retrieved):
+        excerpt = raw.get("excerpt")
+        path = raw.get("path")
+        heading = raw.get("heading", [])
+        if not isinstance(excerpt, str) or not excerpt or not isinstance(path, str) or not isinstance(heading, list):
+            skips.append({"candidate_id": f"candidate-{rank}", "reason": "invalid"})
+            continue
+        untruncated_hash = content_hash(excerpt)
+        key = (path, tuple(heading), untruncated_hash)
+        if key in seen:
+            skips.append({"candidate_id": f"candidate-{rank}", "reason": "deduped"})
+            continue
+        seen.add(key)
+        if raw.get("actively_modified"):
+            skips.append({"candidate_id": f"candidate-{rank}", "reason": "actively_modified"})
+            continue
+        if raw.get("superseded"):
+            skips.append({"candidate_id": f"candidate-{rank}", "reason": "superseded"})
+            continue
+        if len(selected) >= TOP_K:
+            break
+        selected.append({
+            "id": f"candidate-{rank}", "path": path, "heading": list(heading),
+            "excerpt": excerpt[:EXCERPT_CHARS], "content_hash": untruncated_hash,
+            "rank": rank, "untruncated_excerpt_hash": untruncated_hash,
+            "skipped": skips,
+        })
+    return selected
+
+
+def render_block(candidate: Mapping[str, Any]) -> str:
+    heading = " > ".join(candidate["heading"]) or "(document)"
+    excerpt = candidate.get("excerpt", candidate.get("presented_excerpt", ""))
+    return f"[Relevant memory]\npath: {candidate['path']}\nheading: {heading}\n{excerpt}"
+
+
+def select_blocks(candidates: Sequence[Mapping[str, Any]], scores: Mapping[str, float] | None, tau: float, *, no_gate: bool = False) -> list[Mapping[str, Any]]:
+    """Production order, strict > tau, full-block budget and first-over-budget break."""
+    result: list[Mapping[str, Any]] = []
+    total = 0
+    for candidate in candidates:
+        score = scores.get(str(candidate["candidate_id"]), scores.get(str(candidate.get("id")))) if scores else None
+        if not no_gate and (score is None or not score > tau):
+            continue
+        block = render_block(candidate)
+        if total + len(block) > TOTAL_CHARS:
+            break
+        result.append(candidate)
+        total += len(block)
+    return result
+
+
+def wilson(successes: int, total: int, z: float = 1.959963984540054) -> list[float] | None:
+    if not total:
+        return None
+    p = successes / total
+    d = 1 + z * z / total
+    centre = (p + z * z / (2 * total)) / d
+    half = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / d
+    return [centre - half, centre + half]
+
+
+def ratio(numerator: int, denominator: int) -> float | None:
+    return numerator / denominator if denominator else None
+
+
+def case_metric(rows: list[dict[str, Any]], predicate: Any, eligible: list[dict[str, Any]] | None = None) -> tuple[float | None, int]:
+    sample = eligible if eligible is not None else rows
+    return ratio(sum(bool(predicate(r)) for r in sample), len(sample)), len(sample)
+
+
+def bootstrap(values: list[float | None], seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
+    rng = random.Random(seed)
+    usable = [v for v in values if v is not None]
+    if not usable:
+        return {"ci": None, "null_replicates": BOOTSTRAPS}
+    reps: list[float] = []
+    dropped = 0
+    for _ in range(BOOTSTRAPS):
+        draw = [rng.choice(usable) for _ in usable]
+        value = statistics.mean(draw) if draw else None
+        if value is None:
+            dropped += 1
+        else:
+            reps.append(value)
+    reps.sort()
+    return {"ci": [reps[int(.025 * (len(reps)-1))], reps[int(.975 * (len(reps)-1))]], "null_replicates": dropped}
+
+
+def metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) -> dict[str, Any]:
+    valid = [c for c in cases if c.get("valid", True)]
+    answerable = [c for c in valid if c.get("answerable", True)]
+    eligible = [c for c in answerable if any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"])]
+    injected = [select_blocks(c["candidates"], c["scores"], tau) for c in valid]
+    positive_injected = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) == "positive")
+    nonambiguous = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) in {"positive", "negative"})
+    recall = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in blocks) for blocks in [select_blocks(c["candidates"], c["scores"], tau) for c in eligible]), len(eligible))
+    no_gate = [select_blocks(c["candidates"], c["scores"], tau, no_gate=True) for c in eligible]
+    baseline = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in b) for b in no_gate), len(eligible))
+    forbidden = sum(any(x["path"] in c.get("forbidden_paths", []) for x in b) for c, b in zip(valid, injected))
+    return {
+        "tau": tau, "any_injection_rate": ratio(sum(bool(b) for b in injected), len(valid)),
+        "packet_recall": recall, "packet_recall_baseline": baseline,
+        "retention": ratio(recall, baseline) if baseline else None,
+        "packet_precision": ratio(positive_injected, nonambiguous),
+        "empty_injection_cases": sum(not b for b in injected),
+        "forbidden_injection_rate": ratio(forbidden, len(valid)),
+        "forbidden_injection_blocks": sum(1 for c,b in zip(valid,injected) for x in b if x["path"] in c.get("forbidden_paths", [])),
+        "retrieval_miss_rate": ratio(sum(not any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"]) for c in answerable), len(answerable)),
+        "eligible_recall_cases": len(eligible), "ambiguous_pairs": sum(labels.get(x["candidate_id"]) == "ambiguous" for c in valid for x in c["candidates"]),
+    }
+
+
+def filter_locomo_category5(dataset: Sequence[Mapping[str, Any]], *, expected_conversations: int = 10, expected_questions: int = 446) -> list[dict[str, Any]]:
+    """Keep category-5 questions and refuse partial locomo10 datasets."""
+    filtered: list[dict[str, Any]] = []
+    question_count = 0
+    for conversation in dataset:
+        questions = conversation.get("qa", conversation.get("questions", []))
+        if not isinstance(questions, list):
+            continue
+        kept = [q for q in questions if str(q.get("category", q.get("cat", ""))) == "5"]
+        if kept:
+            copy = dict(conversation)
+            copy["qa"] = kept
+            filtered.append(copy)
+            question_count += len(kept)
+    if len(filtered) != expected_conversations or question_count != expected_questions:
+        raise ValueError(f"locomo category-5 assertion failed: {len(filtered)} conversations / {question_count} questions")
+    return filtered
+
+
+def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, Any]) -> list[dict[str, Any]]:
+    rows = []
+    for case in cases:
+        for item in prepare_candidates(case, case.get("retrieved", case.get("candidates", []))):
+            rows.append({"case_id": case["case_id"], "candidate_id": item["id"], "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": item["rank"], "untruncated_excerpt_hash": item["untruncated_excerpt_hash"], "presented_excerpt": item["excerpt"], **provenance})
+    return rows
+
+
+def lock_witness(lock_path: Path, calibration_paths: Sequence[Path], tau: float) -> dict[str, Any]:
+    hashes = {str(p): sha256_bytes(p.read_bytes()) for p in calibration_paths}
+    payload = {"schema_version": 1, "tau": tau, "calibration_artifact_hashes": hashes}
+    lock_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
+    return payload
+
+
+def git(*args: str, cwd: Path = ROOT, check: bool = True) -> str:
+    return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True).stdout.strip()
+
+
+def verify_witness(lock: Path, witness: str, remote: str = "origin", *, safety_outputs: Sequence[Path] = (), repo: Path = ROOT) -> None:
+    """Enforce all four §8.3 refusal conditions before safety scoring."""
+    if not lock.exists(): raise ValueError("LOCK.json does not exist")
+    lock_bytes = lock.read_bytes()
+    rel = str(lock.relative_to(repo))
+    committed = subprocess.run(["git", "show", f"{witness}:{rel}"], cwd=repo, capture_output=True, check=False)
+    if committed.returncode or committed.stdout != lock_bytes:
+        raise ValueError("witness does not contain exact LOCK.json bytes")
+    data = json.loads(lock_bytes)
+    for path, expected in data.get("calibration_artifact_hashes", {}).items():
+        if not Path(path).exists() or sha256_bytes(Path(path).read_bytes()) != expected:
+            raise ValueError("calibration artifact hash mismatch")
+    git("fetch", remote, cwd=repo)
+    refs = git("for-each-ref", "--format=%(refname)", f"refs/remotes/{remote}/", cwd=repo)
+    if not any(subprocess.run(["git", "merge-base", "--is-ancestor", witness, ref], cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0 for ref in refs.splitlines()):
+        raise ValueError("witness is not reachable from a remote-tracking ref")
+    if any(path.exists() for path in safety_outputs):
+        raise ValueError("safety outputs already exist")
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    sub = parser.add_subparsers(dest="command", required=True)
+    for name in ("candidates", "score", "label-template", "lock", "report", "posthoc-safety-curve"):
+        sub.add_parser(name)
+    args, unknown = parser.parse_known_args(argv)
+    if args.command == "label-template":
+        print("case_id,candidate_id,label\n# label each presented excerpt: positive|negative|ambiguous")
+        return 0
+    if args.command == "lock":
+        p = Path(unknown[unknown.index("--run") + 1]) if "--run" in unknown else Path("memory-gate/runs/fixture-dev")
+        tau = float(unknown[unknown.index("--tau") + 1]) if "--tau" in unknown else TAU_REFERENCE
+        lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl"], tau)
+        return 0
+    if args.command == "score" and "--witness" in unknown:
+        run = Path(unknown[unknown.index("--run") + 1])
+        verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
+    if args.command in {"report", "posthoc-safety-curve"}:
+        run = Path(unknown[unknown.index("--run") + 1])
+        validate_artifact(run)
+        print((run / "report.md").read_text())
+        return 0
+    if args.command == "candidates":
+        raise SystemExit("candidate generation requires the local pausanias checkout and model bundle; no network fallback")
+    if args.command == "score":
+        raise SystemExit("score requires an offline response cache; use the homelab runner")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
