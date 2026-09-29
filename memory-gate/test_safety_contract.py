@@ -47,14 +47,14 @@ def test_unpushed_local_witness_rejected_after_prune_even_with_stale_tracking_re
     assert git(repo, "show-ref", "--verify", "--quiet", "refs/remotes/origin/main", check=False).returncode != 0
 
 
-def test_safety_refuses_verification_before_phase_c_stub(monkeypatch, capsys):
+def test_safety_refuses_scoring_without_cases_or_adapter(monkeypatch, capsys):
     calls = []
     def verify(*args, **kwargs):
         calls.append("verify")
         print("verified")
         return "abc"
     monkeypatch.setattr(run, "verify_witness", verify)
-    with pytest.raises(SystemExit, match="phase C not implemented"):
+    with pytest.raises(SystemExit, match="requires a live adapter"):
         run.main(["score", "--lane", "safety", "--run", "run", "--witness", "abc"])
     assert calls == ["verify"]
     assert capsys.readouterr().out == "verified\n"
@@ -95,7 +95,7 @@ def test_non_default_remote_is_passed_to_verification(monkeypatch, tmp_path):
         seen["remote"] = remote
         return "resolved"
     monkeypatch.setattr(run, "verify_witness", verify)
-    with pytest.raises(SystemExit, match="phase C not implemented"):
+    with pytest.raises(SystemExit, match="requires a live adapter"):
         run.main(["score", "--lane", "safety", "--remote", "backup", "--run", str(tmp_path), "--witness", "abc"])
     assert seen["remote"] == "backup"
 

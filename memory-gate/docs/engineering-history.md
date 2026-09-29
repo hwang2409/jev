@@ -1,3 +1,19 @@
+# Engineering history — implementation review round 1
+
+> **Historical document.** This records the findings from the first implementation
+> review (commit 4e8205c). The blocking issues and most missing tests have been
+> resolved in subsequent phases. Open follow-ups are marked below.
+
+## OPEN follow-ups (from post-approval C2 gate review)
+
+- **T2 cache key test strengthening:** expected cache key still computed via shared
+  helpers (behavioral equality with jm runner confirmed by reviewer scratch probe);
+  strengthen to invoke `runner.records_for_state` directly.
+- **Second-rename failure test:** trips on `freeze_safety`'s internal rename, never
+  reaching run.py rollback; fail on destination path instead.
+
+---
+
 # Implementation review round 1 (commit 4e8205c) — NOT-MERGE-READY
 
 Verdict: core is placeholder/divergent. Kept as working reference for the

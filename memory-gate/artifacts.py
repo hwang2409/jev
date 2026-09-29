@@ -54,7 +54,7 @@ def _read(path: Path) -> list[dict[str, Any]]:
 def write_candidates(path: Path, candidates: Iterable[Mapping[str, Any]]) -> None:
     """Write the generation stream without fabricating score or label records."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\\n" for row in candidates))
+    path.write_text("".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\n" for row in candidates))
 
 
 def write_artifact(run_dir: Path, candidates: Iterable[Mapping[str, Any]], scores: Iterable[Mapping[str, Any]], labels: Iterable[Mapping[str, Any]], report: str = "") -> None:
@@ -149,12 +149,21 @@ def validate_run(run_dir: Path) -> None:
     authoritative_hash = authoritative_production_builder_hash()
     if any(row["production_builder_hash"] != authoritative_hash for row in candidates):
         raise ArtifactValidationError("production builder hash mismatch")
-    duplicated_fields = set(CANDIDATE_FIELDS)
+    # Cross-stream identity check: score/label rows must carry the same
+    # identity fields as their candidate row, EXCEPT model identity which
+    # is legitimately "unscored" in candidates and updated after scoring.
+    duplicated_fields = set(CANDIDATE_FIELDS) - {"configured_model_id", "served_model_id"}
     for row in scores + labels:
         candidate = by_id[row["candidate_id"]]
         for field in duplicated_fields:
             if row[field] != candidate[field]:
                 raise ArtifactValidationError(f"candidate drift in {field}")
+    # Model identity consistency within each stream (scores must be uniform)
+    for stream_name, stream in (("score", scores), ("label", labels)):
+        for field in ("configured_model_id", "served_model_id"):
+            values = {json.dumps(r[field], sort_keys=True) for r in stream}
+            if len(values) > 1:
+                raise ArtifactValidationError(f"mixed model identity in {stream_name} {field}")
     # The raw source is deliberately not committed.  Offline validation checks
     # the presented representation and that every copy of the source hash is
     # identical; generation verifies the full source before writing it.

@@ -9,3 +9,6 @@ Experiments with TypeSafe's Jev (System One structured-decision model).
   Jev-triage compaction, evals). Its OWN independent git repo (full zeta
   history, subtree-merged into this repo). Never merged back into
   upstream zeta.
+- `memory-gate/` — memory-injection calibration eval: offline, replayable
+  threshold calibration and safety validation for the pausanias Jev
+  memory-relevance gate. See `memory-gate/DESIGN.md` for the full spec.

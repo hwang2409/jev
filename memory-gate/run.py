@@ -15,15 +15,13 @@ homelab invocation outside this offline contractor.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import math
 import os
-import random
 import statistics
 import subprocess
 import sys
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -60,12 +58,8 @@ REQUIRED_PROVENANCE = {
     "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
 }
 
-def sha256_bytes(value: bytes) -> str:
-    return hashlib.sha256(value).hexdigest()
-
-
-def canonical_json(value: Any) -> bytes:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+sha256_bytes = artifacts.sha256
+canonical_json = artifacts.canonical_json
 
 
 def fingerprint(value: Any) -> str:
@@ -76,101 +70,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
-def write_jsonl(path: Path, rows: Iterable[Mapping[str, Any]]) -> None:
-    path.write_text("\n".join(json.dumps(row, ensure_ascii=False, sort_keys=True) for row in rows) + "\n")
-
-
-def validate_record(record: Mapping[str, Any], kind: str) -> None:
-    if not isinstance(record, Mapping) or not isinstance(record.get("case_id"), str):
-        raise TypeError(f"{kind}: case_id is required")
-    if kind in {"candidate", "score"}:
-        missing = REQUIRED_PROVENANCE - record.keys()
-        if missing:
-            raise ValueError(f"{kind} {record['case_id']}: missing provenance {sorted(missing)}")
-        if not isinstance(record["presented_excerpt"], str) or not isinstance(record["untruncated_excerpt_hash"], str):
-            raise ValueError(f"{kind} {record['case_id']}: excerpt/hash types")
-    if kind == "candidate":
-        for field in ("candidate_id", "query", "path", "heading", "rank"):
-            if field not in record:
-                raise ValueError(f"candidate {record['case_id']}: missing {field}")
-        if not isinstance(record["heading"], list) or not all(isinstance(x, str) for x in record["heading"]):
-            raise ValueError("candidate heading must be a string list")
-    elif kind == "score":
-        score = record.get("score")
-        if score is not None and (isinstance(score, bool) or not isinstance(score, (int, float)) or not 0 <= score <= 1):
-            raise ValueError(f"score {record['case_id']}: invalid score")
-        if not isinstance(record.get("coverage", False), bool):
-            raise ValueError("coverage must be boolean")
-    elif kind == "label":
-        if record.get("label") not in {"positive", "negative", "ambiguous"}:
-            raise ValueError("label must be positive, negative, or ambiguous")
-
-
-
-def wilson(successes: int, total: int, z: float = 1.959963984540054) -> list[float] | None:
-    if not total:
-        return None
-    p = successes / total
-    d = 1 + z * z / total
-    centre = (p + z * z / (2 * total)) / d
-    half = z * math.sqrt(p * (1 - p) / total + z * z / (4 * total * total)) / d
-    return [centre - half, centre + half]
-
-
-def ratio(numerator: int, denominator: int) -> float | None:
-    return numerator / denominator if denominator else None
-
-
-def case_metric(rows: list[dict[str, Any]], predicate: Any, eligible: list[dict[str, Any]] | None = None) -> tuple[float | None, int]:
-    sample = eligible if eligible is not None else rows
-    return ratio(sum(bool(predicate(r)) for r in sample), len(sample)), len(sample)
-
-
-def bootstrap(values: list[float | None], seed: int = BOOTSTRAP_SEED) -> dict[str, Any]:
-    rng = random.Random(seed)
-    usable = [v for v in values if v is not None]
-    if not usable:
-        return {"ci": None, "null_replicates": BOOTSTRAPS}
-    reps: list[float] = []
-    dropped = 0
-    for _ in range(BOOTSTRAPS):
-        draw = [rng.choice(usable) for _ in usable]
-        value = statistics.mean(draw) if draw else None
-        if value is None:
-            dropped += 1
-        else:
-            reps.append(value)
-    reps.sort()
-    return {"ci": [reps[int(.025 * (len(reps)-1))], reps[int(.975 * (len(reps)-1))]], "null_replicates": dropped}
-
-
-def legacy_metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) -> dict[str, Any]:
-    valid = [c for c in cases if c.get("valid", True)]
-    answerable = [c for c in valid if c.get("answerable", True)]
-    eligible = [c for c in answerable if any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"])]
-    validated_scores = {
-        id(c): validate_scores(c["candidates"], c["scores"])
-        for c in valid
-    }
-    injected = [select_blocks(c["candidates"], validated_scores[id(c)], tau) for c in valid]
-    positive_injected = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) == "positive")
-    nonambiguous = sum(1 for blocks in injected for x in blocks if labels.get(x["candidate_id"]) in {"positive", "negative"})
-    recall = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in blocks) for blocks in [select_blocks(c["candidates"], validated_scores[id(c)], tau) for c in eligible]), len(eligible))
-    no_gate = [select_blocks(c["candidates"], validated_scores[id(c)], tau, no_gate=True) for c in eligible]
-    baseline = ratio(sum(any(labels.get(x["candidate_id"]) == "positive" for x in b) for b in no_gate), len(eligible))
-    forbidden = sum(any(x["path"] in c.get("forbidden_paths", []) for x in b) for c, b in zip(valid, injected))
-    return {
-        "tau": tau, "any_injection_rate": ratio(sum(bool(b) for b in injected), len(valid)),
-        "packet_recall": recall, "packet_recall_baseline": baseline,
-        "retention": ratio(recall, baseline) if baseline else None,
-        "packet_precision": ratio(positive_injected, nonambiguous),
-        "empty_injection_cases": sum(not b for b in injected),
-        "forbidden_injection_rate": ratio(forbidden, len(valid)),
-        "forbidden_injection_blocks": sum(1 for c,b in zip(valid,injected) for x in b if x["path"] in c.get("forbidden_paths", [])),
-        "retrieval_miss_rate": ratio(sum(not any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"]) for c in answerable), len(answerable)),
-        "eligible_recall_cases": len(eligible), "ambiguous_pairs": sum(labels.get(x["candidate_id"]) == "ambiguous" for c in valid for x in c["candidates"]),
-    }
-
+# Consolidated helpers — import from authoritative modules, don't copy.
+wilson = metrics_module.wilson
+ratio = metrics_module.ratio
 
 # Public runner API is the complete §5 implementation, not the historical stub.
 metrics = metrics_module.metrics
@@ -203,17 +105,43 @@ def safety_cases(dataset: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
     ``search``/index path for retrieval.  This adapter intentionally accepts
     only the resulting per-question ``retrieved`` records; it never invents a
     second retrieval implementation.
+
+    Retrieval enforcement (Blocker 2):
+    - Every question MUST have a ``retrieved`` field (list).  A missing field
+      means retrieval never ran and the dataset cannot be used for safety.
+    - A question with an empty ``retrieved`` list is accepted only if it also
+      carries ``retrieval_provenance`` proving the pinned pausanias pipeline
+      produced a genuine zero-retrieval result.
     """
     filtered = filter_locomo_category5(dataset)
     cases: list[dict[str, Any]] = []
     for conversation_index, conversation in enumerate(filtered):
         for question_index, question in enumerate(conversation["qa"]):
             query = question.get("question", question.get("query"))
-            retrieved = question.get("retrieved", question.get("candidates", []))
-            if not isinstance(query, str) or not isinstance(retrieved, list):
-                raise TypeError("LOCOMO benchmark export question lacks query/retrieved records")
+            if not isinstance(query, str):
+                raise TypeError("LOCOMO benchmark export question lacks query string")
+            # Retrieval enforcement: refuse questions where retrieval never ran
+            if "retrieved" not in question and "candidates" not in question:
+                raise ValueError(
+                    f"LOCOMO question {conversation_index}-{question_index} has no "
+                    f"'retrieved' field — retrieval never ran; dataset unusable for safety"
+                )
+            retrieved = question.get("retrieved", question.get("candidates"))
+            if not isinstance(retrieved, list):
+                raise TypeError("LOCOMO benchmark export question 'retrieved' must be a list")
+            # Zero-candidate enforcement: distinguish "no candidates retrieved"
+            # from "retrieval never ran" by requiring retrieval_provenance
+            if len(retrieved) == 0:
+                provenance = question.get("retrieval_provenance")
+                if not isinstance(provenance, dict) or "pipeline" not in provenance:
+                    raise ValueError(
+                        f"LOCOMO question {conversation_index}-{question_index} has zero "
+                        f"retrieval candidates but no retrieval_provenance — cannot "
+                        f"distinguish 'no candidates retrieved' from 'retrieval never ran'"
+                    )
             cases.append({"case_id": f"locomo-{conversation_index}-{question_index}",
-                          "query": query, "retrieved": retrieved, "answerable": False})
+                          "query": query, "retrieved": retrieved, "answerable": False,
+                          "retrieval_provenance": question.get("retrieval_provenance")})
     if len(cases) != 446:
         raise ValueError(f"LOCOMO safety export has {len(cases)} questions, expected 446")
     return cases
@@ -662,162 +590,430 @@ def write_posthoc_curve(path: Path, curve: Sequence[Mapping[str, Any]]) -> None:
     path.write_text(json.dumps({"authoritative": False, "curve": list(curve)}, indent=2, sort_keys=True) + "\n")
 
 
+def _repo_root(run_dir: Path) -> Path:
+    """Compute repo root via git rev-parse --show-toplevel (Blocker 3).
+
+    Falls back to walking parents for .git if git is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            cwd=run_dir, capture_output=True, text=True, check=False,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return Path(result.stdout.strip())
+    except OSError:
+        pass
+    # Fallback: walk parents looking for .git
+    for parent in (run_dir, *run_dir.parents):
+        if (parent / ".git").exists():
+            return parent
+    return run_dir.parent
+
+
+def _format_report(result: dict[str, Any]) -> str:
+    """Format sweep results into the authoritative report.md content."""
+    lines = [
+        "RESULTS — memory-gate metrics", "",
+        "Thresholds: " + ", ".join(f"{x:.6g}" for x in result["thresholds"]), "",
+        "tau | any-injection | recall | precision | exact-packet | forbidden | retention | ROC-AUC | PR-AUC | Brier",
+        "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---",
+    ]
+    for row in result["table"]:
+        def fmt(value):
+            return "null" if value is None else f"{value:.6g}"
+        lines.append(" | ".join([
+            fmt(row[k]) for k in (
+                "tau", "any_injection_rate", "packet_recall", "packet_precision",
+                "exact_packet_rate", "forbidden_injection_rate", "retention",
+                "roc_auc", "pr_auc", "brier",
+            )
+        ]))
+    lines += ["", "Per-stratum any-injection (at each tau):"]
+    for row in result["table"]:
+        strata = ", ".join(
+            f"{name}={value['cases']}/{value['total']} ({value['rate']!r})"
+            for name, value in row["any_injection_rate_by_stratum"].items()
+        )
+        lines.append(f"tau={row['tau']:.6g}: {strata}")
+    lines += ["", "Bootstrap 95% CIs (10,000 resamples; seed 20260929; percentile):"]
+    for row in result["table"]:
+        entries = []
+        for name in (
+            "any_injection_rate", "packet_recall", "packet_precision",
+            "exact_packet_rate", "forbidden_injection_rate",
+        ):
+            bootstrap = row["bootstrap"][name]
+            ci = bootstrap["ci"]
+            ci_text = (
+                "null" if ci is None
+                else "[" + ", ".join(f"{value:.6g}" for value in ci) + "]"
+            )
+            entries.append(f"{name}={ci_text}; null-replicates={bootstrap['null_replicates']}")
+        lines.append(f"tau={row['tau']:.6g}: " + " | ".join(entries))
+    lines += ["", "Pareto frontier (abstain any-injection, packet recall):"]
+    lines += [
+        f"tau={r['tau']:.6g} abstain="
+        f"{r['any_injection_rate_by_stratum'].get('abstain', {}).get('rate')!r} "
+        f"recall={r['packet_recall']!r}"
+        for r in result["pareto"]
+    ]
+    lines += ["", "Selection: " + json.dumps(result["selection"], sort_keys=True)]
+    return "\n".join(lines) + "\n"
+
+
+def _validate_labels_filled(run_dir: Path) -> None:
+    """Refuse to score if labels are absent or still template-empty.
+
+    Policy decision (Blocker 1, DESIGN §4): calibration scoring requires
+    human-filled labels.  A label file with any null labels is considered
+    template-empty and rejected.
+    """
+    labels_path = run_dir / "labels.jsonl"
+    if not labels_path.exists():
+        raise ValueError(
+            "calibration scoring requires labels.jsonl — "
+            "run label-template and fill labels first"
+        )
+    labels = read_jsonl(labels_path)
+    if not labels:
+        raise ValueError("labels.jsonl is empty")
+    for row in labels:
+        if row.get("label") is None:
+            raise ValueError(
+                "labels.jsonl contains unfilled template labels (null) — "
+                "fill all labels before scoring"
+            )
+        if row.get("label") not in {"positive", "negative", "ambiguous"}:
+            raise ValueError(
+                f"labels.jsonl contains invalid label: {row.get('label')!r}"
+            )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="command", required=True)
-    for name in ("candidates", "score", "label-template", "lock", "report", "posthoc-safety-curve"):
-        command_parser = sub.add_parser(name)
-        if name == "score":
-            command_parser.add_argument("--remote", default="origin", help="Git remote for witness verification (default: origin)")
+
+    # -- candidates --
+    p_candidates = sub.add_parser("candidates")
+    p_candidates.add_argument("--cases", required=True, type=Path)
+    p_candidates.add_argument("--output", required=True, type=Path)
+    p_candidates.add_argument("--lane", default="calibration")
+    p_candidates.add_argument("--pausanias-python", default=sys.executable)
+    p_candidates.add_argument("--config", type=Path, default=None)
+
+    # -- label-template --
+    p_label = sub.add_parser("label-template")
+    p_label.add_argument("--candidates", type=Path, default=Path("memory-gate/runs/fixture-dev"), dest="candidates_dir")
+
+    # -- score --
+    p_score = sub.add_parser("score")
+    p_score.add_argument("--lane", default="calibration")
+    p_score.add_argument("--run", required=True, type=Path, dest="run_dir")
+    p_score.add_argument("--cases", type=Path, default=None)
+    p_score.add_argument("--responses", type=Path, default=None)
+    p_score.add_argument("--model", default="typesafe-ai/jev")
+    p_score.add_argument("--witness", default=None)
+    p_score.add_argument("--remote", default="origin")
+
+    # -- report --
+    p_report = sub.add_parser("report")
+    p_report.add_argument("--run", required=True, type=Path, dest="run_dir")
+
+    # -- lock --
+    p_lock = sub.add_parser("lock")
+    p_lock.add_argument("--run", required=True, type=Path, dest="run_dir")
+    p_lock.add_argument("--tau", type=float, default=TAU_REFERENCE)
+
+    # -- posthoc-safety-curve --
+    p_posthoc = sub.add_parser("posthoc-safety-curve")
+    p_posthoc.add_argument("--run", required=True, type=Path, dest="run_dir")
+
     parser.epilog = "Safety verification fetches the configured remote with pruning before accepting a witness."
-    args, unknown = parser.parse_known_args(argv)
+
+    args = parser.parse_args(argv)
+
+    # ---- label-template ----
     if args.command == "label-template":
-        run_dir = Path(unknown[unknown.index("--candidates") + 1]) if "--candidates" in unknown else Path("memory-gate/runs/fixture-dev")
-        for row in read_jsonl(run_dir / "candidates.jsonl"):
+        for row in read_jsonl(args.candidates_dir / "candidates.jsonl"):
             output = dict(row)
             output["label"] = None
             print(json.dumps(output, ensure_ascii=False, sort_keys=True))
         return 0
+
+    # ---- lock ----
     if args.command == "lock":
-        p = Path(unknown[unknown.index("--run") + 1]) if "--run" in unknown else Path("memory-gate/runs/fixture-dev")
-        tau = float(unknown[unknown.index("--tau") + 1]) if "--tau" in unknown else TAU_REFERENCE
-        lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl", p / "report.md"], tau)
+        p = args.run_dir
+        lock_witness(
+            p / "LOCK.json",
+            [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl", p / "report.md"],
+            args.tau,
+        )
         return 0
-    if args.command == "score" and "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety" and "--cases" not in unknown:
-        if "--witness" not in unknown:
-            raise SystemExit("safety scoring requires --witness <commit>")
-        run_dir = Path(unknown[unknown.index("--run") + 1])
-        verify_witness(run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
-                       remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"], repo=run_dir.parent)
-        raise SystemExit("phase C not implemented: safety scoring is deferred")
-    if args.command == "score" and "--cases" in unknown:
-        lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
-        run_dir = Path(unknown[unknown.index("--run") + 1])
-        cases = load_cases(Path(unknown[unknown.index("--cases") + 1]))
-        model = unknown[unknown.index("--model") + 1] if "--model" in unknown else "typesafe-ai/jev"
-        response_path = Path(unknown[unknown.index("--responses") + 1]) if "--responses" in unknown else None
-        if response_path is None:
-            raise SystemExit("offline score requires --responses JSON")
-        response_data = json.loads(response_path.read_text())
-        responses = iter(response_data if isinstance(response_data, list) else [response_data])
-        def file_client(_request):
-            try:
-                return next(responses)
-            except StopIteration as exc:
-                raise RuntimeError("response fixture exhausted") from exc
+
+    # ---- score ----
+    if args.command == "score":
+        run_dir = args.run_dir
+        lane = args.lane
+
         if lane == "safety":
-            if "--witness" not in unknown:
+            if args.witness is None:
                 raise SystemExit("safety scoring requires --witness <commit>")
+            repo = _repo_root(run_dir)
+            if args.cases is None:
+                # Legacy stub path: verify witness only
+                verify_witness(
+                    run_dir / "LOCK.json", args.witness,
+                    remote=args.remote,
+                    safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
+                    repo=repo,
+                )
+                raise SystemExit("safety scoring without --cases requires a live adapter")
+
             witness = verify_witness(
-                run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
-                remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
-                repo=run_dir.parent,
+                run_dir / "LOCK.json", args.witness,
+                remote=args.remote,
+                safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
+                repo=repo,
             )
-            # Fix 1: the safety CLI MUST run the locomo pipeline — filter_locomo_category5
-            # with the 10-conversation/446-category-5-question hard assertions — before
-            # scoring.  A case file that didn't come through that pipeline must be unable
-            # to freeze an authoritative artifact.
-            cases = safety_cases(cases)
-            scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache", bypass_cache=True)
+            if args.responses is None:
+                raise SystemExit("offline score requires --responses JSON")
+            response_data = json.loads(args.responses.read_text())
+            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+
+            def file_client_safety(_request):
+                try:
+                    return next(responses)
+                except StopIteration as exc:
+                    raise RuntimeError("response fixture exhausted") from exc
+
+            cases = safety_cases(load_cases(args.cases))
+            scores = score_cases(
+                cases, file_client_safety, model=args.model,
+                cache_dir=run_dir / "cache", bypass_cache=True,
+            )
             expected_case_ids = {str(case["case_id"]) for case in cases}
-            safety_result(scores, float(json.loads((run_dir / "LOCK.json").read_text())["tau"]),
-                          witness_commit=witness, output=run_dir / "safety.json",
-                          scores_output=run_dir / "safety-scores.jsonl",
-                          expected_case_ids=expected_case_ids)
+            safety_result(
+                scores,
+                float(json.loads((run_dir / "LOCK.json").read_text())["tau"]),
+                witness_commit=witness,
+                output=run_dir / "safety.json",
+                scores_output=run_dir / "safety-scores.jsonl",
+                expected_case_ids=expected_case_ids,
+            )
             return 0
-        scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache")
-        provenance = {
-            "case_set_fingerprint": "runtime", "corpus_fingerprint": "runtime",
-            "pausanias_revision": "runtime", "retrieval_config": {"mode": "production"},
-            "production_builder_hash": artifacts.authoritative_production_builder_hash(),
-            "configured_model_id": model, "served_model_id": model,
-            "harness_revision": "runtime", "jm_revision": "runtime",
-        }
-        candidates = candidate_rows(cases, provenance)
-        artifacts.write_artifact(run_dir, candidates, scores,
-                                 [{**row, "label": "negative"} for row in candidates], "")
-        return 0
+
+        # -- calibration lane --
+        if lane == "calibration":
+            if args.responses is None:
+                raise SystemExit("offline score requires --responses JSON")
+
+            # Blocker 1: CONSUME existing candidates, never regenerate
+            candidates_path = run_dir / "candidates.jsonl"
+            if not candidates_path.exists():
+                raise SystemExit(
+                    "calibration scoring requires existing candidates.jsonl — "
+                    "run the candidates command first"
+                )
+
+            # Blocker 1: refuse to score if labels absent or template-empty
+            _validate_labels_filled(run_dir)
+
+            # Read existing candidates
+            existing_candidates = read_jsonl(candidates_path)
+
+            # Group candidates by case_id, preserving order
+            cases_by_id: dict[str, list[dict[str, Any]]] = {}
+            for row in existing_candidates:
+                cases_by_id.setdefault(row["case_id"], []).append(row)
+
+            response_data = json.loads(args.responses.read_text())
+            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+
+            def file_client_cal(_request):
+                try:
+                    return next(responses)
+                except StopIteration as exc:
+                    raise RuntimeError("response fixture exhausted") from exc
+
+            score_rows: list[dict[str, Any]] = []
+            for cand_group in cases_by_id.values():
+                # Build request from existing candidates (immutable stream)
+                query = cand_group[0]["query"]
+                request_candidates = [
+                    {"id": row["candidate_id"], "path": row["path"],
+                     "heading": row["heading"], "excerpt": row["presented_excerpt"]}
+                    for row in cand_group
+                ]
+                request = pipeline.build_request(query, request_candidates)
+                error = None
+                configured_model = args.model
+                served_model = args.model
+                try:
+                    response = file_client_cal(request)
+                    configured_raw = response.get("configured_model")
+                    served_raw = response.get("served_model")
+                    if not configured_raw or not served_raw:
+                        raise ValueError("response omitted verified model identity")
+                    configured_model = str(configured_raw)
+                    served_model = str(served_raw)
+                    if configured_model != args.model:
+                        raise ValueError(
+                            f"configured model {configured_model!r} differs "
+                            f"from requested {args.model!r}"
+                        )
+                    scores_map = pipeline.parse_scores(response, request_candidates)
+                except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:
+                    scores_map, error = {}, f"{type(exc).__name__}: {exc}"
+
+                for row in cand_group:
+                    cid = row["candidate_id"]
+                    score_row = dict(row)  # Copy all provenance from candidate
+                    score_row["score"] = scores_map.get(cid)
+                    score_row["request_error"] = error
+                    score_row["coverage"] = error is None and cid in scores_map
+                    # Blocker 1: carry verified model identities from response,
+                    # not from the (possibly stale) candidate row
+                    score_row["configured_model_id"] = configured_model
+                    score_row["served_model_id"] = served_model
+                    score_rows.append(score_row)
+
+            # Write only scores.jsonl — do NOT overwrite labels.jsonl (Blocker 1)
+            (run_dir / "scores.jsonl").write_text(
+                "".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in score_rows)
+            )
+            return 0
+
+        # Generic offline scoring with --cases
+        if args.cases is not None:
+            if args.responses is None:
+                raise SystemExit("offline score requires --responses JSON")
+            response_data = json.loads(args.responses.read_text())
+            responses = iter(response_data if isinstance(response_data, list) else [response_data])
+
+            def file_client_gen(_request):
+                try:
+                    return next(responses)
+                except StopIteration as exc:
+                    raise RuntimeError("response fixture exhausted") from exc
+
+            cases = load_cases(args.cases)
+            scores = score_cases(
+                cases, file_client_gen, model=args.model,
+                cache_dir=run_dir / "cache",
+            )
+            provenance = {
+                "case_set_fingerprint": "runtime",
+                "corpus_fingerprint": "runtime",
+                "pausanias_revision": "runtime",
+                "retrieval_config": {"mode": "production"},
+                "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+                "configured_model_id": args.model,
+                "served_model_id": args.model,
+                "harness_revision": "runtime",
+                "jm_revision": "runtime",
+            }
+            candidates = candidate_rows(cases, provenance)
+            artifacts.write_artifact(
+                run_dir, candidates, scores,
+                [{**row, "label": "negative"} for row in candidates], "",
+            )
+            return 0
+
+        raise SystemExit("score requires --lane calibration/safety or --cases")
+
+    # ---- report ----
     if args.command == "report":
-        run_dir = Path(unknown[unknown.index("--run") + 1])
-        # Refuse before reading partial streams: validity is all-or-nothing.
-        validate_artifact(run_dir)
-        cases = metrics_module.load_run(run_dir)
+        run_dir = args.run_dir
+        # The three JSONL streams must exist; report.md is the output of this
+        # command so it may not exist yet.  Full validate_run (including
+        # report.md) is deferred to the lock command.
+        for required_stream in ("candidates.jsonl", "scores.jsonl", "labels.jsonl"):
+            if not (run_dir / required_stream).exists():
+                raise artifacts.ArtifactValidationError(
+                    f"missing {required_stream} — run candidates, label, and score first"
+                )
+        cases = metrics_module.load_run(run_dir, require_report=False)
         result = sweep_module.sweep(cases)
-        lines = ["RESULTS — memory-gate metrics", "", "Thresholds: " + ", ".join(f"{x:.6g}" for x in result["thresholds"]), "", "tau | any-injection | recall | precision | exact-packet | forbidden | retention | ROC-AUC | PR-AUC | Brier", "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---"]
-        for row in result["table"]:
-            def fmt(value):
-                return "null" if value is None else f"{value:.6g}"
-            lines.append(" | ".join([fmt(row[k]) for k in ("tau", "any_injection_rate", "packet_recall", "packet_precision", "exact_packet_rate", "forbidden_injection_rate", "retention", "roc_auc", "pr_auc", "brier")]))
-        lines += ["", "Per-stratum any-injection (at each tau):"]
-        for row in result["table"]:
-            strata = ", ".join(f"{name}={value['cases']}/{value['total']} ({value['rate']!r})" for name, value in row["any_injection_rate_by_stratum"].items())
-            lines.append(f"tau={row['tau']:.6g}: {strata}")
-        lines += ["", "Bootstrap 95% CIs (10,000 resamples; seed 20260929; percentile):"]
-        for row in result["table"]:
-            entries = []
-            for name in ("any_injection_rate", "packet_recall", "packet_precision", "exact_packet_rate", "forbidden_injection_rate"):
-                bootstrap = row["bootstrap"][name]
-                ci = bootstrap["ci"]
-                ci_text = "null" if ci is None else "[" + ", ".join(f"{value:.6g}" for value in ci) + "]"
-                entries.append(f"{name}={ci_text}; null-replicates={bootstrap['null_replicates']}")
-            lines.append(f"tau={row['tau']:.6g}: " + " | ".join(entries))
-        lines += ["", "Pareto frontier (abstain any-injection, packet recall):"]
-        lines += [f"tau={r['tau']:.6g} abstain={r['any_injection_rate_by_stratum'].get('abstain', {}).get('rate')!r} recall={r['packet_recall']!r}" for r in result["pareto"]]
-        lines += ["", "Selection: " + json.dumps(result["selection"], sort_keys=True)]
-        text = "\n".join(lines) + "\n"
+        text = _format_report(result)
+
+        # Blocker 4: report.md is authoritative; results.txt is a byproduct
+        (run_dir / "report.md").write_text(text)
         (run_dir / "results.txt").write_text(text)
+
+        # Now that report.md exists, full validation should pass
+        validate_artifact(run_dir)
+
         print(text, end="")
         return 0
+
+    # ---- posthoc-safety-curve ----
     if args.command == "posthoc-safety-curve":
-        run_dir = Path(unknown[unknown.index("--run") + 1])
+        run_dir = args.run_dir
         lock_path = run_dir / "LOCK.json"
         if not lock_path.exists():
             raise SystemExit("posthoc safety curve requires LOCK.json")
-        lock = json.loads(lock_path.read_text())
+        lock_data = json.loads(lock_path.read_text())
         score_path = run_dir / "safety-scores.jsonl"
         if not score_path.exists():
             raise SystemExit("posthoc safety curve requires frozen safety-scores.jsonl")
         scores = read_jsonl(score_path)
         by_case: dict[str, list[dict[str, Any]]] = {}
         for row in scores:
-            # Skip zero-candidate marker rows (fix 5) — they have no
-            # score/candidate_id and only count in the denominator.
             if row.get("candidates") == [] or "score" not in row:
                 by_case.setdefault(str(row["case_id"]), [])
                 continue
             by_case.setdefault(str(row["case_id"]), []).append(row)
-        boundaries = sorted({float(row["score"]) for row in scores if "score" in row and row.get("candidates") != []})
+        boundaries = sorted({
+            float(row["score"]) for row in scores
+            if "score" in row and row.get("candidates") != []
+        })
         curve = []
-        for tau in boundaries + [float(lock["tau"])]:
+        for tau in boundaries + [float(lock_data["tau"])]:
             injected = 0
             for rows in by_case.values():
                 if not rows:
                     continue
-                candidates = [{"id": r["candidate_id"], "path": r["path"],
-                               "heading": r["heading"], "excerpt": r["presented_excerpt"]} for r in rows]
-                if select_blocks(candidates, {r["candidate_id"]: r["score"] for r in rows}, tau):
+                candidates = [
+                    {"id": r["candidate_id"], "path": r["path"],
+                     "heading": r["heading"], "excerpt": r["presented_excerpt"]}
+                    for r in rows
+                ]
+                if select_blocks(
+                    candidates,
+                    {r["candidate_id"]: r["score"] for r in rows},
+                    tau,
+                ):
                     injected += 1
-            curve.append({"tau": tau, "false_injections": injected,
-                          "total": len(by_case), "rate": ratio(injected, len(by_case))})
+            curve.append({
+                "tau": tau, "false_injections": injected,
+                "total": len(by_case), "rate": ratio(injected, len(by_case)),
+            })
         posthoc_curve(run_dir, curve)
         return 0
+
+    # ---- candidates ----
     if args.command == "candidates":
-        lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
-        if "--output" not in unknown or "--cases" not in unknown:
-            raise SystemExit("candidates requires --cases and --output")
-        case_path = Path(unknown[unknown.index("--cases") + 1])
-        output = Path(unknown[unknown.index("--output") + 1])
+        lane = args.lane
+        case_path = args.cases
+        output = args.output
         if lane == "safety":
             dataset = load_cases(case_path)
             rows = candidate_rows(safety_cases(dataset), {
                 "case_set_fingerprint": sha256_bytes(case_path.read_bytes()),
                 "corpus_fingerprint": "locomo-pinned",
                 "pausanias_revision": "pinned",
-                "retrieval_config": {"benchmark": "eval.benchmarks.locomo.run", "mode": "production"},
+                "retrieval_config": {
+                    "benchmark": "eval.benchmarks.locomo.run",
+                    "mode": "production",
+                },
                 "production_builder_hash": artifacts.authoritative_production_builder_hash(),
-                "configured_model_id": "unscored", "served_model_id": "unscored",
-                "harness_revision": "pinned", "jm_revision": "pinned"})
-            by_case = {}
+                "configured_model_id": "unscored",
+                "served_model_id": "unscored",
+                "harness_revision": "pinned",
+                "jm_revision": "pinned",
+            })
+            by_case: dict[str, list[dict[str, Any]]] = {}
             for row in rows:
                 by_case.setdefault(row["case_id"], []).append(row)
             for group in by_case.values():
@@ -826,16 +1022,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     row["canonical_request_hash"] = digest
             artifacts.write_candidates(output, rows)
             return 0
-        executable = unknown[unknown.index("--pausanias-python") + 1] if "--pausanias-python" in unknown else sys.executable
-        config = Path(unknown[unknown.index("--config") + 1]) if "--config" in unknown else None
-        generate_candidates(case_path, output, pausanias_executable=executable, pausanias_config=config)
+        generate_candidates(
+            case_path, output,
+            pausanias_executable=args.pausanias_python,
+            pausanias_config=args.config,
+        )
         return 0
-    if args.command == "score":
-        # CLI scoring consumes a JSON response map in offline CI; homelab can
-        # provide the real JevClient through the same score_cases seam.
-        if "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety" and "--cases" not in unknown:
-            raise SystemExit("phase C not implemented: safety scoring requires --cases and an adapter")
-        raise SystemExit("score requires an adapter; call score_cases with jm.JevClient")
+
     return 0
 
 

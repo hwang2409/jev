@@ -2,7 +2,7 @@
 
 **STATUS: AWAITING REAL RUN — this checkout contains no authoritative score or safety claim.**
 
-No authoritative calibration, repeatability, or safety run has been performed in this checkout. The tooling is prepared to emit the following report structure for a future immutable run:
+No authoritative calibration, repeatability, or safety run has been performed in this checkout. The offline runner, artifact schema, report generation, lock/witness protocol, and safety-lane pipeline are implemented and composition-tested (see test suite). The following report structure will be emitted by an immutable run:
 
 ## Run identity and provenance
 

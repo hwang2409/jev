@@ -190,10 +190,21 @@ def metrics(cases: Sequence[Mapping[str, Any]], tau: float, labels: Mapping[str,
     return result
 
 
-def load_run(run_dir: Path) -> list[dict[str, Any]]:
-    """Validate and convert JSONL artifacts into case records."""
-    if not artifacts.is_valid_for_gating(run_dir):
-        raise artifacts.ArtifactValidationError("run is not valid for gating")
+def load_run(run_dir: Path, *, require_report: bool = True) -> list[dict[str, Any]]:
+    """Validate and convert JSONL artifacts into case records.
+
+    When ``require_report`` is False, the three JSONL streams are validated
+    without requiring report.md (used by the report command, which generates
+    report.md from these streams).
+    """
+    if require_report:
+        if not artifacts.is_valid_for_gating(run_dir):
+            raise artifacts.ArtifactValidationError("run is not valid for gating")
+    else:
+        # Validate only the three JSONL streams exist and parse
+        for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl"):
+            if not (run_dir / name).exists():
+                raise artifacts.ArtifactValidationError(f"missing {name}")
     candidates = artifacts._read(run_dir / "candidates.jsonl")
     scores = {r["candidate_id"]: r for r in artifacts._read(run_dir / "scores.jsonl")}
     labels = {r["candidate_id"]: r["label"] for r in artifacts._read(run_dir / "labels.jsonl")}

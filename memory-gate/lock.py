@@ -89,9 +89,3 @@ def verify_witness(lock_path: Path, witness: str, *, remote: str = "origin", saf
     if not no_preexisting_safety_outputs(safety_outputs):
         raise WitnessError("safety outputs already exist")
     return witness_commit
-
-# Explicit predicate names make each refusal independently testable.
-lock_hash_match = lock_hashes_match
-witness_contains_lock = lock_contained_in_witness
-witness_reachable = witness_reachable_after_fresh_fetch
-no_safety_outputs = no_preexisting_safety_outputs
