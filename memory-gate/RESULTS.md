@@ -1,51 +1,40 @@
-# Memory-gate calibration results
+# memory-gate RESULTS — first authoritative run (2026-09-29)
 
-**STATUS: AWAITING REAL RUN — this checkout contains no authoritative score or safety claim.**
+## Verdict
+**MEMORY_RELEVANCE_GATE cannot be enabled from this eval.** At the locked
+tau=0.58, the safety lane measured **126/446 = 28.25% false-injection**
+(Wilson 95% [24.3%, 32.6%]) against the acceptance bar of point<=2% /
+upper<=4%. Frozen artifact: runs/20260929-jev-b/safety.json (accepts: false,
+witness b91a160).
 
-No authoritative calibration, repeatability, or safety run has been performed in this checkout. The offline runner, artifact schema, report generation, lock/witness protocol, and safety-lane pipeline are implemented and composition-tested (see test suite). The following report structure will be emitted by an immutable run:
+## The numbers
+- Ungated fused retrieval (reproduced): 100% false-injection on 446 locomo
+  category-5 questions. Lexical baseline (PAUS-15): 1.35%.
+- Jev-gated @ tau=0.58: 28.25% — a 3.5x improvement, far from the bar.
+- Post-hoc (non-authoritative): <=2% requires tau~0.96-0.97, where
+  calibration recall collapses to ~2%. **No tau on the frontier passes
+  safety while retaining useful recall.**
+- Calibration (62 candidates, 50 cases): recall 0.9375 / precision 1.0 /
+  exact-packet 0.9375 at 0.58; ROC-AUC 0.989 vs hand-adjudicated labels.
+- Repeatability (12 cases x 6 replicates): per-candidate stddev ~0.01,
+  worst spread 0.04, no tau crossings. The failure is calibration of the
+  judgment, not jaggedness.
 
-## Run identity and provenance
+## Interpretation
+The standalone memory_relevance Noul separates useful-from-useless well
+WITHIN a curated corpus (calibration AUC 0.989) but scores adversarial
+same-corpus garbage nearly as high as genuine memories (locomo). The
+question, not the threshold, is the limiting factor. Candidate next steps
+(future work, not authorized here): richer state (auto-route battery with
+task/last_assistant context), a dedicated abstention question, or
+retrieval-side hardening before the gate.
 
-- run directory / timestamp:
-- pausanias revision and exact retrieval configuration:
-- harness revision / production-builder hash:
-- jm revision, configured model, served model:
-- case-set and corpus fingerprints:
-- score coverage: complete / INVALID (request errors are listed)
-
-## Calibration lane
-
-- candidate and presented-pair counts (after truncate, dedupe, and top-2 cap):
-- threshold table: tau, abstain any-injection, packet recall and baseline,
-  precision, exact-packet, forbidden-injection, retention, ROC-AUC, PR-AUC,
-  Brier, Wilson/bootstrap intervals:
-- proposed locked tau and the §8.4 rationale:
-
-## Repeatability (§6)
-
-The report lists the stratified 12-case subset (4 abstain, 4 verbatim, 4
-paraphrase), cached replicate 0 plus five cache-bypassed re-issues of the exact
-production battery, model identity for every replicate, per-candidate
-population standard deviation, worst spread, and fraction crossing tau.
-Mixed configured/served identities invalidate the probe.
-
-## Safety lane (§4, §8.3)
-
-- pausanias LOCOMO entry points: `eval.benchmarks.locomo.run.load_dataset`,
-  `render_session`/`_render_entries`, and the benchmark's indexed search path;
-  memory-gate then filters QA category 5 and applies production skip/dedupe,
-  top-2-before-scoring semantics.
-- post-filter assertion: 10 conversations / 446 questions:
-- scored Nouls (maximum 892):
-- locked tau point estimate and Wilson 95% interval:
-- acceptance: point <= 2% and upper <= 4%:
-- verified witness commit and frozen artifact hash:
-
-## Authority and limitations
-
-`safety.json` is written once and is authoritative only when the witness,
-coverage, and acceptance checks pass. `posthoc-safety-curve.json` is explicitly
-non-authoritative and cannot change the locked result. The fixed LOCOMO
-conversations are clustered (not an iid population); calibration labels are
-human labels; this evaluates standalone fresh-session routing only, not
-auto-route memory injection. No threshold is enabled by this template.
+## Deviations and incidents (full trail in run dirs + engineering-history)
+- Labels are model-annotated (user-delegated): opus-4-6 primary, gpt-5.5
+  independent full second pass (96.8% raw agreement), sonnet-4-6 tiebreak
+  on 2 rows, pre-committed majority rule. annotation-provenance.json.
+- Calibration abstain stratum empty (retrieval-level abstention on the eval
+  corpus) -> amended selection rule, documented in report.md.
+- Run 20260929-jev safety artifact RETRACTED (vacuous: adapter shape bug
+  discarded all candidates; zero batteries scored). Root cause + structural
+  guards: jev#79. Re-run in 20260929-jev-b with verified batteries (886).

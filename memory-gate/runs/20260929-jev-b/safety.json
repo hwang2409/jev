@@ -1,0 +1,14 @@
+{
+  "accepts": false,
+  "authoritative": true,
+  "false_injections": 126,
+  "point_estimate": 0.2825112107623318,
+  "repeatability": null,
+  "tau": 0.58,
+  "total": 446,
+  "wilson_95": [
+    0.24272221019799867,
+    0.32601473879600673
+  ],
+  "witness_commit": "b91a16034095d1e93482245290bb8fb6df0ccb58"
+}

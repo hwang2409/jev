@@ -1,0 +1,1 @@
+{"answers": {"memory_relevance_0": {"noul": 0.64, "type": "noul"}}, "configured_model": "typesafe-ai/jev", "served_model": "typesafe-ai/jev", "usage": {"input_tokens": 561, "output_tokens": 25}}
