@@ -1,6 +1,6 @@
 # Memory-Gate Calibration Eval — Design
 
-Status: DRAFT v3 (revised after design review rounds 1-2)
+Status: DRAFT v4 (revised after design review rounds 1-3)
 Owner: henry / zeta-orchestrated
 Depends on: pausanias (frozen eval cases + locomo10 benchmark runner), jm (Jev client + cache), harness (production adapter)
 
@@ -95,11 +95,21 @@ are reported in RESULTS.md regardless.
 **Safety lane (held-out, REQUIRED): locomo10 category-5 questions.** The
 committed fixture `tests/fixtures/locomo/abstention.json` is a 2-question
 unit-test fixture and is NOT this lane. The safety lane uses the full pinned
-locomo10 dataset exactly as `pausanias/eval/benchmarks/locomo/run.py` fetches
-and validates it (pinned commit + SHA-256 as recorded there), filtered to
-category 5, with a hard assertion of **10 conversations / 446 questions**
-before any scoring; rendering/ingestion and retrieval configuration follow
-the PAUS-15 benchmark procedure so numbers are comparable. All candidates are
+locomo10 dataset via `pausanias/eval/benchmarks/locomo/run.py`, with one
+prerequisite fix (upstreamed to pausanias before this eval runs): the
+runner's `DATASET_URL` currently fetches mutable `main`; it must fetch the
+pinned commit directly
+(`https://raw.githubusercontent.com/snap-research/locomo/3eb6f2c585f5e1699204e3c3bdf7adc5c28cb376/data/locomo10.json`),
+retaining the existing SHA-256 validation, so clean regeneration cannot break
+when upstream moves. The lane filters to category 5 and the memory-gate
+runner enforces its own post-filter assertion of **10 conversations / 446
+questions** (the pausanias runner permits conversation subsets; we refuse
+them). **Candidate semantics are production semantics:** PAUS-15
+rendering/ingestion and declared retrieval configuration produce the ranked
+list, then the production sequence applies — skip/dedupe, top-2 cap BEFORE
+scoring — exactly as in §3. The lane therefore scores at most 446 x 2 = 892
+Nouls, never the retrieval top-200 (scoring candidates production never
+presents would be both wasteful and non-representative). All candidates are
 negative by construction (unanswerable); no hand-labeling needed. The chosen
 threshold is **validated** here under the blinding protocol of §8, never
 developed here. If dataset fetch/generation proves infeasible, the eval's
@@ -131,9 +141,13 @@ Per threshold tau:
   candidates. Cases with no positive presented are excluded from recall and
   counted in a separately reported **retrieval-miss rate** = such cases /
   all answerable cases (the gate cannot fix retrieval).
-- **Packet precision:** positive injected blocks / all injected blocks,
-  computed **block-micro across the lane** (single global ratio). The number
-  of cases injecting nothing is reported alongside, never folded in.
+- **Packet precision:** positive-labeled injected blocks / **non-ambiguous
+  injected blocks** (the projected denominator; ambiguous injected blocks are
+  excluded from numerator and denominator but still consume budget in the
+  simulation), computed block-micro across the lane (single global ratio).
+  If the projected denominator is 0 at some tau (guaranteed at the maximum
+  observed boundary), precision is reported as `null`, never 0 or 1. The
+  number of cases injecting nothing is reported alongside, never folded in.
 - **Exact-packet rate:** cases whose injected set equals the **labeled-optimal
   set** / all answerable cases with >=1 positive presented. Labeled-optimal
   set = the result of running the production selection (order-preserving,
@@ -152,8 +166,15 @@ Per threshold tau:
 - **Judge quality (pair-micro only):** ROC-AUC and PR-AUC over all labeled
   non-ambiguous pairs, with positive prevalence stated; Brier score. No
   case-macro AUC (undefined for single-class cases); no ECE (deferred, §4).
+- **Zero-denominator policy (global):** any metric whose denominator is
+  empty at a given tau (or within a bootstrap replicate) is `null` for that
+  evaluation; `null` replicates are dropped from the CI with the drop count
+  reported. `null` is a first-class reported value, distinct from 0.
 - **Confidence intervals:** answerable-lane case metrics get case-level
-  bootstrap CIs (10,000 resamples, seed 20260929, percentile method). Safety
+  bootstrap CIs (10,000 resamples, seed 20260929, percentile method),
+  resampling from **each metric's eligible case set** (recall resamples
+  cases with >=1 positive presented; exact-packet likewise; any-injection
+  resamples the full stratum). Safety
   lane gets a Wilson binomial 95% interval for comparability, PLUS
   per-conversation rates and leave-one-conversation-out sensitivity — the
   446 questions cluster in 10 conversations and are not independent draws;
@@ -195,12 +216,20 @@ deterministically from the pinned fetch; regeneration documented in run.py).
 2. Proposed rule: smallest tau with calibration-lane abstain any-injection = 0
    observed (10 cases — directional only) and packet recall >= 90% of the
    no-gate baseline, absolute recall also reported.
-3. **Blinding protocol:** the selected tau is written and hashed into the run
-   directory BEFORE any safety-lane score is computed or inspected. Safety
-   acceptance is evaluated at that locked tau only. A full safety-lane
-   threshold curve may be produced afterward as explicitly-labeled post-hoc
-   analysis; it cannot authorize a revised threshold — revision requires new
-   held-out data.
+3. **Blinding protocol (runner-enforced, externally witnessed):**
+   `run.py lock` writes tau + the calibration artifact hashes to
+   `runs/<...>/LOCK.json`, and that file is **committed and pushed to the
+   remote before any safety-lane scoring** — the pushed commit hash is the
+   witness that the lock preceded unblinding (a hash sitting in a mutable
+   local directory proves nothing). `run.py score --lane safety` REFUSES to
+   run if: no LOCK.json, LOCK.json hashes disagree with the present
+   calibration artifacts, or safety outputs already exist. The locked-tau
+   pass/fail result is computed and frozen first; only then does a separate
+   `run.py posthoc-safety-curve` command exist, whose artifact is permanently
+   labeled non-authoritative — it cannot authorize a revised threshold;
+   revision requires new held-out data. The §5 sweep applies to the
+   calibration lane only; the safety lane is evaluated at the locked tau
+   (plus the labeled post-hoc artifact).
 4. Safety acceptance (REQUIRED): at the locked tau, on the 446-question lane
    with complete coverage: false-injection point estimate <= 2% AND Wilson
    95% upper bound <= 4%. (Lexical baseline: 6/446 = 1.35%, which passes
@@ -217,7 +246,7 @@ deterministically from the pinned fetch; regeneration documented in run.py).
 ```
 memory-gate/
   DESIGN.md            (this doc)
-  run.py               subcommands: candidates | score | label-template | lock | report
+  run.py               subcommands: candidates | score | label-template | lock | report | posthoc-safety-curve
   labeling-guide.md    written gold-label guidance + examples
   runs/<stamp>-<model>/  immutable artifacts per run (schema-validated)
   RESULTS.md           tables, locked tau, CIs, repeatability, cost/latency, limitations
