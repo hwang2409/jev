@@ -12,10 +12,9 @@ import stat
 import subprocess
 from pathlib import Path
 
-import pytest
-
 import artifacts
 import lock as lock_module
+import pytest
 import run
 
 HERE = Path(__file__).parent
