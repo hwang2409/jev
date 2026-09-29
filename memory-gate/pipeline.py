@@ -167,21 +167,56 @@ def formation_state(request: Mapping[str, Any]) -> Any:
 class AdapterError(RuntimeError):
     """The complete production judgment path could not produce valid coverage."""
 
+    def __init__(self, message: str, *, http_status: int | None = None, gate: str | None = None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.gate = gate
 
-def _decode_records(records: Sequence[Any]) -> Any:
-    """Decode terminal records in production order, retaining error context."""
-    coverage = next((r for r in records if r.to_dict().get("record_type") == "coverage"), None)
+
+def _decode_records(records: Sequence[Any], *, gate: str | None = None,
+                    question_ids: Sequence[str] = ()) -> Any:
+    """Decode terminal records in the exact production order."""
+    payloads = [record.to_dict() for record in records]
+    coverage = next((payload for payload in payloads if payload.get("record_type") == "coverage"), None)
     if coverage is None:
-        raise AdapterError("missing coverage: Jev judgment produced no coverage record")
-    coverage_payload = coverage.to_dict()
-    if coverage_payload.get("coverage") != "complete":
-        raise AdapterError(f"partial coverage: {coverage_payload.get('coverage', 'incomplete')}")
-    result = next((r for r in records if r.to_dict().get("record_type") == "result"), None)
-    if result is not None:
-        return result
-    error = next((r for r in records if r.to_dict().get("record_type") == "error"), None)
-    detail = error.to_dict().get("error", {}) if error is not None else {}
-    raise AdapterError(f"result error: {detail or 'Jev judgment failed'}")
+        raise AdapterError("Jev judgment did not produce terminal coverage (missing coverage)", gate=gate)
+
+    result = next((payload for payload in payloads if payload.get("record_type") == "result"), None)
+    if result is None:
+        error = next((payload for payload in payloads if payload.get("record_type") == "error"), None)
+        if error is None and coverage.get("coverage") != "complete":
+            raise AdapterError(f"partial coverage: {coverage.get('coverage', 'incomplete')}", gate=gate)
+        error_detail = error.get("error", {}) if error is not None else {}
+        error_message = (
+            error_detail.get("message", "Jev judgment failed")
+            if isinstance(error_detail, Mapping) else str(error_detail or "Jev judgment failed")
+        )
+        question_ids = set(question_ids)
+        if error_message == "malformed answer" or error is None:
+            # Memory relevance questions have none of the browser/search IDs
+            # used by the production specializations, so preserve this message.
+            if "element_id" in question_ids:
+                error_message = "invalid Jev browser choice response"
+            elif "page_loaded_and_stable" in question_ids:
+                error_message = "invalid Jev browser page-state response"
+            elif any(question_id.startswith("result-") for question_id in question_ids):
+                error_message = "invalid Jev search result score response"
+        elif any(question_id.startswith("result-") for question_id in question_ids):
+            error_message = "invalid Jev search result score response"
+        detail = str(error_detail) if error is not None else error_message
+        if error_message == "request failed":
+            error_message = "request failed (partial coverage)"
+        raise AdapterError(
+            error_message if error_message != "Jev judgment failed" else detail,
+            http_status=(error_detail.get("http_status") if isinstance(error_detail, Mapping)
+                         and isinstance(error_detail.get("http_status"), int) else None),
+            gate=gate,
+        )
+
+    if coverage.get("coverage") != "complete":
+        raise AdapterError("Jev judgment returned partial coverage", gate=gate)
+    # The caller consumes the original record object, not this payload.
+    return next(record for record in records if record.to_dict().get("record_type") == "result")
 
 
 def evaluate_production(
@@ -251,7 +286,7 @@ def evaluate_production(
         preset, (state,), formation_report=FormationReport(),
         cache_store=cache_store, judge_fn=judge_fn,
     ))
-    result = _decode_records(records)
+    result = _decode_records(records, question_ids=tuple(questions))
     payload = result.to_dict()
     return {
         "answers": payload["answers"],

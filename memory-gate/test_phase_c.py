@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 import run
 
 
@@ -29,7 +28,8 @@ def test_fake_client_scoring_records_complete_coverage_and_cache(tmp_path):
 
 
 def test_repeatability_identity_and_crossing_fraction():
-    rows = [{"candidate_id": "a", "score": score} for score in (.5, .6, .7)]
+    rows = [{"candidate_id": "a", "score": score, "configured_model_id": "m",
+             "served_model_id": "m"} for score in (.5, .6, .7)]
     replicates = [{"configured_model_id": "m", "served_model_id": "m", "scores": [row]}
                   for row in rows]
     result = run.repeatability(replicates, .6)

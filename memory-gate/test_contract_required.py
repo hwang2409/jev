@@ -3,7 +3,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import stat
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -26,14 +28,14 @@ def _response(request, *, configured="requested-model", served="served-model"):
 
 
 def test_t1_response_missing_served_identity_is_rejected(monkeypatch):
-    monkeypatch.setattr(run, "_client_response", lambda *a, **k: {"answers": {"candidate-0": {"score": .9}}, "configured_model": "requested-model"})
+    monkeypatch.setattr(run, "_client_response", lambda *a, **k: {"answers": {"memory_relevance_0": {"noul": .9}}, "configured_model": "requested-model"})
     rows = run.score_cases([_case()], object(), model="requested-model")
     assert rows and rows[0]["request_error"]
     assert rows[0]["coverage"] is False
 
 
 def test_t1_configured_model_must_equal_requested_model(monkeypatch):
-    monkeypatch.setattr(run, "_client_response", lambda *a, **k: {"answers": {"candidate-0": {"score": .9}}, "configured_model": "other", "served_model": "other"})
+    monkeypatch.setattr(run, "_client_response", lambda *a, **k: {"answers": {"memory_relevance_0": {"noul": .9}}, "configured_model": "other", "served_model": "other"})
     rows = run.score_cases([_case()], object(), model="requested-model")
     assert "configured" in rows[0]["request_error"] or "requested" in rows[0]["request_error"]
 
@@ -128,7 +130,12 @@ def test_t5_legacy_callable_protocol_still_works():
 def test_t6_posthoc_requires_validated_frozen_safety(tmp_path):
     with pytest.raises((ValueError, SystemExit), match="frozen|safety"):
         run.posthoc_curve(tmp_path, [{"tau": .6}])
-    (tmp_path / "safety.json").write_text(json.dumps({"authoritative": True, "accepts": True, "witness_commit": "w"}))
+    (tmp_path / "LOCK.json").write_text(json.dumps({"tau": .731}))
+    (tmp_path / "safety.json").write_text(json.dumps({
+        "authoritative": True, "witness_commit": "w", "tau": .731,
+        "false_injections": 0, "total": 446, "point_estimate": 0,
+        "wilson_95": [0, 0], "accepts": True, "repeatability": None,
+    }))
     (tmp_path / "safety-scores.jsonl").write_text("")
     run.posthoc_curve(tmp_path, [{"tau": .6}])
     assert json.loads((tmp_path / "posthoc-safety-curve.json").read_text())["authoritative"] is False
@@ -156,11 +163,27 @@ def test_t8_candidate_subprocess_fixture_and_locomo_boundaries(tmp_path):
 
 
 def test_t9_calibration_and_witnessed_safety_happy_paths(monkeypatch, tmp_path):
-    def fake(request, client, model): return _response(request, configured=model, served="gateway-model")
-    monkeypatch.setattr(run, "_client_response", fake)
-    cases = [_case(f"case-{i}") for i in range(446)]
-    rows = run.score_cases(cases, object(), model="requested-model")
-    assert rows[0]["coverage"]
-    artifact = run.safety_result(rows, .6, witness_commit="w", output=tmp_path / "safety.json", expected_case_ids={f"case-{i}" for i in range(446)})
-    assert artifact["authoritative"] and artifact["witness_commit"] == "w"
-    assert artifact["tau"] == .6 and "wilson_95" in artifact and isinstance(artifact["accepts"], bool)
+    repo, bare = tmp_path / "work", tmp_path / "remote.git"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "main"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=repo, check=True)
+    run_dir = repo / "run"
+    shutil.copytree(HERE / "runs" / "fixture-dev", run_dir)
+    tau = 0.731
+    run.lock_witness(run_dir / "LOCK.json",
+                     [run_dir / name for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")], tau)
+    cases_path = repo / "cases.json"
+    cases_path.write_text(json.dumps([_case(f"case-{i}") for i in range(446)]))
+    responses_path = repo / "responses.json"
+    responses_path.write_text(json.dumps([_response({}, configured="requested-model", served="gateway-model") for _ in range(446)]))
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "-c", "user.email=t@example.com", "-c", "user.name=test", "commit", "-m", "lock"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "push", "origin", "main"], cwd=repo, check=True, capture_output=True)
+    witness = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repo, text=True).strip()
+    monkeypatch.chdir(repo)
+    assert run.main(["score", "--lane", "safety", "--run", str(run_dir), "--cases", str(cases_path),
+                     "--responses", str(responses_path), "--model", "requested-model", "--witness", witness]) == 0
+    artifact = json.loads((run_dir / "safety.json").read_text())
+    assert artifact["authoritative"] and artifact["witness_commit"] == witness
+    assert artifact["tau"] == json.loads((run_dir / "LOCK.json").read_text())["tau"] == tau

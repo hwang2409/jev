@@ -389,6 +389,8 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
             scores = pipeline.parse_scores(response, candidates)
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:  # request errors invalidate the run
             scores, error = {}, f"{type(exc).__name__}: {exc}"
+        if not candidates:
+            rows.append({"case_id": case["case_id"], "candidates": []})
         for rank, candidate in enumerate(candidates):
             cid = str(candidate["id"])
             row = {"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{cid}",
@@ -422,8 +424,12 @@ def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model:
     replicates = []
     for index in range(6):
         rows = score_cases(subset, client, model=model, cache_dir=cache_dir, bypass_cache=index > 0)
-        replicates.append({"replicate": index, "configured_model_id": model,
-                           "served_model_id": model, "scores": rows,
+        identities = {(row.get("configured_model_id"), row.get("served_model_id")) for row in rows}
+        if len(identities) != 1 or None in identities:
+            raise ValueError("repeatability refuses missing or mixed configured/served model identities")
+        configured_model, served_model = next(iter(identities))
+        replicates.append({"replicate": index, "configured_model_id": configured_model,
+                           "served_model_id": served_model, "scores": rows,
                            "cache_bypassed": index > 0})
     if len(replicates) != 6:
         raise ValueError("repeatability requires exactly six replicates")
@@ -444,7 +450,17 @@ def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model:
 def repeatability(replicates: Sequence[Mapping[str, Any]], tau: float) -> dict[str, Any]:
     if not replicates:
         raise ValueError("repeatability requires replicate 0")
-    identities = {(r.get("configured_model_id"), r.get("served_model_id")) for r in replicates}
+    identities = set()
+    for replicate in replicates:
+        rows = replicate.get("scores", replicate.get("rows", []))
+        row_identities = {(row.get("configured_model_id"), row.get("served_model_id")) for row in rows}
+        if len(row_identities) != 1 or None in row_identities:
+            raise ValueError("repeatability refuses missing or mixed configured/served model identities")
+        identity = next(iter(row_identities))
+        declared = (replicate.get("configured_model_id"), replicate.get("served_model_id"))
+        if declared != identity:
+            raise ValueError("repeatability refuses mixed configured/served model identities")
+        identities.add(identity)
     if len(identities) != 1:
         raise ValueError("repeatability refuses mixed configured/served model identities")
     grouped: dict[str, list[float]] = {}
@@ -492,8 +508,12 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
                   expected_case_ids: set[str] | None = None,
                   scores_output: Path | None = None) -> dict[str, Any]:
     """Freeze category-5 case-level false injection after witness verification."""
-    by_case: dict[str, list[Mapping[str, Any]]] = {}
+    observed_case_ids: set[str] = set()
+    by_case: dict[str, list[Mapping[str, Any]]] = {
+        str(case_id): [] for case_id in (expected_case_ids or set())
+    }
     for row in scores:
+        observed_case_ids.add(str(row["case_id"]))
         case_id = str(row["case_id"])
         by_case.setdefault(case_id, [])
         # A retrieval miss is represented by a case marker with no candidates;
@@ -501,9 +521,9 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
         if row.get("candidates") == []:
             continue
         by_case[case_id].append(row)
-    if expected_case_ids is not None and set(by_case) != set(expected_case_ids):
-        missing = sorted(set(expected_case_ids) - set(by_case))
-        extra = sorted(set(by_case) - set(expected_case_ids))
+    if expected_case_ids is not None and observed_case_ids != set(expected_case_ids):
+        missing = sorted(set(expected_case_ids) - observed_case_ids)
+        extra = sorted(observed_case_ids - set(expected_case_ids))
         raise ValueError(f"safety scores have incomplete case IDs (missing={missing}, extra={extra})")
     false_injections = 0
     for rows in by_case.values():
@@ -519,14 +539,28 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
             raise ValueError("safety scores have incomplete production coverage")
         if select_blocks(candidates, scores_by_id, tau):
             false_injections += 1
-    artifact = freeze_safety(output, witness_commit=witness_commit, tau=tau,
-                             false_injections=false_injections,
-                             total=len(expected_case_ids) if expected_case_ids is not None else len(by_case),
+    total = len(expected_case_ids) if expected_case_ids is not None else len(by_case)
+    if scores_output is None:
+        return freeze_safety(output, witness_commit=witness_commit, tau=tau,
+                             false_injections=false_injections, total=total,
                              repeatability_data=repeatability_data)
-    if scores_output is not None:
-        scores_output.parent.mkdir(parents=True, exist_ok=True)
-        scores_output.write_text("".join(json.dumps(dict(row), sort_keys=True) + "\\n" for row in scores))
-    return artifact
+    if output.exists() or scores_output.exists():
+        raise FileExistsError("refusing to overwrite frozen safety outputs")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    scores_output.parent.mkdir(parents=True, exist_ok=True)
+    output_tmp = output.with_name(f".{output.name}.tmp-{os.getpid()}")
+    scores_tmp = scores_output.with_name(f".{scores_output.name}.tmp-{os.getpid()}")
+    try:
+        artifact = freeze_safety(output_tmp, witness_commit=witness_commit, tau=tau,
+                                 false_injections=false_injections, total=total,
+                                 repeatability_data=repeatability_data)
+        scores_tmp.write_text("".join(json.dumps(dict(row), sort_keys=True) + "\n" for row in scores))
+        os.replace(scores_tmp, scores_output)
+        os.replace(output_tmp, output)
+        return artifact
+    finally:
+        output_tmp.unlink(missing_ok=True)
+        scores_tmp.unlink(missing_ok=True)
 
 
 def posthoc_curve(run_dir: Path, curve: Sequence[Mapping[str, Any]]) -> None:
@@ -535,8 +569,28 @@ def posthoc_curve(run_dir: Path, curve: Sequence[Mapping[str, Any]]) -> None:
     if not safety.exists() or not scores.exists():
         raise ValueError("posthoc safety curve requires frozen safety artifacts")
     payload = json.loads(safety.read_text())
-    if payload.get("authoritative") is not True or not payload.get("witness_commit"):
+    required = {"authoritative", "witness_commit", "tau", "false_injections", "total",
+                "point_estimate", "wilson_95", "accepts", "repeatability"}
+    if set(payload) != required or payload.get("authoritative") is not True:
         raise ValueError("posthoc safety curve requires validated frozen safety.json")
+    if not isinstance(payload["witness_commit"], str) or not payload["witness_commit"]:
+        raise ValueError("posthoc safety curve requires validated frozen safety.json")
+    if (isinstance(payload["tau"], bool) or not isinstance(payload["tau"], (int, float))
+            or not math.isfinite(payload["tau"])):
+        raise ValueError("posthoc safety curve has invalid tau")
+    if payload["tau"] != json.loads((run_dir / "LOCK.json").read_text()).get("tau"):
+        raise ValueError("posthoc safety curve tau differs from LOCK.json")
+    if (isinstance(payload["total"], bool) or not isinstance(payload["total"], int)
+            or payload["total"] < 446 or isinstance(payload["false_injections"], bool)
+            or not isinstance(payload["false_injections"], int)):
+        raise ValueError("posthoc safety curve has invalid totals")
+    if not isinstance(payload["wilson_95"], list) or len(payload["wilson_95"]) != 2:
+        raise ValueError("posthoc safety curve has invalid Wilson fields")
+    if not all(isinstance(value, (int, float)) and not isinstance(value, bool)
+               and math.isfinite(value) for value in payload["wilson_95"]):
+        raise ValueError("posthoc safety curve has invalid Wilson fields")
+    if not isinstance(payload["accepts"], bool):
+        raise TypeError("posthoc safety curve has invalid acceptance")
     write_posthoc_curve(run_dir / "posthoc-safety-curve.json", curve)
 
 
@@ -572,7 +626,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             raise SystemExit("safety scoring requires --witness <commit>")
         run_dir = Path(unknown[unknown.index("--run") + 1])
         verify_witness(run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
-                       remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"])
+                       remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"], repo=run_dir.parent)
         raise SystemExit("phase C not implemented: safety scoring is deferred")
     if args.command == "score" and "--cases" in unknown:
         lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
@@ -595,13 +649,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             witness = verify_witness(
                 run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
                 remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
+                repo=run_dir.parent,
             )
             scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache", bypass_cache=True)
-            write_jsonl(run_dir / "safety-scores.jsonl", scores)
+            expected_case_ids = {str(case["case_id"]) for case in cases}
             safety_result(scores, float(json.loads((run_dir / "LOCK.json").read_text())["tau"]),
                           witness_commit=witness, output=run_dir / "safety.json",
                           scores_output=run_dir / "safety-scores.jsonl",
-                          expected_case_ids={str(row["case_id"]) for row in scores})
+                          expected_case_ids=expected_case_ids)
             return 0
         scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache")
         provenance = {
