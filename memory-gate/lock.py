@@ -76,16 +76,19 @@ def verify_witness(lock_path: Path, witness: str, *, remote: str = "origin", saf
     repo = repo or Path.cwd()
     if not lock_path.exists():
         raise WitnessError("LOCK.json does not exist")
-    if not lock_contained_in_witness(lock_path, witness, repo):
+    resolved = subprocess.run(["git", "rev-parse", "--verify", f"{witness}^{{commit}}"], cwd=repo, text=True, capture_output=True, check=False)
+    if resolved.returncode:
+        raise WitnessError("witness is not a valid commit")
+    witness_commit = resolved.stdout.strip()
+    if not lock_contained_in_witness(lock_path, witness_commit, repo):
         raise WitnessError("witness does not contain exact LOCK.json bytes")
     if not lock_hashes_match(lock_path):
         raise WitnessError("calibration artifact hash mismatch (exact LOCK.json bytes are present)")
-    if not witness_reachable_after_fresh_fetch(witness, repo, remote):
+    if not witness_reachable_after_fresh_fetch(witness_commit, repo, remote):
         raise WitnessError("witness is not reachable from a remote-tracking ref after fresh fetch")
     if not no_preexisting_safety_outputs(safety_outputs):
         raise WitnessError("safety outputs already exist")
-    resolved = subprocess.run(["git", "rev-parse", witness], cwd=repo, text=True, capture_output=True, check=True)
-    return resolved.stdout.strip()
+    return witness_commit
 
 # Explicit predicate names make each refusal independently testable.
 lock_hash_match = lock_hashes_match

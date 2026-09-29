@@ -71,6 +71,24 @@ def test_verify_witness_returns_resolved_witness_commit_hash(tmp_path):
     assert run.verify_witness(run_dir / "LOCK.json", witness, repo=repo) == witness
 
 
+def test_symbolic_witness_is_anchored_before_fetch(tmp_path):
+    repo, run_dir, original = repo_with_lock(tmp_path)
+    git(repo, "push", "origin", "main")
+    git(repo, "fetch", "origin")
+    lock_path = run_dir / "LOCK.json"
+    lock_bytes = lock_path.read_bytes()
+    git(repo, "rm", str(lock_path.relative_to(repo)))
+    git(repo, "-c", "user.email=t@example.com", "-c", "user.name=test", "commit", "-m", "advance")
+    advanced = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "origin", "main")
+    # Leave the symbolic tracking ref at the originally verified commit until
+    # verify_witness performs its fetch; the fetch then advances it to `advanced`.
+    git(repo, "update-ref", "refs/remotes/origin/main", original)
+    lock_path.write_bytes(lock_bytes)
+    assert run.verify_witness(lock_path, "refs/remotes/origin/main", repo=repo) == original
+    assert advanced != original
+
+
 def test_non_default_remote_is_passed_to_verification(monkeypatch, tmp_path):
     seen = {}
     def verify(lock_path, witness, remote="origin", **kwargs):
@@ -99,8 +117,28 @@ def test_report_drift_after_lock_is_rejected(tmp_path):
         run.verify_witness(run_dir / "LOCK.json", witness, repo=repo)
 
 
-@pytest.mark.parametrize("hashes", [{}, {"candidates.jsonl": "x"}, {"foreign.jsonl": "x"}])
-def test_lock_hashes_require_exact_run_local_stream_set(tmp_path, hashes):
-    lock_path = tmp_path / "LOCK.json"
+def test_schema_invalid_artifacts_are_refused_during_witness_verification(tmp_path):
+    repo, run_dir, _ = repo_with_lock(tmp_path)
+    candidates = run_dir / "candidates.jsonl"
+    candidates.write_text(candidates.read_text().replace('"rank": 0', '"rank": -1', 1))
+    lock.write_lock(run_dir / "LOCK.json", [run_dir / n for n in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")], .6)
+    git(repo, "add", ".")
+    git(repo, "-c", "user.email=t@example.com", "-c", "user.name=test", "commit", "-m", "invalid-artifacts")
+    witness = git(repo, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "push", "origin", "main")
+    with pytest.raises(ValueError, match="calibration artifact hash mismatch"):
+        run.verify_witness(run_dir / "LOCK.json", witness, repo=repo)
+
+
+def test_lock_hashes_reject_exact_four_entry_map_with_foreign_path(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    hashes = {
+        str(run_dir / "candidates.jsonl"): "x",
+        str(run_dir / "scores.jsonl"): "x",
+        str(run_dir / "labels.jsonl"): "x",
+        str(tmp_path / "foreign" / "report.md"): "x",
+    }
+    lock_path = run_dir / "LOCK.json"
     lock_path.write_text(json.dumps({"schema_version": 1, "tau": .6, "calibration_artifact_hashes": hashes}))
     assert not lock.lock_hashes_match(lock_path)

@@ -58,14 +58,17 @@ def test_candidate_rows_namespaces_ids_and_two_case_generated_shape_validates(tm
 
 
 def test_candidate_rows_preserves_first_whitespace_equivalent_source():
-    first = "a" * 600 + " first tail"
-    second = "a" * 600 + " second tail"
+    # The raw prefixes differ, but production content_hash normalizes their
+    # internal whitespace to the same value.  The first source must win.
+    first = "a" * 300 + "  " + "b" * 300
+    second = "a" * 300 + " " + "b" * 300
+    assert first[:600] != second[:600]
     case = {"case_id": "case", "query": "q", "retrieved": [
         {"excerpt": first, "path": "one.md", "heading": []},
         {"excerpt": second, "path": "two.md", "heading": []},
     ]}
     rows = run.candidate_rows([case], {"case_set_fingerprint": "x"})
-    assert len(rows) == 2
+    assert len(rows) == 1
     assert rows[0]["path"] == "one.md"
 
 
