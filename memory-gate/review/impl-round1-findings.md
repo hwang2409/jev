@@ -74,3 +74,10 @@ checklist; each phase claims its subset.
 - Repeatability probe: stratified 12 cases, replicate 0 + 5 bypassed, stddev/spread/crossing-fraction, model-identity refusal
 - Blinded 25% intra-rater relabel + raw agreement
 - Suite-wide no-live-network (autouse socket refusal)
+
+## Post-approval follow-ups (C2 gate round 2, both minor, non-blocking)
+- test_contract_required T2: expected cache key still computed via shared helpers
+  (behavioral equality with jm runner confirmed by reviewer scratch probe);
+  strengthen to invoke runner.records_for_state directly.
+- Second-rename failure test trips on freeze_safety's internal rename, never
+  reaching run.py:565-570 rollback; fail on destination path instead.
