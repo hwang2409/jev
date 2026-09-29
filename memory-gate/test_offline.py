@@ -34,6 +34,41 @@ def test_fixture_schema_and_replay():
     assert run.metrics([{"case_id": cid, "candidates": rows, "scores": scores[cid], "answerable": True} for cid, rows in grouped.items()], .6, labels)["packet_precision"] == 1.0
 
 
+def test_candidate_rows_namespaces_ids_and_two_case_generated_shape_validates(tmp_path):
+    provenance = {
+        "case_set_fingerprint": "cases", "corpus_fingerprint": "corpus",
+        "pausanias_revision": "p", "retrieval_config": {"mode": "test"},
+        "production_builder_hash": run.artifacts.authoritative_production_builder_hash(),
+        "configured_model_id": "model", "served_model_id": "model",
+        "harness_revision": "h", "jm_revision": "j",
+    }
+    cases = [
+        {"case_id": "one", "query": "q1", "retrieved": [{"excerpt": "one", "path": "one.md", "heading": []}]},
+        {"case_id": "two", "query": "q2", "retrieved": [{"excerpt": "two", "path": "two.md", "heading": []}]},
+    ]
+    candidates = run.candidate_rows(cases, provenance)
+    assert [row["candidate_id"] for row in candidates] == ["one:candidate-0", "two:candidate-0"]
+    for row in candidates:
+        row["canonical_request_hash"] = run.artifacts._canonical_hash([row])
+        row["rank"] = 0
+    scores = [{**row, "score": 0.9, "request_error": None, "coverage": True} for row in candidates]
+    labels = [{**row, "label": "positive"} for row in candidates]
+    run.artifacts.write_artifact(tmp_path, candidates, scores, labels, "report")
+    run.validate_artifact(tmp_path)
+
+
+def test_candidate_rows_preserves_first_whitespace_equivalent_source():
+    first = "a" * 600 + " first tail"
+    second = "a" * 600 + " second tail"
+    case = {"case_id": "case", "query": "q", "retrieved": [
+        {"excerpt": first, "path": "one.md", "heading": []},
+        {"excerpt": second, "path": "two.md", "heading": []},
+    ]}
+    rows = run.candidate_rows([case], {"case_set_fingerprint": "x"})
+    assert len(rows) == 2
+    assert rows[0]["path"] == "one.md"
+
+
 def test_partial_score_artifact_aborts_metrics():
     candidates = [
         {"candidate_id": "a", "path": "a", "heading": [], "excerpt": "a"},
@@ -89,10 +124,11 @@ def test_lock_requires_exact_published_witness(tmp_path):
     git_run(work, "remote", "add", "origin", str(bare))
     lock = work / "memory-gate" / "runs" / "x" / "LOCK.json"
     lock.parent.mkdir(parents=True)
-    calibration = work / "memory-gate" / "runs" / "x" / "candidates.jsonl"
-    calibration.write_text("fixture")
-    payload = run.lock_witness(lock, [calibration], .6)
-    (work / "memory-gate" / "runs" / "x" / "scores.jsonl").write_text("scores")
+    import shutil
+    fixture = HERE / "runs" / "fixture-dev"
+    for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md"):
+        shutil.copy(fixture / name, lock.parent / name)
+    payload = run.lock_witness(lock, [lock.parent / name for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md")], .6)
     git_run(work, "add", ".")
     git_run(work, "-c", "user.email=test@example.com", "-c", "user.name=test", "commit", "-m", "lock")
     witness = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=work, text=True).strip()

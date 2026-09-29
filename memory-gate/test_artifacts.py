@@ -3,8 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import artifacts
 import pytest
+
+import artifacts
 
 HERE = Path(__file__).parent
 FIXTURE = HERE / "runs" / "fixture-dev"
@@ -80,7 +81,7 @@ def test_duplicated_candidate_identity_mismatch_invalidates(stream, field, value
     copy_fixture(tmp_path)
     data = rows(stream)
     data[0][field] = value
-    (tmp_path / stream).write_text("".join(json.dumps(row) + "\\n" for row in data))
+    (tmp_path / stream).write_text("".join(json.dumps(row) + "\n" for row in data))
     assert not artifacts.is_valid_for_gating(tmp_path)
 
 
@@ -88,7 +89,7 @@ def test_stale_production_builder_hash_invalidates(tmp_path):
     copy_fixture(tmp_path)
     candidates = rows("candidates.jsonl")
     candidates[0]["production_builder_hash"] = "0" * 64
-    (tmp_path / "candidates.jsonl").write_text("".join(json.dumps(row) + "\\n" for row in candidates))
+    (tmp_path / "candidates.jsonl").write_text("".join(json.dumps(row) + "\n" for row in candidates))
     assert not artifacts.is_valid_for_gating(tmp_path)
 
 
@@ -101,3 +102,50 @@ def test_fixture_is_valid_and_provenance_drift_is_not(tmp_path):
     candidates[0]["served_model_id"] = "different-model"
     (tmp_path / "candidates.jsonl").write_text("".join(json.dumps(row) + "\n" for row in candidates))
     assert not artifacts.is_valid_for_gating(tmp_path)
+
+
+def test_score_missing_identity_field_is_rejected(tmp_path):
+    copy_fixture(tmp_path)
+    score = rows("scores.jsonl")
+    del score[0]["path"]
+    (tmp_path / "scores.jsonl").write_text("".join(json.dumps(row) + "\n" for row in score))
+    with pytest.raises(artifacts.ArtifactValidationError, match="missing"):
+        artifacts.validate_run(tmp_path)
+
+
+def test_score_wrong_path_is_rejected_with_specific_drift_error(tmp_path):
+    copy_fixture(tmp_path)
+    score = rows("scores.jsonl")
+    score[0]["path"] = "wrong.md"
+    (tmp_path / "scores.jsonl").write_text("".join(json.dumps(row) + "\n" for row in score))
+    with pytest.raises(artifacts.ArtifactValidationError, match="candidate drift in path"):
+        artifacts.validate_run(tmp_path)
+
+
+def test_label_wrong_heading_is_rejected_with_specific_drift_error(tmp_path):
+    copy_fixture(tmp_path)
+    labels = rows("labels.jsonl")
+    labels[0]["heading"] = ["wrong"]
+    (tmp_path / "labels.jsonl").write_text("".join(json.dumps(row) + "\n" for row in labels))
+    with pytest.raises(artifacts.ArtifactValidationError, match="candidate drift in heading"):
+        artifacts.validate_run(tmp_path)
+
+
+def test_provenance_drift_serialization_reports_validation_error_not_json_error(tmp_path):
+    copy_fixture(tmp_path)
+    candidates = rows("candidates.jsonl")
+    candidates[0]["served_model_id"] = "different-model"
+    (tmp_path / "candidates.jsonl").write_text("".join(json.dumps(row) + "\n" for row in candidates))
+    with pytest.raises(artifacts.ArtifactValidationError, match="mixed provenance/model identity"):
+        artifacts.validate_run(tmp_path)
+
+
+def test_authoritative_builder_fingerprint_tracks_imported_source(monkeypatch):
+    import inspect
+    original = artifacts.build_memory_relevance_request
+
+    def substitute(query, candidates):
+        return {"query": query, "candidates": candidates, "changed": True}
+
+    monkeypatch.setattr(artifacts, "build_memory_relevance_request", substitute)
+    assert artifacts.authoritative_production_builder_hash() != artifacts.sha256(inspect.getsource(original).encode())

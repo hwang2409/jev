@@ -27,7 +27,23 @@ def lock_hashes_match(lock_path: Path) -> bool:
     try:
         data = json.loads(lock_path.read_bytes())
         hashes = data["calibration_artifact_hashes"]
-        return isinstance(hashes, dict) and all(Path(path).is_file() and sha256_file(Path(path)) == digest for path, digest in hashes.items())
+        required = {"candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md"}
+        if not isinstance(hashes, dict) or len(hashes) != len(required):
+            return False
+        run_dir = lock_path.parent.resolve()
+        normalized = {}
+        for raw_path, digest in hashes.items():
+            path = Path(raw_path).resolve()
+            if path.parent != run_dir or path.name not in required or path.name in normalized:
+                return False
+            normalized[path.name] = path
+            if not path.is_file() or sha256_file(path) != digest:
+                return False
+        if set(normalized) != required:
+            return False
+        from artifacts import validate_run
+        validate_run(run_dir)
+        return True
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
         return False
 

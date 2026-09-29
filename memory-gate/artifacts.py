@@ -12,6 +12,8 @@ from typing import Any
 
 import pipeline
 
+build_memory_relevance_request = pipeline.build_memory_relevance_request
+
 SCHEMA_VERSION = 1
 PROVENANCE_FIELDS = (
     "case_set_fingerprint", "corpus_fingerprint", "pausanias_revision",
@@ -20,7 +22,7 @@ PROVENANCE_FIELDS = (
     "configured_model_id", "served_model_id", "harness_revision", "jm_revision",
 )
 CANDIDATE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "rank", *PROVENANCE_FIELDS)
-SCORE_FIELDS = ("case_id", "candidate_id", "score", "request_error", "coverage", *PROVENANCE_FIELDS)
+SCORE_FIELDS = ("case_id", "candidate_id", "query", "path", "heading", "score", "request_error", "coverage", *PROVENANCE_FIELDS)
 LABEL_FIELDS = (*CANDIDATE_FIELDS, "label")
 LABELS = {"positive", "negative", "ambiguous"}
 # Phase C frozen safety records add this field after witness verification.
@@ -66,7 +68,7 @@ def _required(record: Mapping[str, Any], fields: Sequence[str], kind: str) -> No
 
 def authoritative_production_builder_hash() -> str:
     """Hash the imported production builder, independently of the artifact."""
-    return sha256(inspect.getsource(pipeline.build_request).encode())
+    return sha256(inspect.getsource(build_memory_relevance_request).encode())
 
 
 def _provenance(record: Mapping[str, Any], kind: str) -> None:
@@ -145,7 +147,7 @@ def validate_run(run_dir: Path) -> None:
     for row in scores + labels:
         candidate = by_id[row["candidate_id"]]
         for field in duplicated_fields:
-            if field in row and row[field] != candidate[field]:
+            if row[field] != candidate[field]:
                 raise ArtifactValidationError(f"candidate drift in {field}")
     # The raw source is deliberately not committed.  Offline validation checks
     # the presented representation and that every copy of the source hash is

@@ -192,16 +192,15 @@ def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, 
     for case in cases:
         retrieved = case.get("retrieved", case.get("candidates", []))
         selected = prepare_candidates(case, retrieved)
-        sources = {
-            pipeline.content_hash(item["excerpt"]): item["excerpt"]
-            for item in retrieved
-            if isinstance(item, Mapping) and isinstance(item.get("excerpt"), str) and item["excerpt"]
-        }
+        sources: dict[str, str] = {}
+        for item in retrieved:
+            if isinstance(item, Mapping) and isinstance(item.get("excerpt"), str) and item["excerpt"]:
+                sources.setdefault(pipeline.content_hash(item["excerpt"]), item["excerpt"])
         for rank, item in enumerate(selected):
             source = sources.get(str(item["content_hash"]))
             if source is None or source[:pipeline.EXCERPT_CHARS] != item["excerpt"]:
                 raise ValueError("selected candidate source changed during artifact generation")
-            rows.append({"case_id": case["case_id"], "candidate_id": item["id"], "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance})
+            rows.append({"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{item['id']}", "query": case["query"], "path": item["path"], "heading": item["heading"], "rank": rank, "untruncated_excerpt_hash": item["content_hash"], "presented_excerpt": item["excerpt"], **provenance})
     return rows
 
 
