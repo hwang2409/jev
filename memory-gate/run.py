@@ -526,7 +526,18 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:  # request errors invalidate the run
             scores, error = {}, f"{type(exc).__name__}: {exc}"
         if not candidates:
-            rows.append({"case_id": case["case_id"], "candidates": []})
+            raw_retrieved = case.get("retrieved", case.get("candidates", []))
+            marker: dict[str, Any] = {"case_id": case["case_id"], "candidates": []}
+            # Shape-mismatch detection: raw items exist but all were discarded
+            # by prepare_candidates (e.g. heading as dict instead of list).
+            # Genuine zero retrieval (empty raw list) is NOT a shape mismatch.
+            if raw_retrieved:
+                first_item = raw_retrieved[0] if raw_retrieved else {}
+                marker["discarded_all"] = True
+                marker["discarded_item_keys"] = {
+                    k: type(v).__name__ for k, v in first_item.items()
+                } if isinstance(first_item, Mapping) else {"_item_type": type(first_item).__name__}
+            rows.append(marker)
         for rank, candidate in enumerate(candidates):
             cid = str(candidate["id"])
             # Derive per-case retrieval_scope if the case has scope info
@@ -570,6 +581,17 @@ def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model:
     replicates = []
     for index in range(6):
         rows = score_cases(subset, client, model=model, cache_dir=cache_dir, bypass_cache=index > 0)
+        # Fix 3: detect marker/zero-candidate rows and name the cases
+        marker_cases = sorted({
+            str(row["case_id"]) for row in rows
+            if row.get("candidates") == []
+        })
+        if marker_cases:
+            raise ValueError(
+                f"repeatability refuses zero-candidate cases (marker rows): "
+                f"{marker_cases} — these cases had all candidates discarded "
+                f"by prepare_candidates; check retrieved item shapes"
+            )
         identities = {(row.get("configured_model_id"), row.get("served_model_id")) for row in rows}
         if len(identities) != 1 or any(c is None or s is None for c, s in identities):
             raise ValueError("repeatability refuses missing or mixed configured/served model identities")
@@ -658,6 +680,8 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
     by_case: dict[str, list[Mapping[str, Any]]] = {
         str(case_id): [] for case_id in (expected_case_ids or set())
     }
+    # Fix 1: detect shape-mismatch cases (raw items existed but all discarded)
+    shape_mismatch_cases: list[tuple[str, Mapping[str, Any]]] = []
     for row in scores:
         observed_case_ids.add(str(row["case_id"]))
         case_id = str(row["case_id"])
@@ -665,8 +689,21 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
         # A retrieval miss is represented by a case marker with no candidates;
         # it remains a denominator observation but has no rows to validate.
         if row.get("candidates") == []:
+            if row.get("discarded_all"):
+                shape_mismatch_cases.append((case_id, row.get("discarded_item_keys", {})))
             continue
         by_case[case_id].append(row)
+    # Fix 1: refuse the run when ANY case has a shape mismatch
+    if shape_mismatch_cases:
+        sample_ids = [cid for cid, _ in shape_mismatch_cases[:5]]
+        first_keys = shape_mismatch_cases[0][1]
+        raise ValueError(
+            f"safety run refused: {len(shape_mismatch_cases)} case(s) have shape-mismatch — "
+            f"raw retrieved items existed but all were discarded by prepare_candidates "
+            f"(normalization produced zero valid candidates). "
+            f"Case IDs (first 5): {sample_ids}; "
+            f"first offending item keys/types: {first_keys}"
+        )
     if expected_case_ids is not None and observed_case_ids != set(expected_case_ids):
         missing = sorted(set(expected_case_ids) - observed_case_ids)
         extra = sorted(observed_case_ids - set(expected_case_ids))
@@ -686,6 +723,17 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
         if select_blocks(candidates, scores_by_id, tau):
             false_injections += 1
     total = len(expected_case_ids) if expected_case_ids is not None else len(by_case)
+    # Fix 2: refuse to freeze when zero batteries were scored across the
+    # whole lane — an authoritative safety pass with no scored candidates
+    # is definitionally invalid.
+    batteries_scored = sum(1 for rows in by_case.values() if rows)
+    if batteries_scored == 0:
+        raise ValueError(
+            "safety run refused: zero batteries scored across the entire lane "
+            "(all cases were marker rows with no scored candidates) — "
+            "an authoritative safety pass with no scored candidates is "
+            "definitionally invalid"
+        )
     if scores_output is None:
         return freeze_safety(output, witness_commit=witness_commit, tau=tau,
                              false_injections=false_injections, total=total,
