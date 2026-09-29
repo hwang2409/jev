@@ -51,6 +51,12 @@ def _read(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def write_candidates(path: Path, candidates: Iterable[Mapping[str, Any]]) -> None:
+    """Write the generation stream without fabricating score or label records."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(dict(row), ensure_ascii=False, sort_keys=True) + "\\n" for row in candidates))
+
+
 def write_artifact(run_dir: Path, candidates: Iterable[Mapping[str, Any]], scores: Iterable[Mapping[str, Any]], labels: Iterable[Mapping[str, Any]], report: str = "") -> None:
     """Write all three JSONL streams using the same field definition as validation."""
     run_dir.mkdir(parents=True, exist_ok=True)

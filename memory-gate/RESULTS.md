@@ -1,12 +1,51 @@
 # Memory-gate calibration results
 
-No real calibration or safety run has been executed in this checkout. The
-committed `runs/fixture-dev/` directory is synthetic and explicitly **not a
-real run**. It exists for offline schema/replay tests only. Consequently no
-threshold is locked, no production default is enabled, and no safety claim is
-authorized.
+**STATUS: AWAITING REAL RUN — this checkout contains no authoritative score or safety claim.**
 
-A real run must record the pinned pausanias/harness/jm revisions, configured
-and served model identities, complete score coverage, calibration labels,
-bootstrap CIs, repeatability probe, and the witnessed lock before evaluating
-the held-out locomo10 category-5 lane.
+The tooling emits the following report structure for each immutable run:
+
+## Run identity and provenance
+
+- run directory / timestamp:
+- pausanias revision and exact retrieval configuration:
+- harness revision / production-builder hash:
+- jm revision, configured model, served model:
+- case-set and corpus fingerprints:
+- score coverage: complete / INVALID (request errors are listed)
+
+## Calibration lane
+
+- candidate and presented-pair counts (after truncate, dedupe, and top-2 cap):
+- threshold table: tau, abstain any-injection, packet recall and baseline,
+  precision, exact-packet, forbidden-injection, retention, ROC-AUC, PR-AUC,
+  Brier, Wilson/bootstrap intervals:
+- proposed locked tau and the §8.4 rationale:
+
+## Repeatability (§6)
+
+The report lists the stratified 12-case subset (4 abstain, 4 verbatim, 4
+paraphrase), cached replicate 0 plus five cache-bypassed re-issues of the exact
+production battery, model identity for every replicate, per-candidate
+population standard deviation, worst spread, and fraction crossing tau.
+Mixed configured/served identities invalidate the probe.
+
+## Safety lane (§4, §8.3)
+
+- pausanias LOCOMO entry points: `eval.benchmarks.locomo.run.load_dataset`,
+  `render_session`/`_render_entries`, and the benchmark's indexed search path;
+  memory-gate then filters QA category 5 and applies production skip/dedupe,
+  top-2-before-scoring semantics.
+- post-filter assertion: 10 conversations / 446 questions:
+- scored Nouls (maximum 892):
+- locked tau point estimate and Wilson 95% interval:
+- acceptance: point <= 2% and upper <= 4%:
+- verified witness commit and frozen artifact hash:
+
+## Authority and limitations
+
+` safety.json` is written once and is authoritative only when the witness,
+coverage, and acceptance checks pass. `posthoc-safety-curve.json` is explicitly
+non-authoritative and cannot change the locked result. The fixed LOCOMO
+conversations are clustered (not an iid population); calibration labels are
+human labels; this evaluates standalone fresh-session routing only, not
+auto-route memory injection. No threshold is enabled by this template.

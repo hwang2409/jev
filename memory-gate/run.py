@@ -20,6 +20,7 @@ import json
 import math
 import random
 import statistics
+import subprocess
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -193,6 +194,30 @@ def filter_locomo_category5(dataset: Sequence[Mapping[str, Any]], *, expected_co
     return filtered
 
 
+def safety_cases(dataset: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Adapt the LOCOMO benchmark export after its rendering/ingestion stage.
+
+    The pinned pausanias runner entry points are ``load_dataset`` for validation,
+    ``_render_entries``/``render_session`` for markdown ingestion, and its
+    ``search``/index path for retrieval.  This adapter intentionally accepts
+    only the resulting per-question ``retrieved`` records; it never invents a
+    second retrieval implementation.
+    """
+    filtered = filter_locomo_category5(dataset)
+    cases: list[dict[str, Any]] = []
+    for conversation_index, conversation in enumerate(filtered):
+        for question_index, question in enumerate(conversation["qa"]):
+            query = question.get("question", question.get("query"))
+            retrieved = question.get("retrieved", question.get("candidates", []))
+            if not isinstance(query, str) or not isinstance(retrieved, list):
+                raise TypeError("LOCOMO benchmark export question lacks query/retrieved records")
+            cases.append({"case_id": f"locomo-{conversation_index}-{question_index}",
+                          "query": query, "retrieved": retrieved, "answerable": False})
+    if len(cases) != 446:
+        raise ValueError(f"LOCOMO safety export has {len(cases)} questions, expected 446")
+    return cases
+
+
 def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, Any]) -> list[dict[str, Any]]:
     rows = []
     for case in cases:
@@ -231,6 +256,199 @@ def verify_witness(lock: Path, witness: str, remote: str = "origin", *, safety_o
         return lock_module.verify_witness(lock, witness, remote=remote, safety_outputs=safety_outputs, repo=repo)
     except lock_module.WitnessError as exc:
         raise ValueError(str(exc)) from exc
+
+
+def load_cases(path: Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text())
+    if isinstance(data, dict):
+        data = data.get("cases", data.get("questions", []))
+    if not isinstance(data, list):
+        raise TypeError("case file must contain a list or cases field")
+    return [dict(case) for case in data if isinstance(case, Mapping)]
+
+
+def _search_pausanias(case: Mapping[str, Any], *, executable: str, config: Path | None,
+                      cwd: Path | None = None) -> list[dict[str, Any]]:
+    """Run the pinned pausanias CLI; stdout is deliberately the only protocol."""
+    command = [executable, "-m", "pausanias"]
+    if config is not None:
+        command += ["--config", str(config)]
+    command += ["search", "--json", str(case.get("query", ""))]
+    completed = subprocess.run(command, cwd=cwd, check=True, capture_output=True, text=True)
+    payload = json.loads(completed.stdout)
+    if isinstance(payload, dict):
+        payload = payload.get("items", payload.get("results", payload.get("candidates", [])))
+    if not isinstance(payload, list):
+        raise TypeError("pausanias --json output must be a list or results object")
+    return [dict(item) for item in payload if isinstance(item, Mapping)]
+
+
+def generate_candidates(case_path: Path, output: Path, *, pausanias_executable: str = sys.executable,
+                         pausanias_config: Path | None = None, pausanias_cwd: Path | None = None,
+                         provenance: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
+    cases = load_cases(case_path)
+    base = dict(provenance or {})
+    base.setdefault("case_set_fingerprint", sha256_bytes(case_path.read_bytes()))
+    base.setdefault("corpus_fingerprint", "unknown")
+    base.setdefault("pausanias_revision", "unknown")
+    base.setdefault("retrieval_config", {"config": str(pausanias_config) if pausanias_config else None,
+                                          "command": "python -m pausanias --config <config> search --json"})
+    base.setdefault("production_builder_hash", artifacts.authoritative_production_builder_hash())
+    base.setdefault("configured_model_id", "unscored")
+    base.setdefault("served_model_id", "unscored")
+    base.setdefault("harness_revision", "unknown")
+    base.setdefault("jm_revision", "unknown")
+    enriched = []
+    for case in cases:
+        current = dict(case)
+        current.setdefault("case_id", current.get("id"))
+        if not isinstance(current["case_id"], str):
+            raise TypeError("each case requires id/case_id")
+        current["retrieved"] = _search_pausanias(case, executable=pausanias_executable, config=pausanias_config, cwd=pausanias_cwd)
+        enriched.append(current)
+    rows = candidate_rows(enriched, base)
+    for case_id in {row["case_id"] for row in rows}:
+        group = [row for row in rows if row["case_id"] == case_id]
+        digest = artifacts._canonical_hash(group)
+        for row in group:
+            row["canonical_request_hash"] = digest
+    artifacts.write_candidates(output, rows)
+    return rows
+
+
+def _client_response(client: Any, request: Mapping[str, Any], *, model: str) -> Mapping[str, Any]:
+    if hasattr(client, "evaluate"):
+        response = client.evaluate(request["state"], request["questions"], model=model)
+    elif callable(client):
+        response = client(request)
+    else:
+        raise TypeError("client must be callable or expose evaluate")
+    if hasattr(response, "answers"):
+        return {"answers": response.answers}
+    if not isinstance(response, Mapping):
+        raise TypeError("jm client response must be a mapping")
+    return response
+
+
+def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
+                cache_dir: Path | None = None, bypass_cache: bool = False) -> list[dict[str, Any]]:
+    """Score the exact production batteries, with a small content-addressed replay cache."""
+    rows: list[dict[str, Any]] = []
+    provenance_defaults = {
+        "case_set_fingerprint": "runtime", "corpus_fingerprint": "runtime",
+        "pausanias_revision": "runtime", "retrieval_config": {"mode": "production"},
+        "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+        "configured_model_id": model, "served_model_id": model,
+        "harness_revision": "runtime", "jm_revision": "runtime",
+    }
+    for case in cases:
+        candidates = prepare_candidates(case, case.get("retrieved", case.get("candidates", [])))
+        request = pipeline.build_request(str(case["query"]), candidates)
+        key = fingerprint({"model": model, "request": request})
+        cache_file = cache_dir / f"{key}.json" if cache_dir else None
+        error = None
+        try:
+            if cache_file and cache_file.exists() and not bypass_cache:
+                response = json.loads(cache_file.read_text())
+            else:
+                response = _client_response(client, request, model=model)
+                if cache_file:
+                    cache_file.parent.mkdir(parents=True, exist_ok=True)
+                    cache_file.write_text(json.dumps(response, sort_keys=True))
+            scores = pipeline.parse_scores(response, candidates)
+        except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:  # request errors invalidate the run
+            scores, error = {}, f"{type(exc).__name__}: {exc}"
+        for rank, candidate in enumerate(candidates):
+            cid = str(candidate["id"])
+            row = {"case_id": case["case_id"], "candidate_id": f"{case['case_id']}:{cid}",
+                   "query": case["query"], "path": candidate["path"], "heading": candidate["heading"],
+                   "rank": rank, "score": scores.get(cid), "request_error": error,
+                   "coverage": error is None and cid in scores,
+                   "untruncated_excerpt_hash": candidate["content_hash"], "presented_excerpt": candidate["excerpt"]}
+            row.update(provenance_defaults)
+            row["canonical_request_hash"] = fingerprint(request)
+            rows.append(row)
+    return rows
+
+
+def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
+                      cache_dir: Path, tau: float) -> dict[str, Any]:
+    strata = {"abstain": [], "verbatim": [], "paraphrase": []}
+    for case in cases:
+        category = str(case.get("category", ""))
+        if category in strata:
+            strata[category].append(case)
+    if any(len(values) < 4 for values in strata.values()):
+        raise ValueError("repeatability requires four cases in each category stratum")
+    subset = [case for values in strata.values() for case in values[:4]]
+    replicates = []
+    for index in range(6):
+        rows = score_cases(subset, client, model=model, cache_dir=cache_dir, bypass_cache=index > 0)
+        replicates.append({"replicate": index, "configured_model_id": model,
+                           "served_model_id": model, "scores": rows,
+                           "cache_bypassed": index > 0})
+    result = repeatability(replicates, tau)
+    result["strata"] = {name: [case.get("case_id", case.get("id")) for case in values[:4]]
+                         for name, values in strata.items()}
+    return result
+
+
+def repeatability(replicates: Sequence[Mapping[str, Any]], tau: float) -> dict[str, Any]:
+    if not replicates:
+        raise ValueError("repeatability requires replicate 0")
+    identities = {(r.get("configured_model_id"), r.get("served_model_id")) for r in replicates}
+    if len(identities) != 1:
+        raise ValueError("repeatability refuses mixed configured/served model identities")
+    grouped: dict[str, list[float]] = {}
+    for replicate in replicates:
+        for row in replicate.get("scores", replicate.get("rows", [])):
+            if row.get("score") is not None:
+                grouped.setdefault(str(row["candidate_id"]), []).append(float(row["score"]))
+    details = {}
+    crossing = 0
+    for cid, values in grouped.items():
+        spread = max(values) - min(values)
+        details[cid] = {"stddev": statistics.pstdev(values), "worst_spread": spread,
+                         "crosses_tau": min(values) <= tau < max(values)}
+        crossing += details[cid]["crosses_tau"]
+    return {"replicates": len(replicates), "tau": tau, "model_identity": list(next(iter(identities))),
+            "per_candidate": details, "worst_spread": max((x["worst_spread"] for x in details.values()), default=0),
+            "fraction_crossing_tau": ratio(crossing, len(details))}
+
+
+def freeze_safety(path: Path, *, witness_commit: str, tau: float, false_injections: int,
+                  total: int, repeatability_data: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite frozen safety artifact: {path}")
+    upper = wilson(false_injections, total)[1] if total else None
+    artifact = {"authoritative": True, "witness_commit": witness_commit, "tau": tau,
+                "false_injections": false_injections, "total": total,
+                "point_estimate": ratio(false_injections, total), "wilson_95": wilson(false_injections, total),
+                "accepts": total > 0 and false_injections / total <= .02 and upper <= .04,
+                "repeatability": repeatability_data}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x") as stream:
+        json.dump(artifact, stream, indent=2, sort_keys=True); stream.write("\n")
+    return artifact
+
+
+def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_commit: str,
+                  output: Path, repeatability_data: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    """Freeze category-5 case-level false injection after witness verification."""
+    by_case: dict[str, list[Mapping[str, Any]]] = {}
+    for row in scores:
+        by_case.setdefault(str(row["case_id"]), []).append(row)
+    false_injections = sum(any(row.get("score") is not None and row["score"] > tau for row in rows)
+                           for rows in by_case.values())
+    return freeze_safety(output, witness_commit=witness_commit, tau=tau,
+                         false_injections=false_injections, total=len(by_case),
+                         repeatability_data=repeatability_data)
+
+
+def write_posthoc_curve(path: Path, curve: Sequence[Mapping[str, Any]]) -> None:
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite artifact: {path}")
+    path.write_text(json.dumps({"authoritative": False, "curve": list(curve)}, indent=2, sort_keys=True) + "\n")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -298,9 +516,40 @@ def main(argv: Sequence[str] | None = None) -> int:
         print((run_dir / "report.md").read_text())
         return 0
     if args.command == "candidates":
-        raise SystemExit("candidate generation requires the local pausanias checkout and model bundle; no network fallback")
+        lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
+        if "--output" not in unknown or "--cases" not in unknown:
+            raise SystemExit("candidates requires --cases and --output")
+        case_path = Path(unknown[unknown.index("--cases") + 1])
+        output = Path(unknown[unknown.index("--output") + 1])
+        if lane == "safety":
+            dataset = load_cases(case_path)
+            rows = candidate_rows(safety_cases(dataset), {
+                "case_set_fingerprint": sha256_bytes(case_path.read_bytes()),
+                "corpus_fingerprint": "locomo-pinned",
+                "pausanias_revision": "pinned",
+                "retrieval_config": {"benchmark": "eval.benchmarks.locomo.run", "mode": "production"},
+                "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+                "configured_model_id": "unscored", "served_model_id": "unscored",
+                "harness_revision": "pinned", "jm_revision": "pinned"})
+            by_case = {}
+            for row in rows:
+                by_case.setdefault(row["case_id"], []).append(row)
+            for group in by_case.values():
+                digest = artifacts._canonical_hash(group)
+                for row in group:
+                    row["canonical_request_hash"] = digest
+            artifacts.write_candidates(output, rows)
+            return 0
+        executable = unknown[unknown.index("--pausanias-python") + 1] if "--pausanias-python" in unknown else sys.executable
+        config = Path(unknown[unknown.index("--config") + 1]) if "--config" in unknown else None
+        generate_candidates(case_path, output, pausanias_executable=executable, pausanias_config=config)
+        return 0
     if args.command == "score":
-        raise SystemExit("score requires an offline response cache; use the homelab runner")
+        # CLI scoring consumes a JSON response map in offline CI; homelab can
+        # provide the real JevClient through the same score_cases seam.
+        if "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety" and "--cases" not in unknown:
+            raise SystemExit("phase C not implemented: safety scoring requires --cases and an adapter")
+        raise SystemExit("score requires an adapter; call score_cases with jm.JevClient")
     return 0
 
 
