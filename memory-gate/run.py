@@ -36,7 +36,9 @@ if str(THIS_DIR) not in sys.path:
 
 import artifacts
 import lock as lock_module
+import metrics as metrics_module
 import pipeline
+import sweep as sweep_module
 
 production_request = pipeline.build_request
 parse_production_scores = pipeline.parse_scores
@@ -140,7 +142,7 @@ def bootstrap(values: list[float | None], seed: int = BOOTSTRAP_SEED) -> dict[st
     return {"ci": [reps[int(.025 * (len(reps)-1))], reps[int(.975 * (len(reps)-1))]], "null_replicates": dropped}
 
 
-def metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) -> dict[str, Any]:
+def legacy_metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) -> dict[str, Any]:
     valid = [c for c in cases if c.get("valid", True)]
     answerable = [c for c in valid if c.get("answerable", True)]
     eligible = [c for c in answerable if any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"])]
@@ -166,6 +168,10 @@ def metrics(cases: list[dict[str, Any]], tau: float, labels: Mapping[str, str]) 
         "retrieval_miss_rate": ratio(sum(not any(labels.get(x["candidate_id"]) == "positive" for x in c["candidates"]) for c in answerable), len(answerable)),
         "eligible_recall_cases": len(eligible), "ambiguous_pairs": sum(labels.get(x["candidate_id"]) == "ambiguous" for c in valid for x in c["candidates"]),
     }
+
+
+# Public runner API is the complete §5 implementation, not the historical stub.
+metrics = metrics_module.metrics
 
 
 def filter_locomo_category5(dataset: Sequence[Mapping[str, Any]], *, expected_conversations: int = 10, expected_questions: int = 446) -> list[dict[str, Any]]:
@@ -255,10 +261,32 @@ def main(argv: Sequence[str] | None = None) -> int:
         remote = args.remote
         verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], remote=remote, safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
         raise SystemExit("phase C not implemented: safety scoring is deferred")
-    if args.command in {"report", "posthoc-safety-curve"}:
-        run = Path(unknown[unknown.index("--run") + 1])
-        validate_artifact(run)
-        print((run / "report.md").read_text())
+    if args.command == "report":
+        run_dir = Path(unknown[unknown.index("--run") + 1])
+        # Refuse before reading partial streams: validity is all-or-nothing.
+        validate_artifact(run_dir)
+        cases = metrics_module.load_run(run_dir)
+        result = sweep_module.sweep(cases)
+        lines = ["RESULTS — memory-gate metrics", "", "Thresholds: " + ", ".join(f"{x:.6g}" for x in result["thresholds"]), "", "tau | any-injection | recall | precision | exact-packet | forbidden | retention | ROC-AUC | PR-AUC | Brier", "--- | --- | --- | --- | --- | --- | --- | --- | --- | ---"]
+        for row in result["table"]:
+            def fmt(value):
+                return "null" if value is None else f"{value:.6g}"
+            lines.append(" | ".join([fmt(row[k]) for k in ("tau", "any_injection_rate", "packet_recall", "packet_precision", "exact_packet_rate", "forbidden_injection_rate", "retention", "roc_auc", "pr_auc", "brier")]))
+        lines += ["", "Per-stratum any-injection (at each tau):"]
+        for row in result["table"]:
+            strata = ", ".join(f"{name}={value['cases']}/{value['total']} ({value['rate']!r})" for name, value in row["any_injection_rate_by_stratum"].items())
+            lines.append(f"tau={row['tau']:.6g}: {strata}")
+        lines += ["", "Pareto frontier (abstain any-injection, packet recall):"]
+        lines += [f"tau={r['tau']:.6g} any={r['any_injection_rate']!r} recall={r['packet_recall']!r}" for r in result["pareto"]]
+        lines += ["", "Selection: " + json.dumps(result["selection"], sort_keys=True)]
+        text = "\\n".join(lines) + "\\n"
+        (run_dir / "results.txt").write_text(text)
+        print(text, end="")
+        return 0
+    if args.command == "posthoc-safety-curve":
+        run_dir = Path(unknown[unknown.index("--run") + 1])
+        validate_artifact(run_dir)
+        print((run_dir / "report.md").read_text())
         return 0
     if args.command == "candidates":
         raise SystemExit("candidate generation requires the local pausanias checkout and model bundle; no network fallback")

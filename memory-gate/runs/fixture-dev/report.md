@@ -1,3 +1,3 @@
-# Fixture development run (NOT a real run)
+# Fixture development run
 
-Synthetic 3-case artifact used only for offline schema, replay, and metric checks. Scores are fabricated; no Jev or pausanias service was contacted.
+Synthetic only; no Jev, pausanias, network, or production data.
