@@ -484,7 +484,8 @@ def _cache_key(request: Mapping[str, Any], model: str) -> str:
 
 
 def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
-                cache_dir: Path | None = None, bypass_cache: bool = False) -> list[dict[str, Any]]:
+                cache_dir: Path | None = None, bypass_cache: bool = False,
+                cache_store: Any = None) -> list[dict[str, Any]]:
     """Score the exact production batteries, with a small content-addressed replay cache."""
     rows: list[dict[str, Any]] = []
     provenance_defaults = {
@@ -506,7 +507,8 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
             if cache_file and cache_file.exists() and not bypass_cache:
                 response = json.loads(cache_file.read_text())
             else:
-                response = _client_response(client, request, model=model)
+                response = _client_response(client, request, model=model,
+                                            cache_store=cache_store)
                 if cache_file:
                     cache_file.parent.mkdir(parents=True, exist_ok=True)
                     cache_file.write_text(json.dumps(response, sort_keys=True))
@@ -994,11 +996,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             if args.responses is None:
                 # Live mode: construct real client and score over the network.
-                live_client, _live_cache = build_live_client()
+                live_client, live_cache = build_live_client()
                 cases = safety_cases(load_cases(args.cases))
                 scores = score_cases(
                     cases, live_client, model=args.model,
                     cache_dir=run_dir / "cache", bypass_cache=True,
+                    cache_store=live_cache,
                 )
             else:
                 response_data = json.loads(args.responses.read_text())
@@ -1128,14 +1131,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                         raise RuntimeError("response fixture exhausted") from exc
 
                 gen_client: Any = file_client_gen
+                gen_cache: Any = None
             else:
                 # Live mode: real client over the network.
-                gen_client, _gen_cache = build_live_client()
+                gen_client, gen_cache = build_live_client()
 
             cases = load_cases(args.cases)
             scores = score_cases(
                 cases, gen_client, model=args.model,
                 cache_dir=run_dir / "cache",
+                cache_store=gen_cache,
             )
             provenance = {
                 "case_set_fingerprint": "runtime",
