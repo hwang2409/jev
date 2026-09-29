@@ -718,8 +718,8 @@ def test_t12_corpus_fingerprint_unavailable_without_config():
 
 
 def test_t12_git_revision_returns_hash_in_real_repo():
-    """In the jev-work checkout, _git_revision should return a commit hash."""
-    rev = run._git_revision(Path("/tmp/jev-work"))
+    """In this checkout (wherever it lives), _git_revision returns a commit hash."""
+    rev = run._git_revision(Path(run.__file__).resolve().parents[1])
     assert rev != "unavailable"
     assert len(rev) == 40  # full SHA-1
 
