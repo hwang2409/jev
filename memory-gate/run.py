@@ -20,7 +20,6 @@ import json
 import math
 import random
 import statistics
-import subprocess
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -35,6 +34,8 @@ THIS_DIR = Path(__file__).resolve().parent
 if str(THIS_DIR) not in sys.path:
     sys.path.insert(0, str(THIS_DIR))
 
+import artifacts
+import lock as lock_module
 import pipeline
 
 production_request = pipeline.build_request
@@ -99,27 +100,6 @@ def validate_record(record: Mapping[str, Any], kind: str) -> None:
     elif kind == "label":
         if record.get("label") not in {"positive", "negative", "ambiguous"}:
             raise ValueError("label must be positive, negative, or ambiguous")
-
-
-def validate_artifact(run_dir: Path) -> None:
-    required = {"candidates.jsonl", "scores.jsonl", "labels.jsonl", "report.md"}
-    missing = required - {p.name for p in run_dir.iterdir()} if run_dir.exists() else required
-    if missing:
-        raise ValueError(f"artifact missing {sorted(missing)}")
-    candidates = read_jsonl(run_dir / "candidates.jsonl")
-    scores = read_jsonl(run_dir / "scores.jsonl")
-    labels = read_jsonl(run_dir / "labels.jsonl")
-    for row in candidates:
-        validate_record(row, "candidate")
-    for row in scores:
-        validate_record(row, "score")
-    for row in labels:
-        validate_record(row, "label")
-    ids = {r["candidate_id"] for r in candidates}
-    if any(r.get("candidate_id") not in ids for r in scores + labels):
-        raise ValueError("score/label references unknown candidate")
-    if len({r["case_id"] for r in candidates}) == 0:
-        raise ValueError("empty candidate artifact")
 
 
 
@@ -215,35 +195,20 @@ def candidate_rows(cases: Sequence[Mapping[str, Any]], provenance: Mapping[str, 
     return rows
 
 
+def validate_artifact(run_dir: Path) -> None:
+    artifacts.validate_run(run_dir)
+
+
 def lock_witness(lock_path: Path, calibration_paths: Sequence[Path], tau: float) -> dict[str, Any]:
-    hashes = {str(p): sha256_bytes(p.read_bytes()) for p in calibration_paths}
-    payload = {"schema_version": 1, "tau": tau, "calibration_artifact_hashes": hashes}
-    lock_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n")
-    return payload
+    return lock_module.write_lock(lock_path, calibration_paths, tau)
 
 
-def git(*args: str, cwd: Path = ROOT, check: bool = True) -> str:
-    return subprocess.run(["git", *args], cwd=cwd, check=check, text=True, capture_output=True).stdout.strip()
-
-
-def verify_witness(lock: Path, witness: str, remote: str = "origin", *, safety_outputs: Sequence[Path] = (), repo: Path = ROOT) -> None:
-    """Enforce all four §8.3 refusal conditions before safety scoring."""
-    if not lock.exists(): raise ValueError("LOCK.json does not exist")
-    lock_bytes = lock.read_bytes()
-    rel = str(lock.relative_to(repo))
-    committed = subprocess.run(["git", "show", f"{witness}:{rel}"], cwd=repo, capture_output=True, check=False)
-    if committed.returncode or committed.stdout != lock_bytes:
-        raise ValueError("witness does not contain exact LOCK.json bytes")
-    data = json.loads(lock_bytes)
-    for path, expected in data.get("calibration_artifact_hashes", {}).items():
-        if not Path(path).exists() or sha256_bytes(Path(path).read_bytes()) != expected:
-            raise ValueError("calibration artifact hash mismatch")
-    git("fetch", remote, cwd=repo)
-    refs = git("for-each-ref", "--format=%(refname)", f"refs/remotes/{remote}/", cwd=repo)
-    if not any(subprocess.run(["git", "merge-base", "--is-ancestor", witness, ref], cwd=repo, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False).returncode == 0 for ref in refs.splitlines()):
-        raise ValueError("witness is not reachable from a remote-tracking ref")
-    if any(path.exists() for path in safety_outputs):
-        raise ValueError("safety outputs already exist")
+def verify_witness(lock: Path, witness: str, remote: str = "origin", *, safety_outputs: Sequence[Path] = (), repo: Path = ROOT) -> str:
+    # Preserve the historical runner API while exposing lock.py predicates.
+    try:
+        return lock_module.verify_witness(lock, witness, remote=remote, safety_outputs=safety_outputs, repo=repo)
+    except lock_module.WitnessError as exc:
+        raise ValueError(str(exc)) from exc
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -253,16 +218,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         sub.add_parser(name)
     args, unknown = parser.parse_known_args(argv)
     if args.command == "label-template":
-        print("case_id,candidate_id,label\n# label each presented excerpt: positive|negative|ambiguous")
+        run_dir = Path(unknown[unknown.index("--candidates") + 1]) if "--candidates" in unknown else Path("memory-gate/runs/fixture-dev")
+        for row in read_jsonl(run_dir / "candidates.jsonl"):
+            print(json.dumps({"case_id": row["case_id"], "candidate_id": row["candidate_id"], "presented_excerpt": row["presented_excerpt"], "label": None}, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "lock":
         p = Path(unknown[unknown.index("--run") + 1]) if "--run" in unknown else Path("memory-gate/runs/fixture-dev")
         tau = float(unknown[unknown.index("--tau") + 1]) if "--tau" in unknown else TAU_REFERENCE
         lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl"], tau)
         return 0
-    if args.command == "score" and "--witness" in unknown:
+    if args.command == "score" and "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety":
+        if "--witness" not in unknown:
+            raise SystemExit("safety scoring requires --witness <commit>")
         run = Path(unknown[unknown.index("--run") + 1])
         verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
+        raise SystemExit("phase C not implemented: safety scoring is deferred")
     if args.command in {"report", "posthoc-safety-curve"}:
         run = Path(unknown[unknown.index("--run") + 1])
         validate_artifact(run)
