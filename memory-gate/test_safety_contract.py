@@ -132,13 +132,26 @@ def test_schema_invalid_artifacts_are_refused_during_witness_verification(tmp_pa
 
 def test_lock_hashes_reject_exact_four_entry_map_with_foreign_path(tmp_path):
     run_dir = tmp_path / "run"
-    run_dir.mkdir()
+    shutil.copytree(HERE / "runs" / "fixture-dev", run_dir)
+    foreign_report = tmp_path / "foreign" / "report.md"
+    foreign_report.parent.mkdir()
+    foreign_report.write_bytes((run_dir / "report.md").read_bytes())
     hashes = {
-        str(run_dir / "candidates.jsonl"): "x",
-        str(run_dir / "scores.jsonl"): "x",
-        str(run_dir / "labels.jsonl"): "x",
-        str(tmp_path / "foreign" / "report.md"): "x",
+        str(run_dir / name): lock.sha256_file(run_dir / name)
+        for name in ("candidates.jsonl", "scores.jsonl", "labels.jsonl")
     }
+    hashes[str(foreign_report)] = lock.sha256_file(foreign_report)
     lock_path = run_dir / "LOCK.json"
+    lock_path.write_text(json.dumps({"schema_version": 1, "tau": .6, "calibration_artifact_hashes": hashes}))
+
+    # The three local artifacts and the foreign report all have matching
+    # hashes.  Rejection therefore specifically exercises lock.py's
+    # containment check, rather than the hash-mismatch check.
+    assert not lock.lock_hashes_match(lock_path)
+
+
+@pytest.mark.parametrize("hashes", [{}, {"candidates.jsonl": "x"}])
+def test_lock_hashes_reject_undersized_map(tmp_path, hashes):
+    lock_path = tmp_path / "LOCK.json"
     lock_path.write_text(json.dumps({"schema_version": 1, "tau": .6, "calibration_artifact_hashes": hashes}))
     assert not lock.lock_hashes_match(lock_path)
