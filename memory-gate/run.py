@@ -593,46 +593,41 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
     return rows
 
 
-def _categorize_case_id(case_id: str) -> str | None:
-    """Infer repeatability stratum from case_id prefix convention."""
-    if case_id.startswith(("prior-", "exact-")):
-        return "verbatim"
-    if case_id.startswith("paraphrase-"):
-        return "paraphrase"
-    if case_id.startswith("locomo-"):
-        return "abstain"
-    return None
+
 
 
 def build_repeatability_subset(
     run_dir: Path,
     *,
-    explicit_cases: Sequence[Path] | None = None,
+    cases_file: Path,
 ) -> list[dict[str, Any]]:
     """Construct the stratified repeatability subset from a run directory.
 
-    Stratification mirrors the operational procedure recorded in
-    runs/20260929-jev-b/repeatability.json:
+    Stratification uses the authoritative ``category`` field from
+    *cases_file* (keyed by ``id``).  Prefix-based inference was removed
+    because real cases (e.g. ``paraphrase-worker-isolation``) carry
+    ``category: "verbatim"`` and would be mis-stratified by prefix.
 
-    - **verbatim** (4): calibration candidates whose case_id starts with
-      ``prior-`` or ``exact-``.
-    - **paraphrase** (4): calibration candidates whose case_id starts with
-      ``paraphrase-``.
+    - **verbatim** (4): calibration candidates whose authoritative
+      category is ``"verbatim"``.
+    - **paraphrase** (4): calibration candidates whose authoritative
+      category is ``"paraphrase"``.
     - **abstain** (4): the first four LOCOMO category-5 cases from
-      ``safety-cases.json`` in the run directory (when present).
+      ``safety-cases.json`` in the run directory (unchanged).
 
     Each calibration case is reconstructed from ``candidates.jsonl``: the
     retrieved items are the candidate rows themselves (presented_excerpt,
     path, heading), and the query comes from the first row in each group.
-
-    If ``explicit_cases`` is given, those files are loaded instead and must
-    already carry ``category`` fields.
     """
-    if explicit_cases:
-        all_cases: list[dict[str, Any]] = []
-        for p in explicit_cases:
-            all_cases.extend(load_cases(p))
-        return all_cases
+    # Load authoritative category mapping from cases_file
+    auth_cases = load_cases(cases_file)
+    category_by_id: dict[str, str] = {}
+    for ac in auth_cases:
+        case_id = ac.get("id") or ac.get("case_id")
+        cat = ac.get("category")
+        if case_id is None or cat is None:
+            continue
+        category_by_id[str(case_id)] = str(cat)
 
     candidates_path = run_dir / "candidates.jsonl"
     if not candidates_path.exists():
@@ -647,8 +642,10 @@ def build_repeatability_subset(
     verbatim: list[dict[str, Any]] = []
     paraphrase: list[dict[str, Any]] = []
     for case_id, group in by_case.items():
-        cat = _categorize_case_id(case_id)
-        if cat is None:
+        if case_id not in category_by_id:
+            continue
+        cat = category_by_id[case_id]
+        if cat not in ("verbatim", "paraphrase"):
             continue
         case: dict[str, Any] = {
             "case_id": case_id,
@@ -667,7 +664,7 @@ def build_repeatability_subset(
         elif cat == "paraphrase":
             paraphrase.append(case)
 
-    # Abstain stratum: from safety-cases.json when present
+    # Abstain stratum: from safety-cases.json (unchanged)
     abstain: list[dict[str, Any]] = []
     safety_path = run_dir / "safety-cases.json"
     if safety_path.exists():
@@ -1121,7 +1118,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     p_repeat.add_argument("--run", required=True, type=Path, dest="run_dir")
     p_repeat.add_argument("--tau", type=float, required=True)
     p_repeat.add_argument("--model", default="typesafe-ai/jev")
-    p_repeat.add_argument("--cases", type=Path, nargs="*", default=None)
+    p_repeat.add_argument("--cases", type=Path, required=True)
 
     parser.epilog = "Safety verification fetches the configured remote with pruning before accepting a witness."
 
@@ -1396,8 +1393,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         output_path = run_dir / "repeatability.json"
         if output_path.exists():
             raise SystemExit(f"refusing to overwrite existing {output_path}")
-        cases_paths = args.cases if args.cases else None
-        subset = build_repeatability_subset(run_dir, explicit_cases=cases_paths)
+        cases_file = args.cases
+        subset = build_repeatability_subset(run_dir, cases_file=cases_file)
         live_client, live_cache = build_live_client()
         result = run_repeatability(
             subset, live_client, model=args.model,

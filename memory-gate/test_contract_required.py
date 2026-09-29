@@ -805,38 +805,75 @@ def _make_safety_cases_json():
     return dataset
 
 
+def _write_repeatability_cases_json(path):
+    """Write an authoritative cases.json where prefix and category DISAGREE.
+
+    This mirrors the real /tmp/pausanias/eval/cases.json where e.g.
+    paraphrase-worker-isolation carries category:"verbatim".
+    """
+    # Verbatim by field — two have paraphrase- prefix (disagreeing)
+    cases = [
+        {"id": "prior-case-0", "query": "q", "category": "verbatim"},
+        {"id": "prior-case-1", "query": "q", "category": "verbatim"},
+        {"id": "paraphrase-case-0", "query": "q", "category": "verbatim"},  # prefix disagrees!
+        {"id": "paraphrase-case-1", "query": "q", "category": "verbatim"},  # prefix disagrees!
+        # Paraphrase by field — two have exact- prefix (disagreeing)
+        {"id": "exact-case-0", "query": "q", "category": "paraphrase"},  # prefix disagrees!
+        {"id": "exact-case-1", "query": "q", "category": "paraphrase"},  # prefix disagrees!
+        {"id": "paraphrase-case-2", "query": "q", "category": "paraphrase"},
+        {"id": "paraphrase-case-3", "query": "q", "category": "paraphrase"},
+        # Extra cases that should be ignored (not verbatim/paraphrase)
+        {"id": "other-case-0", "query": "q", "category": "wrong-project"},
+    ]
+    path.write_text(json.dumps({"cases": cases}, indent=2))
+    return path
+
+
 def _write_repeatability_run_dir(run_dir):
-    """Set up a run dir with enough verbatim/paraphrase candidates + safety-cases.json."""
+    """Set up a run dir with enough candidates + safety-cases.json + cases.json.
+
+    The cases.json fixture intentionally has prefix/category disagreements.
+    """
     run_dir.mkdir(parents=True, exist_ok=True)
-    verbatim_ids = [f"prior-case-{i}" for i in range(4)] + [f"exact-case-{i}" for i in range(2)]
-    paraphrase_ids = [f"paraphrase-case-{i}" for i in range(5)]
-    other_ids = ["other-case-0"]
+    # All ids that appear in cases.json
+    all_ids = [
+        "prior-case-0", "prior-case-1",
+        "paraphrase-case-0", "paraphrase-case-1",
+        "exact-case-0", "exact-case-1",
+        "paraphrase-case-2", "paraphrase-case-3",
+        "other-case-0",
+    ]
     rows = []
-    for cid in verbatim_ids + paraphrase_ids + other_ids:
+    for cid in all_ids:
         rows.append(_make_candidate_row(cid))
     (run_dir / "candidates.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     )
     (run_dir / "safety-cases.json").write_text(json.dumps(_make_safety_cases_json()))
+    _write_repeatability_cases_json(run_dir / "cases.json")
 
 
 def test_t13_subset_construction_stratification(tmp_path):
-    """build_repeatability_subset produces 4 verbatim + 4 paraphrase + 4 abstain."""
+    """build_repeatability_subset stratifies by the category FIELD, not prefix."""
     run_dir = tmp_path / "run"
     _write_repeatability_run_dir(run_dir)
-    subset = run.build_repeatability_subset(run_dir)
+    cases_file = run_dir / "cases.json"
+    subset = run.build_repeatability_subset(run_dir, cases_file=cases_file)
     assert len(subset) == 12
     cats = [c["category"] for c in subset]
     assert cats.count("verbatim") == 4
     assert cats.count("paraphrase") == 4
     assert cats.count("abstain") == 4
-    # Verbatim cases come from prior-/exact- prefix
-    verbatim_ids = [c["case_id"] for c in subset if c["category"] == "verbatim"]
-    assert all(cid.startswith(("prior-", "exact-")) for cid in verbatim_ids)
-    # Paraphrase from paraphrase- prefix
-    para_ids = [c["case_id"] for c in subset if c["category"] == "paraphrase"]
-    assert all(cid.startswith("paraphrase-") for cid in para_ids)
-    # Abstain from locomo
+    # Verbatim stratum follows the field, NOT the prefix:
+    # paraphrase-case-0/1 have category:"verbatim" in the fixture
+    verbatim_ids = sorted(c["case_id"] for c in subset if c["category"] == "verbatim")
+    assert "paraphrase-case-0" in verbatim_ids, "paraphrase-prefixed case with verbatim field must be in verbatim stratum"
+    assert "paraphrase-case-1" in verbatim_ids
+    # Paraphrase stratum: exact-case-0/1 have category:"paraphrase" in the fixture
+    para_ids = sorted(c["case_id"] for c in subset if c["category"] == "paraphrase")
+    assert "exact-case-0" in para_ids, "exact-prefixed case with paraphrase field must be in paraphrase stratum"
+    assert "exact-case-1" in para_ids
+    # Abstain from locomo (unchanged)
     abstain_ids = [c["case_id"] for c in subset if c["category"] == "abstain"]
     assert all(cid.startswith("locomo-") for cid in abstain_ids)
 
@@ -845,7 +882,8 @@ def test_t13_subset_abstain_sourced_from_safety_cases(tmp_path):
     """Abstain stratum is sourced from safety-cases.json, not calibration candidates."""
     run_dir = tmp_path / "run"
     _write_repeatability_run_dir(run_dir)
-    subset = run.build_repeatability_subset(run_dir)
+    cases_file = run_dir / "cases.json"
+    subset = run.build_repeatability_subset(run_dir, cases_file=cases_file)
     abstain = [c for c in subset if c["category"] == "abstain"]
     assert len(abstain) == 4
     # Each abstain case must have the answerable=False marker from safety_cases()
@@ -854,29 +892,36 @@ def test_t13_subset_abstain_sourced_from_safety_cases(tmp_path):
     # Without safety-cases.json, must fail
     run_dir2 = tmp_path / "run2"
     run_dir2.mkdir(parents=True)
-    # Copy candidates but not safety-cases.json
     import shutil
     shutil.copy(run_dir / "candidates.jsonl", run_dir2 / "candidates.jsonl")
     with pytest.raises(ValueError, match="abstain"):
-        run.build_repeatability_subset(run_dir2)
+        run.build_repeatability_subset(run_dir2, cases_file=cases_file)
 
 
 def test_t13_subset_insufficient_verbatim_raises(tmp_path):
     """Must raise if fewer than 4 verbatim cases available."""
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True)
-    # Only 2 verbatim, enough paraphrase
+    # Only 2 verbatim by field, enough paraphrase by field
+    cases = [
+        {"id": "v-0", "query": "q", "category": "verbatim"},
+        {"id": "v-1", "query": "q", "category": "verbatim"},
+        {"id": "p-0", "query": "q", "category": "paraphrase"},
+        {"id": "p-1", "query": "q", "category": "paraphrase"},
+        {"id": "p-2", "query": "q", "category": "paraphrase"},
+        {"id": "p-3", "query": "q", "category": "paraphrase"},
+    ]
+    cases_file = run_dir / "cases.json"
+    cases_file.write_text(json.dumps({"cases": cases}))
     rows = []
-    for i in range(2):
-        rows.append(_make_candidate_row(f"exact-case-{i}"))
-    for i in range(4):
-        rows.append(_make_candidate_row(f"paraphrase-case-{i}"))
+    for c in cases:
+        rows.append(_make_candidate_row(c["id"]))
     (run_dir / "candidates.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
     )
     (run_dir / "safety-cases.json").write_text(json.dumps(_make_safety_cases_json()))
     with pytest.raises(ValueError, match="verbatim"):
-        run.build_repeatability_subset(run_dir)
+        run.build_repeatability_subset(run_dir, cases_file=cases_file)
 
 
 def test_t13_overwrite_refusal(tmp_path):
@@ -884,19 +929,21 @@ def test_t13_overwrite_refusal(tmp_path):
     run_dir = tmp_path / "run"
     run_dir.mkdir(parents=True)
     (run_dir / "repeatability.json").write_text("{}")
+    _write_repeatability_cases_json(run_dir / "cases.json")
     with pytest.raises(SystemExit, match="refusing to overwrite"):
-        run.main(["repeatability", "--run", str(run_dir), "--tau", "0.6"])
+        run.main(["repeatability", "--run", str(run_dir), "--tau", "0.6",
+                  "--cases", str(run_dir / "cases.json")])
 
 
 def test_t13_output_schema(tmp_path, monkeypatch):
     """repeatability CLI writes a well-formed repeatability.json."""
     run_dir = tmp_path / "run"
     _write_repeatability_run_dir(run_dir)
+    cases_file = run_dir / "cases.json"
 
     call_count = [0]
     def fake_client(request):
         call_count[0] += 1
-        # Return a plausible response for any number of candidates
         answers = {}
         for key in request.get("questions", {}):
             answers[key] = {"noul": 0.7}
@@ -906,7 +953,8 @@ def test_t13_output_schema(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "_client_response",
                         lambda client, req, model="", **kw: client(req))
 
-    exit_code = run.main(["repeatability", "--run", str(run_dir), "--tau", "0.58", "--model", "test-model"])
+    exit_code = run.main(["repeatability", "--run", str(run_dir), "--tau", "0.58",
+                          "--model", "test-model", "--cases", str(cases_file)])
     assert exit_code == 0
 
     output = json.loads((run_dir / "repeatability.json").read_text())
@@ -922,11 +970,35 @@ def test_t13_output_schema(tmp_path, monkeypatch):
     assert "per_candidate" in output
 
 
-def test_t13_categorize_case_id():
-    """_categorize_case_id correctly maps prefixes to strata."""
-    assert run._categorize_case_id("prior-sandbox") == "verbatim"
-    assert run._categorize_case_id("exact-pho-123") == "verbatim"
-    assert run._categorize_case_id("paraphrase-cache") == "paraphrase"
-    assert run._categorize_case_id("locomo-0") == "abstain"
-    assert run._categorize_case_id("other-case") is None
-    assert run._categorize_case_id("concept-query") is None
+def test_t13_missing_cases_arg_is_error(tmp_path, capsys):
+    """repeatability CLI without --cases must error (argparse required arg)."""
+    with pytest.raises(SystemExit) as exc_info:
+        run.main(["repeatability", "--run", str(tmp_path), "--tau", "0.6"])
+    assert exc_info.value.code != 0  # argparse exits with 2
+
+
+def test_t13_case_id_absent_from_cases_file_raises(tmp_path):
+    """A candidate whose case_id is absent from cases.json must fail loudly."""
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    # cases.json only knows about 2 verbatim ids
+    cases = [
+        {"id": "prior-case-0", "query": "q", "category": "verbatim"},
+        {"id": "prior-case-1", "query": "q", "category": "verbatim"},
+    ]
+    cases_file = run_dir / "cases.json"
+    cases_file.write_text(json.dumps({"cases": cases}))
+    # candidates.jsonl has those 2 plus unknown ids
+    rows = [
+        _make_candidate_row("prior-case-0"),
+        _make_candidate_row("prior-case-1"),
+        _make_candidate_row("unknown-case-0"),
+        _make_candidate_row("unknown-case-1"),
+    ]
+    (run_dir / "candidates.jsonl").write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows)
+    )
+    (run_dir / "safety-cases.json").write_text(json.dumps(_make_safety_cases_json()))
+    # Only 2 verbatim, 0 paraphrase -> must fail on verbatim count
+    with pytest.raises(ValueError, match="verbatim"):
+        run.build_repeatability_subset(run_dir, cases_file=cases_file)
