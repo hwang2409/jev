@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 import artifacts
+import pytest
 import run
 
 FIXTURE = Path(__file__).parent / "runs" / "fixture-dev"

@@ -25,6 +25,7 @@ from zeta.core.context import MEMORY_INJECTION_PREFIX
 from zeta.providers.jev import (
     _parse_memory_relevance,
     build_memory_relevance_request,
+    runtime_preset,
 )
 from zeta.runtime.loop import (
     MEMORY_INJECTION_EXCERPT_CHARS,
@@ -160,6 +161,93 @@ def formation_state(request: Mapping[str, Any]) -> Any:
     from jm.client import State
 
     return State("harness", json.dumps(request["state"], ensure_ascii=False, sort_keys=True))
+
+
+class AdapterError(RuntimeError):
+    """The complete production judgment path could not produce valid coverage."""
+
+
+def evaluate_production(
+    request: Mapping[str, Any], client: Any = None, *, cache_store: Any = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Run the production ``runtime_preset``/``State``/``judge`` path.
+
+    ``client`` is the sole seam: it is either a JevClient-like ``evaluate``
+    object or a callable accepting ``(state, questions, model)``.  Everything
+    around that boundary is the same synchronous runner used by production,
+    including formation, parsing, terminal coverage, and the jm cache.
+    """
+    from jm.client import FormationReport, judge
+
+    questions = request["questions"]
+    state = formation_state(request)
+    preset = runtime_preset(questions)
+    if model is not None and model != preset.model:
+        from dataclasses import replace
+        preset = replace(preset, data={**preset.data, "model": model})
+    if client is None:
+        judge_fn = None
+    elif hasattr(client, "evaluate"):
+        def judge_fn(call_state: Any, call_questions: Any, configured_model: str) -> Any:
+            response = client.evaluate(call_state, call_questions, model=configured_model)
+            if isinstance(response, Mapping):
+                from dataclasses import replace
+
+                from jm.answers import parse_judge_response
+                answers = response.get("answers", {})
+                answers = {
+                    key: ({"type": "noul", **value} if isinstance(value, Mapping) and "type" not in value else value)
+                    for key, value in answers.items()
+                } if isinstance(answers, Mapping) else answers
+                parsed = parse_judge_response({"answers": answers}, call_questions)
+                served = response.get("served_model")
+                return replace(parsed, served_model=served, usage=response.get("usage"))
+
+            return response
+    else:
+        def judge_fn(call_state: Any, call_questions: Any, configured_model: str) -> Any:
+            try:
+                response = client(call_state, call_questions, configured_model)
+            except TypeError:
+                response = client(request)
+            if isinstance(response, Mapping):
+                from jm.answers import parse_judge_response
+                payload = response
+                answers = payload.get("answers")
+                if isinstance(answers, Mapping):
+                    answers = {
+                        key: ({"type": "noul", **value} if isinstance(value, Mapping) and "type" not in value else value)
+                        for key, value in answers.items()
+                    }
+                    payload = {**payload, "answers": answers}
+                from dataclasses import replace
+                parsed = parse_judge_response(payload, call_questions)
+                return replace(parsed, served_model=payload.get("served_model"), usage=payload.get("usage"))
+            return response
+    records = list(judge(
+        preset, (state,), formation_report=FormationReport(),
+        cache_store=cache_store, judge_fn=judge_fn,
+    ))
+    coverage = next((record for record in records if record.to_dict().get("record_type") == "coverage"), None)
+    if coverage is None or coverage.to_dict().get("coverage") != "complete":
+        raise AdapterError("Jev judgment did not produce complete terminal coverage")
+    result = next((record for record in records if record.to_dict().get("record_type") == "result"), None)
+    if result is None:
+        error = next((record for record in records if record.to_dict().get("record_type") == "error"), None)
+        detail = error.to_dict().get("error", {}) if error is not None else {}
+        raise AdapterError(str(detail) or "Jev judgment failed")
+    payload = result.to_dict()
+    return {
+        "answers": payload["answers"],
+        "usage": result.usage,
+        "served_model": (
+            payload.get("meta", {}).get("served_model")
+            if payload.get("meta", {}).get("served_model") not in {None, "unknown"}
+            else None
+        ),
+        "configured_model": payload.get("meta", {}).get("model"),
+    }
 
 
 class ScoreValidationError(ValueError):

@@ -2,7 +2,7 @@
 
 **STATUS: AWAITING REAL RUN — this checkout contains no authoritative score or safety claim.**
 
-The tooling emits the following report structure for each immutable run:
+No authoritative calibration, repeatability, or safety run has been performed in this checkout. The tooling is prepared to emit the following report structure for a future immutable run:
 
 ## Run identity and provenance
 

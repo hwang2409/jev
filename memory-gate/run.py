@@ -317,17 +317,30 @@ def generate_candidates(case_path: Path, output: Path, *, pausanias_executable: 
 
 
 def _client_response(client: Any, request: Mapping[str, Any], *, model: str) -> Mapping[str, Any]:
-    if hasattr(client, "evaluate"):
-        response = client.evaluate(request["state"], request["questions"], model=model)
-    elif callable(client):
-        response = client(request)
-    else:
-        raise TypeError("client must be callable or expose evaluate")
-    if hasattr(response, "answers"):
-        return {"answers": response.answers}
+    """Cross the one production-adapter seam and retain response metadata."""
+    response = pipeline.evaluate_production(request, client, model=model)
     if not isinstance(response, Mapping):
-        raise TypeError("jm client response must be a mapping")
+        raise TypeError("production adapter response must be a mapping")
     return response
+
+
+def _cache_key(request: Mapping[str, Any], model: str) -> str:
+    """Use jm's canonical v3 cache envelope, with a versioned fallback."""
+    try:
+        from jm.cache import build_cache_envelope, cache_key
+        envelope = build_cache_envelope(
+            wire_state=request["state"], questions=request["questions"], model=model,
+        )
+        return cache_key(envelope)
+    except (ImportError, KeyError, TypeError, ValueError):
+        return fingerprint({
+            "cache_schema": "memory-gate-adapter/v1",
+            "request_schema": 1,
+            "protocol_version": "0.0.1",
+            "model": model,
+            "adapter_version": "memory-gate-production-adapter/v1",
+            "request": request,
+        })
 
 
 def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
@@ -344,9 +357,11 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
     for case in cases:
         candidates = prepare_candidates(case, case.get("retrieved", case.get("candidates", [])))
         request = pipeline.build_request(str(case["query"]), candidates)
-        key = fingerprint({"model": model, "request": request})
-        cache_file = cache_dir / f"{key}.json" if cache_dir else None
+        key = _cache_key(request, model)
+        cache_file = cache_dir / f"{key.removeprefix('sha256:')}.json" if cache_dir else None
         error = None
+        configured_model = model
+        served_model = model
         try:
             if cache_file and cache_file.exists() and not bypass_cache:
                 response = json.loads(cache_file.read_text())
@@ -355,6 +370,12 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
                 if cache_file:
                     cache_file.parent.mkdir(parents=True, exist_ok=True)
                     cache_file.write_text(json.dumps(response, sort_keys=True))
+            configured_model = str(response.get("configured_model") or model)
+            served_model = str(response.get("served_model") or configured_model)
+            if served_model in {"", "unknown", "unscored", "configured", "None"}:
+                raise ValueError("authoritative response omitted served model identity")
+            if served_model != configured_model:
+                raise ValueError(f"served model {served_model!r} differs from configured {configured_model!r}")
             scores = pipeline.parse_scores(response, candidates)
         except (KeyError, OSError, TypeError, ValueError, RuntimeError) as exc:  # request errors invalidate the run
             scores, error = {}, f"{type(exc).__name__}: {exc}"
@@ -366,7 +387,13 @@ def score_cases(cases: Sequence[Mapping[str, Any]], client: Any, *, model: str,
                    "coverage": error is None and cid in scores,
                    "untruncated_excerpt_hash": candidate["content_hash"], "presented_excerpt": candidate["excerpt"]}
             row.update(provenance_defaults)
-            row["canonical_request_hash"] = fingerprint(request)
+            namespaced = [
+                {**candidate, "id": f"{case['case_id']}:{candidate['id']}"}
+                for candidate in candidates
+            ]
+            row["canonical_request_hash"] = fingerprint(
+                pipeline.build_request(str(case["query"]), namespaced)
+            )
             rows.append(row)
     return rows
 
@@ -387,6 +414,16 @@ def run_repeatability(cases: Sequence[Mapping[str, Any]], client: Any, *, model:
         replicates.append({"replicate": index, "configured_model_id": model,
                            "served_model_id": model, "scores": rows,
                            "cache_bypassed": index > 0})
+    if len(replicates) != 6:
+        raise ValueError("repeatability requires exactly six replicates")
+    expected_ids = {str(row["candidate_id"]) for row in replicates[0]["scores"]}
+    for replicate in replicates:
+        rows = replicate.get("scores", [])
+        ids = {str(row["candidate_id"]) for row in rows}
+        if len(rows) != len(expected_ids) or ids != expected_ids or any(
+            row.get("score") is None or row.get("request_error") for row in rows
+        ):
+            raise ValueError("repeatability refuses missing or errored scores")
     result = repeatability(replicates, tau)
     result["strata"] = {name: [case.get("case_id", case.get("id")) for case in values[:4]]
                          for name, values in strata.items()}
@@ -438,8 +475,18 @@ def safety_result(scores: Sequence[Mapping[str, Any]], tau: float, *, witness_co
     by_case: dict[str, list[Mapping[str, Any]]] = {}
     for row in scores:
         by_case.setdefault(str(row["case_id"]), []).append(row)
-    false_injections = sum(any(row.get("score") is not None and row["score"] > tau for row in rows)
-                           for rows in by_case.values())
+    false_injections = 0
+    for rows in by_case.values():
+        candidates = [
+            {"id": row["candidate_id"], "path": row["path"],
+             "heading": row["heading"], "excerpt": row["presented_excerpt"]}
+            for row in rows
+        ]
+        scores_by_id = {row["candidate_id"]: row.get("score") for row in rows}
+        if any(row.get("coverage") is not True for row in rows):
+            raise ValueError("safety scores have incomplete production coverage")
+        if select_blocks(candidates, scores_by_id, tau):
+            false_injections += 1
     return freeze_safety(output, witness_commit=witness_commit, tau=tau,
                          false_injections=false_injections, total=len(by_case),
                          repeatability_data=repeatability_data)
@@ -472,13 +519,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         tau = float(unknown[unknown.index("--tau") + 1]) if "--tau" in unknown else TAU_REFERENCE
         lock_witness(p / "LOCK.json", [p / "candidates.jsonl", p / "scores.jsonl", p / "labels.jsonl", p / "report.md"], tau)
         return 0
-    if args.command == "score" and "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety":
+    if args.command == "score" and "--lane" in unknown and unknown[unknown.index("--lane") + 1] == "safety" and "--cases" not in unknown:
         if "--witness" not in unknown:
             raise SystemExit("safety scoring requires --witness <commit>")
-        run = Path(unknown[unknown.index("--run") + 1])
-        remote = args.remote
-        verify_witness(run / "LOCK.json", unknown[unknown.index("--witness") + 1], remote=remote, safety_outputs=[run / "safety.json", run / "safety-scores.jsonl"])
+        run_dir = Path(unknown[unknown.index("--run") + 1])
+        verify_witness(run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
+                       remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"])
         raise SystemExit("phase C not implemented: safety scoring is deferred")
+    if args.command == "score" and "--cases" in unknown:
+        lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
+        run_dir = Path(unknown[unknown.index("--run") + 1])
+        cases = load_cases(Path(unknown[unknown.index("--cases") + 1]))
+        model = unknown[unknown.index("--model") + 1] if "--model" in unknown else "typesafe-ai/jev"
+        response_path = Path(unknown[unknown.index("--responses") + 1]) if "--responses" in unknown else None
+        if response_path is None:
+            raise SystemExit("offline score requires --responses JSON")
+        response_data = json.loads(response_path.read_text())
+        responses = iter(response_data if isinstance(response_data, list) else [response_data])
+        def file_client(_request):
+            try:
+                return next(responses)
+            except StopIteration as exc:
+                raise RuntimeError("response fixture exhausted") from exc
+        if lane == "safety":
+            if "--witness" not in unknown:
+                raise SystemExit("safety scoring requires --witness <commit>")
+            witness = verify_witness(
+                run_dir / "LOCK.json", unknown[unknown.index("--witness") + 1],
+                remote=args.remote, safety_outputs=[run_dir / "safety.json", run_dir / "safety-scores.jsonl"],
+            )
+            scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache", bypass_cache=True)
+            write_jsonl(run_dir / "safety-scores.jsonl", scores)
+            safety_result(scores, float(json.loads((run_dir / "LOCK.json").read_text())["tau"]),
+                          witness_commit=witness, output=run_dir / "safety.json")
+            return 0
+        scores = score_cases(cases, file_client, model=model, cache_dir=run_dir / "cache")
+        provenance = {
+            "case_set_fingerprint": "runtime", "corpus_fingerprint": "runtime",
+            "pausanias_revision": "runtime", "retrieval_config": {"mode": "production"},
+            "production_builder_hash": artifacts.authoritative_production_builder_hash(),
+            "configured_model_id": model, "served_model_id": model,
+            "harness_revision": "runtime", "jm_revision": "runtime",
+        }
+        candidates = candidate_rows(cases, provenance)
+        artifacts.write_artifact(run_dir, candidates, scores,
+                                 [{**row, "label": "negative"} for row in candidates], "")
+        return 0
     if args.command == "report":
         run_dir = Path(unknown[unknown.index("--run") + 1])
         # Refuse before reading partial streams: validity is all-or-nothing.
@@ -512,8 +598,29 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
     if args.command == "posthoc-safety-curve":
         run_dir = Path(unknown[unknown.index("--run") + 1])
-        validate_artifact(run_dir)
-        print((run_dir / "report.md").read_text())
+        lock_path = run_dir / "LOCK.json"
+        if not lock_path.exists():
+            raise SystemExit("posthoc safety curve requires LOCK.json")
+        lock = json.loads(lock_path.read_text())
+        score_path = run_dir / "safety-scores.jsonl"
+        if not score_path.exists():
+            raise SystemExit("posthoc safety curve requires frozen safety-scores.jsonl")
+        scores = read_jsonl(score_path)
+        by_case: dict[str, list[dict[str, Any]]] = {}
+        for row in scores:
+            by_case.setdefault(str(row["case_id"]), []).append(row)
+        boundaries = sorted({float(row["score"]) for row in scores})
+        curve = []
+        for tau in boundaries + [float(lock["tau"])]:
+            injected = 0
+            for rows in by_case.values():
+                candidates = [{"id": r["candidate_id"], "path": r["path"],
+                               "heading": r["heading"], "excerpt": r["presented_excerpt"]} for r in rows]
+                if select_blocks(candidates, {r["candidate_id"]: r["score"] for r in rows}, tau):
+                    injected += 1
+            curve.append({"tau": tau, "false_injections": injected,
+                          "total": len(by_case), "rate": ratio(injected, len(by_case))})
+        write_posthoc_curve(run_dir / "posthoc-safety-curve.json", curve)
         return 0
     if args.command == "candidates":
         lane = unknown[unknown.index("--lane") + 1] if "--lane" in unknown else "calibration"
